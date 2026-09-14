@@ -56,7 +56,7 @@ private:
   /** Maps block hashes to pointers in vTemplates.  Does not own the memory.  */
   std::map<uint256, const CBlock*> blocks;
   /** Maps coinbase script hashes to pointers in vTemplates.  Does not own the memory.  */
-  std::map<CScriptID, const CBlock*> curBlocks;
+  std::map<CScriptID, const node::CBlockTemplate*> curBlocks;
 
   /** The current extra nonce for block creation.  */
   unsigned extraNonce = 0;

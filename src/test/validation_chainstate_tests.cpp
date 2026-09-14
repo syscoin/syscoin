@@ -28,17 +28,20 @@
 #include <pubkey.h> // SYSCOIN: delegated governance signature fixtures.
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <script/script.h>
 #include <sync.h>
 #include <spork.h> // SYSCOIN: signed payment-switch regression.
 #include <test/util/chainstate.h>
+#include <test/util/auxpow_miner.h>
 #include <test/util/coins.h>
 #include <test/util/logging.h>
 #include <test/util/net.h>
 #include <test/util/pq_registry_read_error.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
+#include <test/util/validation.h>
 #include <uint256.h>
 #include <util/time.h>
 #include <validation.h>
@@ -49,6 +52,7 @@
 #include <node/kernel_notifications.h>
 #include <node/miner.h>
 #include <txdb.h>
+#include <txmempool.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -4528,7 +4532,8 @@ BOOST_FIXTURE_TEST_CASE(governance_activation_blocks_unchanged_authority_reuse,
 static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
                                       bool check_templates,
                                       bool check_read_errors = false,
-                                      bool check_signing_read_errors = false)
+                                      bool check_signing_read_errors = false,
+                                      bool check_mining_caches = false)
 {
     using Access = governance_tests::CGovernanceManagerTestAccess;
     using namespace llmq::pq;
@@ -4539,9 +4544,10 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
     constexpr int preparation_height{1295};
     // Templates need a real payment epoch as well as post-activation signing
     // heights. The original vote-height profile remains before epoch zero.
-    const int creator_height{check_templates || check_signing_read_errors ? 1446 : 1296};
-    const int vote_height{check_templates || check_signing_read_errors ? 1448 : 1298};
-    const int final_height{check_signing_read_errors ? 1452 : check_templates ? 1449 : 1299};
+    const bool payment_epoch{check_templates || check_signing_read_errors || check_mining_caches};
+    const int creator_height{payment_epoch ? 1446 : 1296};
+    const int vote_height{payment_epoch ? 1448 : 1298};
+    const int final_height{check_signing_read_errors ? 1452 : payment_epoch ? 1449 : 1299};
     std::vector<uint256> hashes(final_height + 1);
     std::vector<CBlockIndex> indices(final_height + 1);
     for (int height{0}; height <= final_height; ++height) {
@@ -4563,19 +4569,34 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
         Consensus::Params& consensus;
         const Consensus::Params original_consensus;
         CBlockIndex* original_tip;
+        const uint256 original_coins_tip;
         std::unique_ptr<CDeterministicMNManager> original_manager;
         ~RestoreFixtureState()
         {
             LOCK(::cs_main);
             governance->ObserveChainTip(nullptr);
             chainman.ActiveChain().SetTip(*original_tip);
+            chainman.ActiveChainstate().CoinsTip().SetBestBlock(original_coins_tip);
             deterministicMNManager = std::move(original_manager);
             consensus = original_consensus;
         }
     } restore{chainman, consensus, consensus,
               WITH_LOCK(::cs_main, return chainman.ActiveTip()),
+              WITH_LOCK(::cs_main, return chainman.ActiveChainstate().CoinsTip().GetBestBlock()),
               std::move(deterministicMNManager)};
     BOOST_REQUIRE(restore.original_tip != nullptr);
+    if (check_mining_caches) {
+        // The cache regression uses the normal assembler validity checks.
+        // Its empty candidate needs a consistent header ancestry and parent
+        // coins marker alongside the exact authenticated DMN/registry state.
+        for (auto& index : indices) {
+            index.nVersion = restore.original_tip->nVersion;
+            index.nBits = restore.original_tip->nBits;
+            index.nTime = restore.original_tip->nTime - final_height + index.nHeight;
+        }
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().CoinsTip().SetBestBlock(hashes[final_height]);
+    }
     consensus.DIP0003Height = preparation_height - 1;
     consensus.DIP0003EnforcementHeight = preparation_height - 1;
     consensus.nPQPreparationHeight = preparation_height;
@@ -4591,7 +4612,7 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
     const uint256 pro_tx_hash{uint256{161}};
     const COutPoint collateral{uint256{162}, 0};
     std::shared_ptr<LocalOperatorKeyManager> signing_keys;
-    if (check_signing_read_errors) {
+    if (check_signing_read_errors || check_mining_caches) {
         slhdsa::KeyGenerationSeed key_seed{};
         key_seed[0] = 0x75;
         auto global_key{slhdsa::GenerateSecretKey(key_seed)};
@@ -4608,7 +4629,7 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
     auto member_state{std::make_shared<CDeterministicMNState>()};
     member_state->keyIDOwner = fixture.coinbaseKey.GetPubKey().GetID();
     member_state->keyIDVoting = fixture.coinbaseKey.GetPubKey().GetID();
-    if (check_templates || check_signing_read_errors) {
+    if (payment_epoch) {
         member_state->scriptPayout = GetScriptForDestination(
             WitnessV0KeyHash(fixture.coinbaseKey.GetPubKey()));
     }
@@ -4739,6 +4760,26 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
         BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
         return encoded;
     };
+    const auto signed_authorization = [&](const CBlockIndex& signing_block,
+                                          const uint256& signature_hash,
+                                          GovernanceAuthPurpose purpose) {
+        BOOST_REQUIRE(signing_keys);
+        GovernanceAuthorization authorization;
+        authorization.signed_height = signing_block.nHeight;
+        authorization.signed_block_hash = signing_block.GetBlockHash();
+        authorization.pro_tx_hash = pro_tx_hash;
+        authorization.global_key_version = 1;
+        const auto digest{GetGovernanceAuthorizationHash(
+            consensus.hashGenesisBlock, operator_state.global_key,
+            authorization, purpose, signature_hash)};
+        BOOST_REQUIRE(digest);
+        BOOST_REQUIRE(purpose == GovernanceAuthPurpose::TRIGGER
+            ? signing_keys->SignGovernanceTrigger(*digest, authorization.signature)
+            : signing_keys->SignGovernanceVote(*digest, authorization.signature));
+        std::vector<unsigned char> encoded;
+        BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+        return encoded;
+    };
     const auto insert_admitted_trigger = [&](int signed_height,
                                              uint256 proposal_hash) {
         std::vector<CGovernancePayment> payments;
@@ -4749,9 +4790,13 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
             uint256{}, /*revision=*/1,
             GetTime<std::chrono::seconds>().count(), uint256{},
             schedule.GetHexStrData()};
+        trigger.SetMasternodeOutpoint(collateral);
         Governance::Object wire{trigger.Object()};
         wire.masternodeOutpoint = collateral;
-        wire.vchSig = encoded_authorization(indices[signed_height]);
+        wire.vchSig = check_mining_caches
+            ? signed_authorization(indices[signed_height], trigger.GetSignatureHash(),
+                                   GovernanceAuthPurpose::TRIGGER)
+            : encoded_authorization(indices[signed_height]);
         CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
         stream << wire;
         CGovernanceObject decoded;
@@ -4760,6 +4805,220 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
     };
     const uint256 trigger_hash{
         insert_admitted_trigger(creator_height, uint256{165})};
+    if (check_mining_caches) {
+        BOOST_REQUIRE(fixture.m_node.mempool);
+        BOOST_REQUIRE(fixture.m_node.connman);
+        auto& mempool{*fixture.m_node.mempool};
+        const auto& tip{indices[final_height]};
+        BOOST_REQUIRE_EQUAL(event_height, final_height + 1);
+        BOOST_REQUIRE(AreSuperblocksEnabled());
+        Access::SetInitialized(*governance, true);
+        governance->ObserveChainTip(nullptr);
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChain().SetTip(indices[final_height]);
+        }
+        if (chainman.IsInitialBlockDownload()) {
+            static_cast<TestChainstateManager&>(chainman).JumpOutOfIbd();
+        }
+        masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
+        BOOST_REQUIRE(governance->RevalidatePQGovernance(tip));
+        BOOST_REQUIRE(governance->IsReadyForTip(&tip));
+        BOOST_REQUIRE(CSuperblockManager::GetSuperblockTriggerState(
+            event_height, &tip) == SuperblockTriggerState::NOT_TRIGGERED);
+        const auto trigger{WITH_LOCK(governance->cs,
+            return *governance->FindConstGovernanceObject(trigger_hash))};
+        std::string authorization_error;
+        BOOST_REQUIRE(trigger.CheckPQSignature(tip,
+            deterministicMNManager->GetListForBlock(&tip), authorization_error) ==
+            GovernanceAuthResult::VALID);
+
+        const CScript payout{GetScriptForDestination(PKHash(fixture.coinbaseKey.GetPubKey()))};
+        const CTxOut payment{COIN, payout};
+        const std::array<CScript, 2> miner_scripts{
+            CScript{} << OP_TRUE, CScript{} << OP_TRUE << OP_TRUE};
+        auxpow_tests::AuxpowMinerForTest miner;
+        const auto aux_block = [&](std::size_t script_index) {
+            uint256 target;
+            LOCK(miner.cs);
+            return miner.getCurrentBlock(chainman, mempool,
+                miner_scripts[script_index], target);
+        };
+        const auto block_bytes = [](const CBlock& block) {
+            // Advertised AuxPoW work has the version bit but no proof until
+            // submission. Preserve every stored wire field without invoking
+            // CBlockHeader's serializer, which requires a completed proof.
+            BOOST_REQUIRE(block.auxpow == nullptr);
+            CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
+            stream << static_cast<const CPureBlockHeader&>(block)
+                   << block.vtx << block.vchNEVMBlockData;
+            return std::vector<std::byte>{stream.begin(), stream.end()};
+        };
+        const auto get_template = [&](const std::optional<std::string>& longpoll = std::nullopt) {
+            node::JSONRPCRequest request;
+            request.context = &fixture.m_node;
+            request.strMethod = "getblocktemplate";
+            request.params = UniValue{UniValue::VARR};
+            UniValue options{UniValue::VOBJ};
+            UniValue rules{UniValue::VARR};
+            rules.push_back("segwit");
+            options.pushKV("rules", rules);
+            if (longpoll) options.pushKV("longpollid", *longpoll);
+            request.params.push_back(options);
+            return tableRPC.execute(request);
+        };
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        std::atomic<unsigned> assemblies{0};
+        DebugLogHelper count_assemblies{"CreateNewBlock(): block weight", [&](const std::string* line) {
+            if (line) ++assemblies;
+            return false;
+        }};
+        const auto transaction_updates{mempool.GetTransactionsUpdated()};
+        const auto template_time{GetTime()};
+        const auto check_unchanged_inputs = [&] {
+            BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == &tip);
+            BOOST_CHECK_EQUAL(mempool.GetTransactionsUpdated(), transaction_updates);
+            BOOST_CHECK_EQUAL(GetTime(), template_time);
+        };
+        const auto check_gbt_payment = [&](const UniValue& result, bool funded) {
+            BOOST_CHECK_EQUAL(result["previousblockhash"].get_str(), tip.GetBlockHash().GetHex());
+            const auto& payments{result["superblock"].get_array()};
+            BOOST_REQUIRE_EQUAL(payments.size(), funded ? 1U : 0U);
+            if (funded) {
+                BOOST_CHECK_EQUAL(payments[0]["script"].get_str(), HexStr(payout));
+                BOOST_CHECK_EQUAL(payments[0]["amount"].getInt<int64_t>(), COIN);
+            }
+        };
+        const auto initial_gbt{get_template()};
+        check_gbt_payment(initial_gbt, false);
+        std::array<const CBlock*, 2> old_blocks{};
+        std::array<std::vector<std::byte>, 2> old_bytes;
+        std::array<uint256, 2> old_hashes;
+        for (std::size_t i{0}; i < old_blocks.size(); ++i) {
+            old_blocks[i] = aux_block(i);
+            BOOST_REQUIRE(old_blocks[i]);
+            BOOST_CHECK_EQUAL(std::count(old_blocks[i]->vtx[0]->vout.begin(),
+                                        old_blocks[i]->vtx[0]->vout.end(), payment), 0);
+            old_hashes[i] = old_blocks[i]->GetHash();
+            old_bytes[i] = block_bytes(*old_blocks[i]);
+        }
+        BOOST_REQUIRE_EQUAL(assemblies.load(), 3U);
+        BOOST_CHECK_EQUAL(get_template().write(), initial_gbt.write());
+        for (std::size_t i{0}; i < old_blocks.size(); ++i) BOOST_CHECK(aux_block(i) == old_blocks[i]);
+        BOOST_CHECK_EQUAL(assemblies.load(), 3U);
+
+        const auto make_vote = [&](vote_signal_enum_t signal) {
+            CGovernanceVote vote{collateral, trigger_hash, signal, VOTE_OUTCOME_YES};
+            vote.SetSignature(signed_authorization(indices[vote_height],
+                vote.GetSignatureHash(), GovernanceAuthPurpose::TRIGGER_VOTE));
+            return vote;
+        };
+        const auto funding_vote{make_vote(VOTE_SIGNAL_FUNDING)};
+        const auto unchanged_payment_vote{make_vote(VOTE_SIGNAL_VALID)};
+        const auto admit = [&](const CGovernanceVote& vote) {
+            CGovernanceException exception;
+            BOOST_REQUIRE_MESSAGE(Access::ProcessVote(*governance, vote, exception,
+                *fixture.m_node.connman), exception.what());
+            const auto retained{Access::RetainedVote(*governance, trigger_hash, vote.GetHash())};
+            BOOST_REQUIRE(retained);
+            BOOST_CHECK(retained->HasSameWireEncoding(vote));
+        };
+
+        // The existing longpoll id must observe a payment change without a
+        // block/mempool notification. Cleanup alone changes g_best_block so
+        // a failed wake assertion cannot leave a blocked worker behind.
+        struct LongpollCleanup {
+            const uint256 original_best{WITH_LOCK(g_best_block_mutex, return g_best_block)};
+            const bool original_running{IsRPCRunning()};
+            std::future<UniValue> pending;
+            ~LongpollCleanup()
+            {
+                if (pending.valid()) {
+                    WITH_LOCK(g_best_block_mutex, g_best_block.SetNull());
+                    g_best_block_cv.notify_all();
+                    pending.wait();
+                }
+                WITH_LOCK(g_best_block_mutex, g_best_block = original_best);
+                if (!original_running) InterruptRPC();
+            }
+        } longpoll;
+        if (!longpoll.original_running) StartRPC();
+        WITH_LOCK(g_best_block_mutex, g_best_block = tip.GetBlockHash());
+        longpoll.pending = std::async(std::launch::async, [&] {
+            return get_template(initial_gbt["longpollid"].get_str());
+        });
+        BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::milliseconds{100}) ==
+                      std::future_status::timeout);
+        admit(funding_vote);
+        check_unchanged_inputs();
+        BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::seconds{10}) ==
+                      std::future_status::ready);
+        const auto funded_gbt{longpoll.pending.get()};
+        check_gbt_payment(funded_gbt, true);
+        BOOST_CHECK_EQUAL(assemblies.load(), 4U);
+        // A client may start longpoll only after the vote was admitted. Its
+        // old id must still name the old payment decision, rather than take
+        // a fresh baseline and wait for another change.
+        longpoll.pending = std::async(std::launch::async, [&] {
+            return get_template(initial_gbt["longpollid"].get_str());
+        });
+        BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::seconds{10}) ==
+                      std::future_status::ready);
+        BOOST_CHECK_EQUAL(longpoll.pending.get().write(), funded_gbt.write());
+        BOOST_CHECK_EQUAL(assemblies.load(), 4U);
+        BOOST_CHECK_EQUAL(get_template().write(), funded_gbt.write());
+        std::array<const CBlock*, 2> funded_blocks{};
+        for (std::size_t i{0}; i < funded_blocks.size(); ++i) {
+            funded_blocks[i] = aux_block(i);
+            BOOST_REQUIRE(funded_blocks[i]);
+            BOOST_CHECK(funded_blocks[i] != old_blocks[i]);
+            BOOST_CHECK(funded_blocks[i]->GetHash() != old_hashes[i]);
+            BOOST_CHECK_EQUAL(std::count(funded_blocks[i]->vtx[0]->vout.begin(),
+                                        funded_blocks[i]->vtx[0]->vout.end(), payment), 1);
+        }
+        BOOST_CHECK_EQUAL(assemblies.load(), 6U);
+        longpoll.pending = std::async(std::launch::async, [&] {
+            return get_template(funded_gbt["longpollid"].get_str());
+        });
+        BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::milliseconds{100}) ==
+                      std::future_status::timeout);
+        admit(unchanged_payment_vote);
+        check_unchanged_inputs();
+        check_gbt_payment(get_template(), true);
+        for (std::size_t i{0}; i < funded_blocks.size(); ++i) BOOST_CHECK(aux_block(i) == funded_blocks[i]);
+        BOOST_CHECK_EQUAL(assemblies.load(), 6U);
+        BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::milliseconds{1200}) ==
+                      std::future_status::timeout);
+
+        {
+            struct RestoreInitialization {
+                ~RestoreInitialization() { Access::SetInitialized(*governance, true); }
+            } restore_initialization;
+            Access::SetInitialized(*governance, false);
+            governance->ObserveChainTip(nullptr);
+            const auto unavailable = [](const UniValue& error) {
+                return error["message"].get_str().find("unavailable") != std::string::npos;
+            };
+            BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::seconds{10}) ==
+                          std::future_status::ready);
+            BOOST_CHECK_EXCEPTION(longpoll.pending.get(), UniValue, unavailable);
+            BOOST_CHECK_EXCEPTION(get_template(), UniValue, unavailable);
+            for (std::size_t i{0}; i < funded_blocks.size(); ++i) {
+                BOOST_CHECK_EXCEPTION(aux_block(i), UniValue, unavailable);
+            }
+            BOOST_CHECK_EQUAL(assemblies.load(), 6U);
+        }
+        check_gbt_payment(get_template(), true);
+        for (std::size_t i{0}; i < funded_blocks.size(); ++i) {
+            BOOST_CHECK(aux_block(i) == funded_blocks[i]);
+            LOCK(miner.cs);
+            BOOST_CHECK(miner.lookupSavedBlock(old_hashes[i].GetHex()) == old_blocks[i]);
+            BOOST_CHECK(block_bytes(*old_blocks[i]) == old_bytes[i]);
+        }
+        BOOST_CHECK_EQUAL(assemblies.load(), 6U);
+        check_unchanged_inputs();
+        return;
+    }
     CGovernanceVote vote{
         collateral, trigger_hash, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
     vote.SetTime(100);
@@ -5351,6 +5610,16 @@ BOOST_FIXTURE_TEST_CASE(
     TestChain100Setup)
 {
     CheckGovernanceFutureVotes(*this, /*check_templates=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    superblock_mining_caches_follow_admitted_votes_and_wake_longpoll,
+    TestChain100Setup)
+{
+    CheckGovernanceFutureVotes(*this, /*check_templates=*/false,
+                              /*check_read_errors=*/false,
+                              /*check_signing_read_errors=*/false,
+                              /*check_mining_caches=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(

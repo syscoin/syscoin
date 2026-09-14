@@ -283,7 +283,8 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
         if (!FillBlockPayments(
                 m_chainstate.m_chain, coinbaseTx, nHeight, blockReward,
                 nFees, pblocktemplate->voutMasternodePayments,
-                pblocktemplate->voutSuperblockPayments)) {
+                pblocktemplate->voutSuperblockPayments,
+                &pblocktemplate->hashSuperblockPayments)) {
             throw std::runtime_error(
                 "Payment or governance state is unavailable for block template");
         }

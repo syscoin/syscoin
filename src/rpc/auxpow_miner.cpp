@@ -10,6 +10,7 @@
 #include <evo/specialtx.h>
 #include <llmq/btc_header_policy.h>
 #include <llmq/pq_btcc.h>
+#include <masternode/masternodepayments.h>
 #include <net.h>
 #include <rpc/blockchain.h>
 #include <rpc/protocol.h>
@@ -92,10 +93,16 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
     }
     const bool btcpRequired = llmq::pq::IsBTCPREVCommitmentHeight(Params().GetConsensus(), nextHeight);
     const auto& btcPrevHash{btcPrev.hash};
+    const auto paymentFingerprint{
+        GetMiningPaymentFingerprint(*chainman.ActiveTip())};
+    if (!paymentFingerprint) {
+      throw JSONRPCError(RPC_INTERNAL_ERROR,
+                         "Payment or governance state is unavailable for block template");
+    }
     CScriptID scriptID (scriptPubKey);
     auto iter = curBlocks.find(scriptID);
     if (iter != curBlocks.end())
-      pblockCur = iter->second;
+      pblockCur = &iter->second->block;
     // SYSCOIN
     const bool templateHasCorrectBTCPREV{
         TemplateMatchesBTCPREV(pblockCur, btcpRequired, btcPrevHash)};
@@ -104,6 +111,7 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
         || pindexPrev != chainman.ActiveTip()
         || (mempool.GetTransactionsUpdated () != txUpdatedLast
             && GetTime () - startTime > 60)
+        || iter->second->hashSuperblockPayments != *paymentFingerprint
         || !templateHasCorrectBTCPREV)
       {
         if (pindexPrev != chainman.ActiveTip())
@@ -125,6 +133,14 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
                                 btcpRequired ? btcPrevHash : std::nullopt);
         if (newBlock == nullptr)
           throw JSONRPCError (RPC_OUT_OF_MEMORY, "out of memory");
+
+        // Bind new work to the decision actually used by its coinbase. Old
+        // advertised blocks remain unchanged in the submission lookup.
+        if (GetMiningPaymentFingerprint(*chainman.ActiveTip()) !=
+            std::make_optional(newBlock->hashSuperblockPayments)) {
+          throw JSONRPCError(RPC_INTERNAL_ERROR,
+                             "Superblock payments changed during block assembly; retry");
+        }
 
         /* Update state only when CreateNewBlock succeeded.  */
         txUpdatedLast = mempool.GetTransactionsUpdated ();
@@ -155,7 +171,7 @@ AuxpowMiner::getCurrentBlock (ChainstateManager &chainman, const CTxMemPool& mem
         /* Save in our map of constructed blocks.  */
         pblockCur = &newBlock->block;
         // SYSCOIN
-        curBlocks[scriptID] = pblockCur;
+        curBlocks[scriptID] = newBlock.get();
         blocks[pblockCur->GetHash ()] = pblockCur;
         templates.push_back (std::move (newBlock));
       }

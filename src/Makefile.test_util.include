@@ -8,6 +8,7 @@ EXTRA_LIBRARIES += \
   $(LIBTEST_UTIL)
 
 TEST_UTIL_H = \
+  test/util/auxpow_miner.h \
   test/util/blockfilter.h \
   test/util/chainstate.h \
   test/util/coins.h \

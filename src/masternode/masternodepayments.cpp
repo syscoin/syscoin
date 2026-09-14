@@ -15,6 +15,8 @@
 #include <consensus/merkle.h>
 #include <evo/deterministicmns.h>
 #include <evo/specialtx.h>
+#include <hash.h>
+#include <stdexcept>
 #include <string>
 
 CMasternodePayments mnpayments;
@@ -250,29 +252,89 @@ bool IsBlockPayeeValid(CChain& activeChain, const CTransaction& txNew, int nBloc
     return false;
 }
 
-bool FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, std::vector<CTxOut>& voutMasternodePaymentsRet, std::vector<CTxOut>& voutSuperblockPaymentsRet)
+namespace {
+bool SelectSuperblockPayments(
+    int nBlockHeight, const CBlockIndex* expected_tip, bool enabled,
+    std::vector<CTxOut>& payments) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    // only create superblocks if spork is enabled AND if superblock is actually triggered
-    // (height should be validated inside)
-    if (AreSuperblocksEnabled() &&
-        CSuperblock::IsValidBlockHeight(nBlockHeight)) {
-        const CBlockIndex* expected_tip{activeChain.Tip()};
-        const auto trigger_state{
-            CSuperblockManager::GetSuperblockTriggerState(
-                nBlockHeight, expected_tip)};
-        if (trigger_state == SuperblockTriggerState::UNAVAILABLE) {
-            LogPrintf("%s -- governance state unavailable at height %d\n",
-                      __func__, nBlockHeight);
+    AssertLockHeld(cs_main);
+    payments.clear();
+    if (!enabled) return true;
+    if (governance == nullptr) return false;
+
+    // Funding eligibility and the winning trigger must come from one
+    // governance state, including when a mining RPC is reusing old work.
+    LOCK(governance->cs);
+    const auto trigger_state{
+        CSuperblockManager::GetSuperblockTriggerState(
+            nBlockHeight, expected_tip)};
+    if (trigger_state == SuperblockTriggerState::UNAVAILABLE) {
+        LogPrintf("%s -- governance state unavailable at height %d\n",
+                  __func__, nBlockHeight);
+        return false;
+    }
+    if (trigger_state == SuperblockTriggerState::TRIGGERED) {
+        LogPrint(BCLog::GOBJECT, "%s -- triggered superblock creation at height %d\n", __func__, nBlockHeight);
+        if (!CSuperblockManager::GetSuperblockPayments(
+                nBlockHeight, payments, expected_tip)) {
             return false;
         }
-        if (trigger_state == SuperblockTriggerState::TRIGGERED) {
-            LogPrint(BCLog::GOBJECT, "%s -- triggered superblock creation at height %d\n", __func__, nBlockHeight);
-            if (!CSuperblockManager::GetSuperblockPayments(
-                    nBlockHeight, voutSuperblockPaymentsRet,
-                    expected_tip)) {
-                return false;
-            }
+    }
+    return true;
+}
+
+uint256 SuperblockPaymentFingerprint(
+    bool enabled, const std::vector<CTxOut>& payments)
+{
+    if (!enabled) return {};
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << enabled << payments;
+    return writer.GetHash();
+}
+} // namespace
+
+std::optional<uint256> GetMiningPaymentFingerprint(const CBlockIndex& parent)
+{
+    AssertLockHeld(cs_main);
+    const int height{parent.nHeight + 1};
+    if (height < Params().GetConsensus().DIP0003Height ||
+        !CSuperblock::IsValidBlockHeight(height) ||
+        !AreSuperblocksEnabled()) {
+        return uint256{};
+    }
+    try {
+        // Preserve fresh assembly's same-parent recovery path without
+        // repeating authority reconstruction while it is already ready.
+        if (governance == nullptr || !governance->IsValid() ||
+            (!governance->IsReadyForTip(&parent) &&
+             !governance->RevalidatePQGovernance(parent))) {
+            return std::nullopt;
         }
+        std::vector<CTxOut> payments;
+        if (!SelectSuperblockPayments(height, &parent, true, payments)) {
+            return std::nullopt;
+        }
+        return SuperblockPaymentFingerprint(true, payments);
+    } catch (const std::runtime_error& e) {
+        LogPrintf("%s -- governance payment state unavailable at height %d: %s\n",
+                  __func__, height, e.what());
+        return std::nullopt;
+    }
+}
+
+bool FillBlockPayments(CChain& activeChain, CMutableTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount &fees, std::vector<CTxOut>& voutMasternodePaymentsRet, std::vector<CTxOut>& voutSuperblockPaymentsRet, uint256* superblock_payment_hash)
+{
+    LOCK(cs_main);
+    const bool superblocks_enabled{
+        CSuperblock::IsValidBlockHeight(nBlockHeight) && AreSuperblocksEnabled()};
+    if (!SelectSuperblockPayments(nBlockHeight, activeChain.Tip(),
+                                 superblocks_enabled,
+                                 voutSuperblockPaymentsRet)) {
+        return false;
+    }
+    if (superblock_payment_hash != nullptr) {
+        *superblock_payment_hash = SuperblockPaymentFingerprint(
+            superblocks_enabled, voutSuperblockPaymentsRet);
     }
 
     const CAmount nHalfFee = fees / 2;

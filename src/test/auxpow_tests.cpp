@@ -21,6 +21,7 @@
 #include <univalue.h>
 #include <validationinterface.h>
 
+#include <test/util/auxpow_miner.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -552,53 +553,6 @@ BOOST_FIXTURE_TEST_CASE (auxpow_pow, BasicTestingSetup)
 }
 
 /* ************************************************************************** */
-
-/**
- * Helper class that is friend to AuxpowMiner and makes the tested methods
- * accessible to the test code.
- */
-class AuxpowMinerForTest : public AuxpowMiner
-{
-
-public:
-
-  using Resolution = AuxpowMiner::BTCPrevResolution;
-
-  using AuxpowMiner::cs;
-
-  using AuxpowMiner::lookupSavedBlock;
-  using AuxpowMiner::TemplateMatchesBTCPREV;
-
-  Resolution resolveBTCPrevHash(
-      ChainstateManager& chainman,
-      const std::optional<uint256>& requested)
-  {
-    return AuxpowMiner::resolveBTCPrevHash(chainman, requested);
-  }
-
-  const CBlock* getCurrentBlock(
-      ChainstateManager& chainman, const CTxMemPool& mempool,
-      const CScript& scriptPubKey, uint256& target,
-      const std::optional<uint256>& btc_prev = std::nullopt)
-      EXCLUSIVE_LOCKS_REQUIRED(cs)
-  {
-    const int32_t next_height{
-        WITH_LOCK(cs_main, return chainman.ActiveHeight() + 1)};
-    return AuxpowMiner::getCurrentBlock(
-        chainman, mempool, scriptPubKey, target,
-        Resolution{next_height, btc_prev});
-  }
-
-  const CBlock* getCurrentBlockWithResolution(
-      ChainstateManager& chainman, const CTxMemPool& mempool,
-      const CScript& scriptPubKey, uint256& target,
-      const Resolution& resolution) EXCLUSIVE_LOCKS_REQUIRED(cs)
-  {
-    return AuxpowMiner::getCurrentBlock(
-        chainman, mempool, scriptPubKey, target, resolution);
-  }
-
-};
 
 // SYSCOIN BEGIN: Helpers for exercising multiple mutable AuxPoW wrappers that
 // share one pure child-header identity.

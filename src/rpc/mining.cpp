@@ -676,11 +676,9 @@ static RPCHelpMan getblocktemplate()
                 },
         [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    // SYSCOIN
-    bool isSBSportActive = AreSuperblocksEnabled();
     node::NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
-    LOCK(cs_main);
+    WAIT_LOCK(cs_main, main_lock);
     std::string strMode = "template";
     UniValue lpval = NullUniValue;
     std::set<std::string> setClientRules;
@@ -764,6 +762,77 @@ static RPCHelpMan getblocktemplate()
         // SYSCOIN END: Public activation IBD gate.
     }
 
+    static unsigned int nTransactionsUpdatedLast;
+    const CTxMemPool& mempool = EnsureMemPool(node);
+
+    if (!lpval.isNull())
+    {
+        uint256 hashWatchedChain;
+        unsigned int nTransactionsUpdatedLastLP;
+        std::optional<uint256> paymentWatched;
+        // Policy can activate by time alone, so watch scheduled heights even
+        // while superblocks are currently disabled.
+        const int next_height{active_chain.Height() + 1};
+        const bool watch_payments{
+            next_height >= chainman.GetConsensus().DIP0003Height &&
+            CSuperblock::IsValidBlockHeight(next_height)};
+
+        if (lpval.isStr())
+        {
+            // Format: <hashBestChain><mempool update count>:<payment fingerprint>.
+            // A pre-fingerprint token returns fresh work at a superblock height.
+            const std::string& lpstr = lpval.get_str();
+            const auto separator{lpstr.find(':', 64)};
+            hashWatchedChain = ParseHashV(lpstr.substr(0, 64), "longpollid");
+            nTransactionsUpdatedLastLP = LocaleIndependentAtoi<int64_t>(
+                lpstr.substr(64, separator == std::string::npos
+                                    ? std::string::npos : separator - 64));
+            if (separator != std::string::npos) {
+                paymentWatched = ParseHashV(lpstr.substr(separator + 1), "longpollid payments");
+            }
+        }
+        else
+        {
+            hashWatchedChain = active_chain.Tip()->GetBlockHash();
+            nTransactionsUpdatedLastLP = nTransactionsUpdatedLast;
+            if (watch_payments) {
+                paymentWatched = GetMiningPaymentFingerprint(*active_chain.Tip());
+            }
+        }
+
+        const auto payments_changed = [&]() {
+            LOCK(cs_main);
+            if (active_chain.Tip()->GetBlockHash() != hashWatchedChain) return true;
+            const auto current{GetMiningPaymentFingerprint(*active_chain.Tip())};
+            return !current || !paymentWatched || *current != *paymentWatched;
+        };
+        {
+            REVERSE_LOCK(main_lock);
+            auto checktxtime{std::chrono::steady_clock::now() + std::chrono::minutes(1)};
+            while (IsRPCRunning()) {
+                if (watch_payments) {
+                    // Never take cs_main/governance while holding the block
+                    // notification mutex. Polling also observes cleanup,
+                    // readiness and timed policy changes without vote events.
+                    if (payments_changed()) break;
+                }
+                WAIT_LOCK(g_best_block_mutex, block_lock);
+                if (g_best_block != hashWatchedChain || !IsRPCRunning()) break;
+                const auto deadline{watch_payments
+                    ? std::min(checktxtime, std::chrono::steady_clock::now() + std::chrono::seconds(1))
+                    : checktxtime};
+                if (g_best_block_cv.wait_until(block_lock, deadline) == std::cv_status::timeout &&
+                    std::chrono::steady_clock::now() >= checktxtime) {
+                    if (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLastLP) break;
+                    checktxtime += std::chrono::seconds(10);
+                }
+            }
+        }
+
+        if (!IsRPCRunning())
+            throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Shutting down");
+    }
+
     // SYSCOIN
     // A verified empty set can be mined, but unavailable PQ state must not
     // inherit the legacy no-payee fallback or a cached template's allowance.
@@ -779,61 +848,10 @@ static RPCHelpMan getblocktemplate()
     }
 
     // next bock is a superblock and we need governance info to correctly construct it
-    if (!fRegTest && !fSigNet && isSBSportActive
+    if (!fRegTest && !fSigNet && AreSuperblocksEnabled()
         && !masternodeSync.IsSynced()
         && CSuperblock::IsValidBlockHeight(node.chainman->ActiveHeight() + 1))
             throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "Syscoin Core is syncing with network...");
-    
-
-    static unsigned int nTransactionsUpdatedLast;
-    const CTxMemPool& mempool = EnsureMemPool(node);
-
-    if (!lpval.isNull())
-    {
-        // Wait to respond until either the best block changes, OR a minute has passed and there are more transactions
-        uint256 hashWatchedChain;
-        std::chrono::steady_clock::time_point checktxtime;
-        unsigned int nTransactionsUpdatedLastLP;
-
-        if (lpval.isStr())
-        {
-            // Format: <hashBestChain><nTransactionsUpdatedLast>
-            const std::string& lpstr = lpval.get_str();
-
-            hashWatchedChain = ParseHashV(lpstr.substr(0, 64), "longpollid");
-            nTransactionsUpdatedLastLP = LocaleIndependentAtoi<int64_t>(lpstr.substr(64));
-        }
-        else
-        {
-            // NOTE: Spec does not specify behaviour for non-string longpollid, but this makes testing easier
-            hashWatchedChain = active_chain.Tip()->GetBlockHash();
-            nTransactionsUpdatedLastLP = nTransactionsUpdatedLast;
-        }
-
-        // Release lock while waiting
-        LEAVE_CRITICAL_SECTION(cs_main);
-        {
-            checktxtime = std::chrono::steady_clock::now() + std::chrono::minutes(1);
-
-            WAIT_LOCK(g_best_block_mutex, lock);
-            while (g_best_block == hashWatchedChain && IsRPCRunning())
-            {
-                if (g_best_block_cv.wait_until(lock, checktxtime) == std::cv_status::timeout)
-                {
-                    // Timeout: Check transactions for update
-                    // without holding the mempool lock to avoid deadlocks
-                    if (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLastLP)
-                        break;
-                    checktxtime += std::chrono::seconds(10);
-                }
-            }
-        }
-        ENTER_CRITICAL_SECTION(cs_main);
-
-        if (!IsRPCRunning())
-            throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Shutting down");
-        // TODO: Maybe recheck connections/IBD and (if something wrong) send an expires-immediately template to stop miners?
-    }
 
     const Consensus::Params& consensusParams = chainman.GetParams().GetConsensus();
 
@@ -855,11 +873,18 @@ static RPCHelpMan getblocktemplate()
             "NEVM block production is waiting for execution recovery");
     }
 
+    const auto paymentFingerprint{GetMiningPaymentFingerprint(*active_chain.Tip())};
+    if (!paymentFingerprint) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Payment or governance state is unavailable for block template");
+    }
+
     // Update block
     static CBlockIndex* pindexPrev;
     static int64_t time_start;
     static std::unique_ptr<CBlockTemplate> pblocktemplate;
-    if (pindexPrev != active_chain.Tip() ||
+    if (pindexPrev != active_chain.Tip() || !pblocktemplate ||
+        pblocktemplate->hashSuperblockPayments != *paymentFingerprint ||
         (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast && GetTime() - time_start > 5))
     {
         // Clear pindexPrev so future calls make a new block, despite any failures from here on
@@ -876,6 +901,13 @@ static RPCHelpMan getblocktemplate()
         if (!pblocktemplate)
             throw JSONRPCError(RPC_OUT_OF_MEMORY, "Out of memory");
 
+        // Policy or cleanup can change during assembly. Publish only work
+        // whose actual coinbase still matches the current payment decision.
+        if (GetMiningPaymentFingerprint(*active_chain.Tip()) !=
+            std::make_optional(pblocktemplate->hashSuperblockPayments)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR,
+                               "Superblock payments changed during block assembly; retry");
+        }
         // Need to update only after we know CreateNewBlock succeeded
         pindexPrev = pindexPrevNew;
     }
@@ -999,7 +1031,8 @@ static RPCHelpMan getblocktemplate()
     result.pushKV("transactions", transactions);
     result.pushKV("coinbaseaux", aux);
     result.pushKV("coinbasevalue", (int64_t)pblock->vtx[0]->vout[0].nValue);
-    result.pushKV("longpollid", active_chain.Tip()->GetBlockHash().GetHex() + ToString(nTransactionsUpdatedLast));
+    result.pushKV("longpollid", active_chain.Tip()->GetBlockHash().GetHex() +
+        ToString(nTransactionsUpdatedLast) + ":" + pblocktemplate->hashSuperblockPayments.GetHex());
     result.pushKV("target", hashTarget.GetHex());
     result.pushKV("mintime", (int64_t)pindexPrev->GetMedianTimePast()+1);
     result.pushKV("mutable", aMutable);
