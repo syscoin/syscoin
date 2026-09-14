@@ -3163,7 +3163,7 @@ BOOST_AUTO_TEST_CASE(async_sign_lanes_reserve_and_prioritize_local_initiator)
         third_batch.front().deadline_micros);
 }
 
-BOOST_AUTO_TEST_CASE(async_sign_backlog_precedes_governance_across_ack_gap)
+BOOST_AUTO_TEST_CASE(async_runnable_signing_has_priority_and_governance_uses_ack_gap)
 {
     ActiveMasternodeInfoGuard active_info_guard;
     auto initiator_secret{DeterministicKey(0)};
@@ -3263,6 +3263,8 @@ BOOST_AUTO_TEST_CASE(async_sign_backlog_precedes_governance_across_ack_gap)
 
     bool governance_result{false};
     GlobalSignature governance_signature{};
+    std::promise<void> governance_finished;
+    auto governance_ready{governance_finished.get_future()};
     std::thread governance{[&] {
         governance_result = SignActiveMasternodeGovernanceVote(
             transcript.initiator_pro_tx_hash, initiator_key.key_version,
@@ -3270,6 +3272,7 @@ BOOST_AUTO_TEST_CASE(async_sign_backlog_precedes_governance_across_ack_gap)
         governance_order.store(
             sequence.fetch_add(1, std::memory_order_acq_rel) + 1,
             std::memory_order_release);
+        governance_finished.set_value();
     }};
 
     const auto waiter_deadline{
@@ -3293,8 +3296,14 @@ BOOST_AUTO_TEST_CASE(async_sign_backlog_precedes_governance_across_ack_gap)
     auto first_completion{
         async.WaitForCompletions(std::chrono::seconds{40})};
     ActiveMasternodeGlobalSigningStats ack_gap_stats;
+    bool governance_used_idle_slot{false};
     if (first_completion.size() == 1) {
+        // The queued successor cannot run until the real result is consumed.
+        // Governance must finish without acknowledging or cancelling it.
+        governance_used_idle_slot = governance_ready.wait_for(
+            std::chrono::seconds{30}) == std::future_status::ready;
         ack_gap_stats = GetActiveMasternodeGlobalSigningStats();
+        BOOST_CHECK_EQUAL(mnauth_calls.load(std::memory_order_acquire), 1);
         async.AcknowledgeSignCompletion(
             first_completion.front().context.peer_id,
             first_completion.front().registration_generation,
@@ -3329,20 +3338,116 @@ BOOST_AUTO_TEST_CASE(async_sign_backlog_precedes_governance_across_ack_gap)
     BOOST_REQUIRE_EQUAL(first_completion.size(), 1U);
     BOOST_REQUIRE(first_completion.front().Success());
     BOOST_CHECK_EQUAL(ack_gap_stats.active_operations, 0U);
-    BOOST_CHECK_EQUAL(ack_gap_stats.governance_waiters, 1U);
-    BOOST_CHECK_EQUAL(ack_gap_stats.mnauth_demands, 1U);
+    BOOST_REQUIRE(governance_used_idle_slot);
+    BOOST_CHECK_EQUAL(ack_gap_stats.governance_waiters, 0U);
+    BOOST_CHECK_EQUAL(ack_gap_stats.mnauth_demands, 0U);
     BOOST_REQUIRE_EQUAL(second_completion.size(), 1U);
     BOOST_REQUIRE(second_completion.front().Success());
     BOOST_REQUIRE(governance_result);
     BOOST_CHECK_EQUAL(mnauth_calls.load(std::memory_order_acquire), 2);
     BOOST_CHECK_EQUAL(first_mnauth_order.load(std::memory_order_acquire), 1);
-    BOOST_CHECK_EQUAL(second_mnauth_order.load(std::memory_order_acquire), 2);
-    BOOST_CHECK_EQUAL(governance_order.load(std::memory_order_acquire), 3);
+    BOOST_CHECK_EQUAL(second_mnauth_order.load(std::memory_order_acquire), 3);
+    BOOST_CHECK_EQUAL(governance_order.load(std::memory_order_acquire), 2);
     BOOST_CHECK_GT(second_deadline_headroom,
                    std::chrono::duration_cast<std::chrono::microseconds>(
                        std::chrono::seconds{10}).count());
     BOOST_CHECK_EQUAL(
         GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(async_ack_and_cancel_restore_both_lanes_and_expired_work_stays_unsigned)
+{
+    const auto initiator_key{StoredKey(DeterministicKey(0), 1, 100)};
+    const auto responder_key{StoredKey(DeterministicKey(64), 2, 101)};
+    const auto transcript{Transcript(initiator_key, responder_key)};
+    for (const bool cancel_completion : {false, true}) {
+        std::atomic<int64_t> now{100};
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool second_entered{false};
+        bool release_second{false};
+        std::atomic<unsigned> sign_calls{0};
+        CMNAuth::AsyncHooks hooks;
+        hooks.now_micros = [&] { return now.load(); };
+        hooks.sign = [&](const uint256&, uint32_t, const uint256&, GlobalSignature& signature) {
+            if (++sign_calls == 2) {
+                std::unique_lock lock{mutex};
+                second_entered = true;
+                cv.notify_all();
+                if (!cv.wait_for(lock, std::chrono::seconds{10}, [&] { return release_second; })) {
+                    return false;
+                }
+            }
+            signature[0] = 1;
+            return true;
+        };
+        CMNAuth::AsyncConfig config;
+        config.sign_timeout = std::chrono::microseconds{10};
+        CMNAuth::AsyncProcessor async{config, std::move(hooks)};
+        struct Cleanup {
+            std::mutex& mutex;
+            std::condition_variable& cv;
+            bool& release;
+            ~Cleanup()
+            {
+                std::lock_guard lock{mutex};
+                release = true;
+                cv.notify_all();
+            }
+        } cleanup{mutex, cv, release_second};
+        for (int64_t peer : {1, 2, 3}) BOOST_REQUIRE(async.RegisterPeer(peer));
+        const auto enqueue = [&](int64_t peer, bool initiator) {
+            return async.EnqueueSign(AsyncSignRequest(AsyncContext(
+                peer, peer, initiator_key, responder_key, transcript,
+                initiator, /*authenticated_remote=*/!initiator)));
+        };
+        const auto acknowledge = [&](const CMNAuth::Completion& completion) {
+            async.AcknowledgeSignCompletion(completion.context.peer_id,
+                completion.registration_generation, completion.deadline_micros);
+        };
+        BOOST_REQUIRE(enqueue(1, true).Accepted());
+        auto first{async.WaitForCompletions(std::chrono::seconds{5})};
+        BOOST_REQUIRE_EQUAL(first.size(), 1U);
+        BOOST_REQUIRE(first.front().Success());
+        BOOST_REQUIRE(enqueue(2, true).Accepted());
+        BOOST_REQUIRE(enqueue(3, false).Accepted());
+        BOOST_REQUIRE_EQUAL(async.GetStats().sign_queue_depth, 2U);
+        BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+        // A nonmatching acknowledgement cannot reactivate queued reservations.
+        async.AcknowledgeSignCompletion(first.front().context.peer_id,
+            first.front().registration_generation + 1, first.front().deadline_micros);
+        BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+        BOOST_REQUIRE_EQUAL(sign_calls.load(), 1U);
+        if (cancel_completion) {
+            async.CancelPeer(first.front().context.peer_id);
+        } else {
+            acknowledge(first.front());
+        }
+        {
+            std::unique_lock lock{mutex};
+            BOOST_REQUIRE(cv.wait_for(lock, std::chrono::seconds{5}, [&] { return second_entered; }));
+        }
+        // The running initiator and queued responder both regain priority.
+        BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 2U);
+        {
+            std::lock_guard lock{mutex};
+            release_second = true;
+        }
+        cv.notify_all();
+        auto second{async.WaitForCompletions(std::chrono::seconds{5})};
+        BOOST_REQUIRE_EQUAL(second.size(), 1U);
+        BOOST_REQUIRE(second.front().Success());
+        BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+        now = 110;
+        acknowledge(second.front());
+        auto expired{async.WaitForCompletions(std::chrono::seconds{5})};
+        BOOST_REQUIRE_EQUAL(expired.size(), 1U);
+        BOOST_CHECK(expired.front().error == CMNAuth::CompletionError::EXPIRED);
+        BOOST_CHECK_EQUAL(sign_calls.load(), 2U);
+        BOOST_CHECK_EQUAL(async.GetStats().sign_expired_before_execution, 1U);
+        acknowledge(expired.front());
+        BOOST_CHECK_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(async_hook_exception_is_local_not_peer_crypto_failure)
@@ -3618,7 +3723,7 @@ BOOST_AUTO_TEST_CASE(async_interrupt_cancels_queues_without_joining_active_hooks
     BOOST_CHECK_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
 }
 
-BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waiters,
+BOOST_FIXTURE_TEST_CASE(live_validation_backpressure_progresses_before_mnauth_acknowledgement,
                         TestChain100Setup)
 {
     const auto tx{MakeTransactionRef(CreateValidMempoolTransaction(
@@ -3633,11 +3738,22 @@ BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waite
         BOOST_REQUIRE(m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true).
             m_result_type == MempoolAcceptResult::ResultType::VALID);
     }
+    CBlock current_block;
+    BOOST_REQUIRE(m_node.chainman->m_blockman.ReadBlockFromDisk(current_block, *original_tip));
     SyncWithValidationInterfaceQueue();
     CompletionPublicationFixture fixture{*this, /*outbound=*/true, /*rotate_key=*/false};
     const int original_sync_mode{masternodeSync.GetAssetID()};
     std::vector<CNode*> registered_nodes;
     std::thread broadcaster;
+    std::thread message_handler;
+    std::mutex callback_mutex;
+    std::condition_variable callback_cv;
+    bool release_callback{false};
+    std::promise<void> callback_entered;
+    auto callback_started{callback_entered.get_future()};
+    std::promise<void> message_finished;
+    auto message_result{message_finished.get_future()};
+    std::atomic_bool callback_timed_out{false};
     std::promise<bool> governance_signed;
     auto governance_result{governance_signed.get_future()};
     std::promise<TransactionError> broadcast_finished;
@@ -3649,16 +3765,28 @@ BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waite
         std::vector<CNode*>& nodes;
         std::thread& broadcaster;
         int original_sync_mode;
+        std::thread& message_handler;
+        std::mutex& callback_mutex;
+        std::condition_variable& callback_cv;
+        bool& release_callback;
         ~Cleanup()
         {
-            // Failure cleanup cancels queued peers first, so a failed bounded
-            // wait cannot leave a signer reservation blocking fixture teardown.
-            for (auto it{nodes.rbegin()}; it != nodes.rend(); ++it) peerman.FinalizeNode(**it);
+            {
+                std::lock_guard lock{callback_mutex};
+                release_callback = true;
+            }
+            callback_cv.notify_all();
+            // Interruption is failure/teardown cleanup only. The assertions
+            // below require live progress before reaching this point.
+            peerman.Interrupt();
+            if (message_handler.joinable()) message_handler.join();
             if (broadcaster.joinable()) broadcaster.join();
+            for (auto it{nodes.rbegin()}; it != nodes.rend(); ++it) peerman.FinalizeNode(**it);
             SyncWithValidationInterfaceQueue();
             masternodeSync.SetSyncMode(original_sync_mode);
         }
-    } cleanup{fixture.peerman, registered_nodes, broadcaster, original_sync_mode};
+    } cleanup{fixture.peerman, registered_nodes, broadcaster, original_sync_mode,
+              message_handler, callback_mutex, callback_cv, release_callback};
     masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
     const auto wait_until = [](const auto& predicate) {
         const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{30}};
@@ -3703,7 +3831,13 @@ BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waite
     }));
     begin_handshake(101);
     BOOST_REQUIRE_EQUAL(fixture.peerman.GetMNAuthAsyncStats().sign_queue_depth, 1U);
-    BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 1U);
+    BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+    // Pending peers stay alive throughout backpressure; neither timeout nor
+    // a disconnect flag may be needed to cancel their queued demand.
+    const CConnman::NodesSnapshot retained_peers{fixture.connman};
+    BOOST_REQUIRE_EQUAL(retained_peers.Nodes().size(), 2U);
+    registered_nodes.back()->fDisconnect = true;
+    registered_nodes.back()->SetMNAuthPending(CMNAuthPendingPhase::SIGN_PENDING, 1);
 
     // Admission above needs the fixture's authenticated registry tip. Return
     // to the mined chain for real mempool validation; the executor still owns
@@ -3716,6 +3850,16 @@ BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waite
     const uint256 governance_digest{NonNullHash(90'001)};
     CallFunctionInValidationInterfaceQueue([&, governance_digest] {
         try {
+            {
+                std::unique_lock lock{callback_mutex};
+                callback_entered.set_value();
+                if (!callback_cv.wait_for(lock, std::chrono::seconds{30},
+                                         [&] { return release_callback; })) {
+                    callback_timed_out = true;
+                    governance_signed.set_value(false);
+                    return;
+                }
+            }
             governance_signed.set_value(SignActiveMasternodeGovernanceTrigger(
                 fixture.context.connection.local.pro_tx_hash,
                 fixture.context.local_key.key_version, governance_digest,
@@ -3724,9 +3868,9 @@ BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waite
             governance_signed.set_exception(std::current_exception());
         }
     });
-    BOOST_REQUIRE(wait_until([] {
-        return GetActiveMasternodeGlobalSigningStats().governance_waiters == 1;
-    }));
+    BOOST_REQUIRE(callback_started.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+    for (unsigned i{0}; i < 12; ++i) CallFunctionInValidationInterfaceQueue([] {});
+    BOOST_REQUIRE_GT(GetMainSignals().CallbacksPending(), 10U);
     broadcaster = std::thread{[&] {
         try {
             broadcast_finished.set_value(node::BroadcastTransaction(
@@ -3744,11 +3888,40 @@ BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waite
     }));
     BOOST_REQUIRE(broadcast_result.wait_for(std::chrono::milliseconds{0}) == std::future_status::timeout);
 
-    ::Interrupt(m_node);
-    const auto interrupted_stats{fixture.peerman.GetMNAuthAsyncStats()};
-    BOOST_CHECK_EQUAL(interrupted_stats.sign_queue_depth, 0U);
-    BOOST_CHECK_EQUAL(interrupted_stats.completion_queue_depth, 0U);
-    BOOST_CHECK_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+    const auto callbacks_before_block{GetMainSignals().CallbacksPending()};
+    message_handler = std::thread{[&] {
+        try {
+            LOCK(NetEventsInterface::g_msgproc_mutex);
+            const CConnman::NodesSnapshot snapshot{fixture.connman};
+            CDataStream block_message{SER_NETWORK, PROTOCOL_VERSION};
+            block_message << current_block;
+            const std::atomic_bool interrupt{false};
+            fixture.peerman.ProcessMessage(*registered_nodes.front(), NetMsgType::BLOCK,
+                block_message, GetTime<std::chrono::microseconds>(), interrupt);
+            // The ordinary message-thread pump is reached only after block
+            // activation has drained its validation-queue backpressure.
+            fixture.peerman.ProcessAsyncCompletions();
+            message_finished.set_value();
+        } catch (...) {
+            message_finished.set_exception(std::current_exception());
+        }
+    }};
+    BOOST_REQUIRE(wait_until([&] {
+        return GetMainSignals().CallbacksPending() > callbacks_before_block;
+    }));
+    BOOST_REQUIRE(message_result.wait_for(std::chrono::milliseconds{0}) == std::future_status::timeout);
+    BOOST_REQUIRE_EQUAL(fixture.peerman.GetMNAuthAsyncStats().sign_completed, 1U);
+    BOOST_REQUIRE_EQUAL(fixture.peerman.GetMNAuthAsyncStats().sign_queue_depth, 1U);
+    BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
+    {
+        std::lock_guard lock{callback_mutex};
+        release_callback = true;
+    }
+    callback_cv.notify_all();
+    BOOST_REQUIRE(message_result.wait_for(std::chrono::seconds{30}) == std::future_status::ready);
+    message_result.get();
+    message_handler.join();
+    BOOST_CHECK(!callback_timed_out);
     BOOST_REQUIRE(broadcast_result.wait_for(std::chrono::seconds{30}) == std::future_status::ready);
     BOOST_CHECK(broadcast_result.get() == TransactionError::OK);
     BOOST_CHECK(broadcast_error.empty());
@@ -3758,8 +3931,21 @@ BOOST_FIXTURE_TEST_CASE(node_interrupt_releases_validation_and_transaction_waite
     BOOST_CHECK(slhdsa::Verify(fixture.context.local_key.public_key,
         std::span<const uint8_t>{governance_digest.begin(), governance_digest.size()},
         GetGlobalAuthContext(GlobalAuthPurpose::GOVERNANCE_TRIGGER), governance_signature));
-    BOOST_CHECK_EQUAL(fixture.peerman.GetMNAuthAsyncStats().sign_completed, 1U);
-    BOOST_CHECK_EQUAL(fixture.peerman.GetMNAuthAsyncStats().cancelled_jobs, 2U);
+    // The first acknowledgement was supplied by the ordinary pump, after
+    // live validation finished. Let its successor finish, then retain the
+    // existing early-interruption control for the remaining completion.
+    BOOST_REQUIRE(wait_until([&] {
+        const auto stats{fixture.peerman.GetMNAuthAsyncStats()};
+        return stats.sign_completed == 2 && stats.completion_queue_depth == 1;
+    }));
+    BOOST_CHECK(registered_nodes.back()->fDisconnect);
+    BOOST_CHECK_EQUAL(fixture.peerman.GetMNAuthAsyncStats().cancelled_jobs, 0U);
+    ::Interrupt(m_node);
+    const auto interrupted_stats{fixture.peerman.GetMNAuthAsyncStats()};
+    BOOST_CHECK_EQUAL(interrupted_stats.sign_queue_depth, 0U);
+    BOOST_CHECK_EQUAL(interrupted_stats.completion_queue_depth, 0U);
+    BOOST_CHECK_EQUAL(interrupted_stats.cancelled_jobs, 1U);
+    BOOST_CHECK_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
 }
 
 BOOST_AUTO_TEST_CASE(stale_sign_ack_cannot_release_reused_node_generation)

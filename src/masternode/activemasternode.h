@@ -120,11 +120,13 @@ bool SignActiveMasternodeGovernanceProposalVote(
     llmq::pq::GlobalSignature& signature);
 
 /**
- * Keep admitted MNAUTH signing demand ahead of governance signing.
+ * Keep runnable MNAUTH signing demand ahead of governance signing.
  *
  * The async executor owns one move-only reservation for every accepted
- * queued or in-flight sign job. This closes the completion-acknowledgement
- * gap where the next job is not yet an active signer waiter.
+ * runnable queued or in-flight sign job. Queued reservations are suspended
+ * while the worker waits for completion acknowledgement, then restored before
+ * it is woken. Governance can use that idle slot without depending on the
+ * message thread, while runnable MNAUTH work retains priority.
  */
 class ActiveMasternodeMNAUTHSigningDemand final {
 public:

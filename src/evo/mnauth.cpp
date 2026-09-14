@@ -463,7 +463,7 @@ struct CMNAuth::AsyncProcessor::Impl {
         uint64_t registration_generation{0};
         int64_t started_micros{0};
         int64_t deadline_micros{0};
-        ActiveMasternodeMNAUTHSigningDemand signing_demand;
+        std::optional<ActiveMasternodeMNAUTHSigningDemand> signing_demand;
     };
 
     static llmq::pq::MNAUTHSigningRuntimeConfig SigningLaneConfig(
@@ -577,6 +577,24 @@ struct CMNAuth::AsyncProcessor::Impl {
             : std::optional<PeerRegistration>{it->second};
     }
 
+    // Called with mutex held. Only runnable queued work may reserve the next
+    // private operation. An acknowledgement needs the message thread, which
+    // may itself be waiting for a governance validation callback to finish.
+    void UpdateQueuedSigningDemand()
+    {
+        const auto update = [&](auto& queue) {
+            for (auto& work : queue) {
+                if (sign_completion_outstanding) {
+                    work.signing_demand.reset();
+                } else if (!work.signing_demand) {
+                    work.signing_demand.emplace();
+                }
+            }
+        };
+        update(initiator_sign_queue);
+        update(responder_sign_queue);
+    }
+
     void PushCompletion(Completion completion,
                         const std::shared_ptr<std::atomic_bool>& cancelled)
     {
@@ -605,6 +623,7 @@ struct CMNAuth::AsyncProcessor::Impl {
                 completions.back().context.peer_id,
                 completions.back().registration_generation,
                 completions.back().deadline_micros};
+            UpdateQueuedSigningDemand();
         }
         lock.unlock();
         completion_ready.notify_all();
@@ -915,6 +934,7 @@ void CMNAuth::AsyncProcessor::CancelPeer(int64_t peer_id) noexcept
         if (m_impl->sign_completion_outstanding &&
             std::get<0>(*m_impl->sign_completion_outstanding) == peer_id) {
             m_impl->sign_completion_outstanding.reset();
+            m_impl->UpdateQueuedSigningDemand();
         }
         m_impl->stats.cancelled_jobs +=
             verify_before - m_impl->verify_queue.size() +
@@ -1103,7 +1123,8 @@ CMNAuth::EnqueueResult CMNAuth::AsyncProcessor::EnqueueSign(
         std::move(request.context), request.authorization_hash,
         request.signer_role, std::move(cancelled),
         registration->generation, now, deadline,
-        ActiveMasternodeMNAUTHSigningDemand{}});
+        std::nullopt});
+    m_impl->UpdateQueuedSigningDemand();
     result.deadline_micros = deadline;
     m_impl->sign_ready.notify_one();
     return result;
@@ -1140,6 +1161,7 @@ void CMNAuth::AsyncProcessor::AcknowledgeSignCompletion(
             return;
         }
         m_impl->sign_completion_outstanding.reset();
+        m_impl->UpdateQueuedSigningDemand();
     }
     m_impl->sign_ready.notify_one();
 }
