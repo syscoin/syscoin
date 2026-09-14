@@ -8,9 +8,12 @@
 #include <util/fs.h>
 #include <util/syserror.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <functional>
 #include <string>
+#include <thread>
 
 #ifndef WIN32
 #include <fcntl.h>
@@ -23,7 +26,9 @@ namespace node {
 
 // Preserve keys in place. An old copy/restore attempt may have left its only
 // complete key set in a temporary path; neither path establishes authority.
-inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std::string& error)
+inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std::string& error,
+                                    std::function<bool()> stop_owner = {},
+                                    std::chrono::milliseconds shutdown_timeout = std::chrono::seconds{40})
 {
     error.clear();
     try {
@@ -35,9 +40,9 @@ inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std
                 return false;
             }
         }
-        if (!reindex) return true;
+        if (!reindex && !stop_owner) return true;
 #ifdef WIN32
-        error = "Managed Geth reindex is not supported on WIN32 builds";
+        error = "Managed Geth startup is not supported on WIN32 builds";
         return false;
 #else
         const auto geth_dir = data_dir / "geth";
@@ -45,7 +50,7 @@ inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std
         for (const auto& dir : {geth_dir, geth_dir / "geth"}) {
             const auto status = fs::symlink_status(dir);
             if (status.type() != fs::file_type::not_found && !fs::is_directory(status)) {
-                error = "Geth reindex requires a directory at " + fs::PathToString(dir);
+                error = "Managed Geth requires a directory at " + fs::PathToString(dir);
                 return false;
             }
         }
@@ -67,7 +72,22 @@ inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std
         struct stat lock_stat{};
         if (::fstat(instance_lock.fd, &lock_stat) != 0) return lock_error(SysErrorString(errno));
         if (!S_ISREG(lock_stat.st_mode)) return lock_error("instance lock is not a regular file");
-        if (::flock(instance_lock.fd, LOCK_EX | LOCK_NB) != 0) return lock_error(SysErrorString(errno));
+        if (::flock(instance_lock.fd, LOCK_EX | LOCK_NB) != 0) {
+            const int lock_errno{errno};
+            if ((lock_errno != EWOULDBLOCK && lock_errno != EAGAIN) || !stop_owner) {
+                return lock_error(SysErrorString(lock_errno));
+            }
+            if (!stop_owner()) return lock_error("Unable to request Geth shutdown");
+            const auto deadline = std::chrono::steady_clock::now() + shutdown_timeout;
+            while (::flock(instance_lock.fd, LOCK_EX | LOCK_NB) != 0) {
+                const int retry_errno{errno};
+                if (retry_errno != EWOULDBLOCK && retry_errno != EAGAIN) return lock_error(SysErrorString(retry_errno));
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) return lock_error("Geth did not release its instance lock before the shutdown timeout");
+                std::this_thread::sleep_until(std::min(deadline, now + std::chrono::milliseconds{100}));
+            }
+        }
+        if (!reindex) return true;
         // Paired NEVM state and default ancients live in this database. Geth
         // also recognizes the older location directly below its data directory.
         fs::remove_all(geth_dir / "geth" / "chaindata");

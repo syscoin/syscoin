@@ -230,6 +230,96 @@ BOOST_FIXTURE_TEST_CASE(legacy_key_backups_block_startup_and_reindex_without_cha
 }
 
 #ifndef WIN32
+BOOST_FIXTURE_TEST_CASE(managed_geth_startup_stops_live_owner_before_preparing_database, BasicTestingSetup)
+{
+    for (const bool reindex : {false, true}) {
+        BOOST_TEST_CONTEXT((reindex ? "reindex" : "normal startup")) {
+            const fs::path root{m_path_root / (reindex ? "geth-stop-reindex" : "geth-stop-start")};
+            const fs::path lock_path{root / "geth/geth/LOCK"};
+            WriteProtectedGethFiles(root);
+            const auto protected_files{GethFileInventory(root)};
+            WriteGethTestFile(root / "geth/geth/chaindata/CURRENT", "live modern database\n");
+            WriteGethTestFile(root / "geth/chaindata/CURRENT", "live legacy database\n");
+            const auto original_files{GethFileInventory(root)};
+            const std::unique_ptr<FILE, decltype(&std::fclose)> owner{fsbridge::fopen(lock_path, "r+"), &std::fclose};
+            BOOST_REQUIRE(owner != nullptr);
+            BOOST_REQUIRE_EQUAL(flock(fileno(owner.get()), LOCK_EX | LOCK_NB), 0);
+            struct stat original_inode{};
+            BOOST_REQUIRE_EQUAL(fstat(fileno(owner.get()), &original_inode), 0);
+            int stop_calls{0};
+            std::string error;
+            BOOST_REQUIRE(node::PrepareGethDataDirectory(root, reindex, error, [&] {
+                ++stop_calls;
+                BOOST_CHECK(GethFileInventory(root) == original_files);
+                return flock(fileno(owner.get()), LOCK_UN) == 0;
+            }, std::chrono::milliseconds{20}));
+            BOOST_CHECK_EQUAL(stop_calls, 1);
+            BOOST_CHECK(error.empty());
+            BOOST_CHECK(GethFileInventory(root) == (reindex ? protected_files : original_files));
+            struct stat retained_inode{};
+            BOOST_REQUIRE_EQUAL(stat(lock_path.c_str(), &retained_inode), 0);
+            BOOST_CHECK_EQUAL(retained_inode.st_dev, original_inode.st_dev);
+            BOOST_CHECK_EQUAL(retained_inode.st_ino, original_inode.st_ino);
+            BOOST_CHECK_EQUAL(flock(fileno(owner.get()), LOCK_EX | LOCK_NB), 0);
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(managed_geth_startup_refuses_unresponsive_owner_without_database_changes, BasicTestingSetup)
+{
+    for (const bool request_sent : {false, true}) {
+        BOOST_TEST_CONTEXT((request_sent ? "shutdown timeout" : "shutdown request failed")) {
+            const fs::path root{m_path_root / (request_sent ? "geth-stop-timeout" : "geth-stop-refused")};
+            WriteProtectedGethFiles(root);
+            WriteGethTestFile(root / "geth/geth/chaindata/CURRENT", "live modern database\n");
+            WriteGethTestFile(root / "geth/chaindata/CURRENT", "live legacy database\n");
+            const auto original_files{GethFileInventory(root)};
+            const std::unique_ptr<FILE, decltype(&std::fclose)> owner{fsbridge::fopen(root / "geth/geth/LOCK", "r+"), &std::fclose};
+            BOOST_REQUIRE(owner != nullptr);
+            BOOST_REQUIRE_EQUAL(flock(fileno(owner.get()), LOCK_EX | LOCK_NB), 0);
+            int stop_calls{0};
+            std::string error;
+            const auto start{std::chrono::steady_clock::now()};
+            BOOST_CHECK(!node::PrepareGethDataDirectory(root, /*reindex=*/true, error, [&] {
+                ++stop_calls;
+                return request_sent;
+            }, std::chrono::milliseconds{20}));
+            const auto elapsed{std::chrono::steady_clock::now() - start};
+            BOOST_CHECK(elapsed < std::chrono::seconds{2});
+            if (request_sent) BOOST_CHECK(elapsed >= std::chrono::milliseconds{20});
+            BOOST_CHECK_EQUAL(stop_calls, 1);
+            BOOST_CHECK(error.find(request_sent ? "timeout" : "request") != std::string::npos);
+            BOOST_CHECK(GethFileInventory(root) == original_files);
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(managed_geth_startup_only_stops_a_contending_owner, BasicTestingSetup)
+{
+    const fs::path root{m_path_root / "geth-no-stop"};
+    int stop_calls{0};
+    const auto stop_owner = [&] { ++stop_calls; return false; };
+    std::string error;
+    BOOST_REQUIRE(node::PrepareGethDataDirectory(root, /*reindex=*/false, error, stop_owner));
+    BOOST_CHECK(fs::is_regular_file(root / "geth/geth/LOCK"));
+    WriteProtectedGethFiles(root);
+    const auto protected_files{GethFileInventory(root)};
+    WriteGethTestFile(root / "geth/geth/chaindata/CURRENT", "modern database\n");
+    WriteGethTestFile(root / "geth/chaindata/CURRENT", "legacy database\n");
+    BOOST_REQUIRE(node::PrepareGethDataDirectory(root, /*reindex=*/true, error, stop_owner));
+    BOOST_CHECK(GethFileInventory(root) == protected_files);
+    BOOST_CHECK_EQUAL(stop_calls, 0);
+
+    fs::remove(root / "geth/geth/LOCK");
+    WriteGethTestFile(root / "geth/geth/LOCK/unexpected-file", "must remain untouched\n");
+    WriteGethTestFile(root / "geth/geth/chaindata/CURRENT", "modern database\n");
+    const auto invalid_files{GethFileInventory(root)};
+    BOOST_CHECK(!node::PrepareGethDataDirectory(root, /*reindex=*/true, error, stop_owner));
+    BOOST_CHECK_EQUAL(stop_calls, 0);
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK(GethFileInventory(root) == invalid_files);
+}
+
 BOOST_FIXTURE_TEST_CASE(reindex_refuses_live_geth_owner_and_preserves_lock_identity, BasicTestingSetup)
 {
     const fs::path root{m_path_root / "geth-owned-reset"};

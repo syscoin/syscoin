@@ -238,11 +238,14 @@ place. Interrupted database removal can be retried without copying or
 relocating key files. Custom ancient database locations are not cleared by
 this operation and may require an explicit engine rebuild.
 
-Before removing either database, Core acquires Geth's exclusive instance
-lock at `geth/geth/LOCK` and holds it throughout removal. A surviving Geth
-process or a lock error blocks reindex without removing chain data, even
-when Core has no recorded Geth PID. Stop the engine before retrying. The
-lock file is preserved; its presence alone does not block reindex.
+Before managed startup or reindex, Core acquires Geth's exclusive instance
+lock at `geth/geth/LOCK`. If it is held, Core sends the existing shutdown
+request to the configured NEVM endpoint and waits up to 40 seconds for
+the lock. Cleanup remains blocked until Core holds that lock throughout
+removal. A shutdown failure, timeout, or lock error leaves chain data
+untouched. Core resets its NEVM request socket before launching the
+replacement, so a queued stop cannot reach the new engine. The lock file
+is preserved; its presence alone does not block startup.
 
 If `keystoretmp` or `nodekeytmp` exists from an older copy/restore attempt,
 managed startup and reindex stop before resetting data or launching Geth.

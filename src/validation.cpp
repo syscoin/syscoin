@@ -13904,10 +13904,28 @@ bool Chainstate::StartGethNode()
     // backups. Only a requested reindex clears the reconstructible database.
     const bool reindex = fReindexGeth.load();
     std::string preparation_error;
-    if (!node::PrepareGethDataDirectory(m_chainman.m_options.datadir, reindex, preparation_error)) {
+    bool stop_requested{false};
+    const bool prepared = node::PrepareGethDataDirectory(m_chainman.m_options.datadir, reindex, preparation_error, [&] {
+        if (m_chainman.m_interrupt) return false;
+        LogPrintf("%s: stopping the configured Geth instance before startup\n", __func__);
+        stop_requested = true;
+        bool response{false};
+        GetMainSignals().NotifyNEVMComms("disconnect", response);
+        return response;
+    });
+#if ENABLE_ZMQ
+    // Disconnect has no reply. Discard the old REQ socket, including any queued
+    // stop, before a replacement engine can receive requests on this endpoint.
+    if (stop_requested && (!g_zmq_notification_interface || !g_zmq_notification_interface->ResetNEVMConnection())) {
+        LogPrintf("%s: failed to reset the NEVM connection after stopping Geth\n", __func__);
+        return false;
+    }
+#endif
+    if (!prepared) {
         LogPrintf("%s: %s\n", __func__, preparation_error);
         return false;
     }
+    if (m_chainman.m_interrupt) return false;
     const fs::path dataDir = m_chainman.m_options.datadir / "geth";
     const fs::path bootstrap_status_path = dataDir / "geth" / GETH_STATE_BOOTSTRAP_STATUS_FILENAME;
     if (fs::exists(bootstrap_status_path)) {
