@@ -5,9 +5,47 @@
 #ifndef SYSCOIN_NODE_GETH_STARTUP_H
 #define SYSCOIN_NODE_GETH_STARTUP_H
 
+#include <util/fs.h>
+
 #include <chrono>
+#include <string>
 
 namespace node {
+
+// Preserve keys in place. An old copy/restore attempt may have left its only
+// complete key set in a temporary path; neither path establishes authority.
+inline bool PrepareGethDataDirectory(const fs::path& data_dir, bool reindex, std::string& error)
+{
+    error.clear();
+    try {
+        for (const auto* name : {"keystoretmp", "nodekeytmp"}) {
+            const auto backup = data_dir / name;
+            if (fs::symlink_status(backup).type() != fs::file_type::not_found) {
+                error = "Geth key backup requires manual recovery: " + fs::PathToString(backup) +
+                    ". Original and backup key files were left untouched.";
+                return false;
+            }
+        }
+        if (!reindex) return true;
+        const auto geth_dir = data_dir / "geth";
+        // Refuse ambiguous directory aliases before deleting any chain data.
+        for (const auto& dir : {geth_dir, geth_dir / "geth"}) {
+            const auto status = fs::symlink_status(dir);
+            if (status.type() != fs::file_type::not_found && !fs::is_directory(status)) {
+                error = "Geth reindex requires a directory at " + fs::PathToString(dir);
+                return false;
+            }
+        }
+        // Paired NEVM state and default ancients live in this database. Geth
+        // also recognizes the older location directly below its data directory.
+        fs::remove_all(geth_dir / "geth" / "chaindata");
+        fs::remove_all(geth_dir / "chaindata");
+        return true;
+    } catch (const fs::filesystem_error& e) {
+        error = "Unable to prepare Geth data directory: " + std::string{e.what()};
+        return false;
+    }
+}
 
 class GethStartupWaitState
 {

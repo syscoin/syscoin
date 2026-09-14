@@ -37,6 +37,7 @@
 #include <node/blockconnection.h>
 #include <node/blockstorage.h>
 #include <node/btcheader_state.h> // SYSCOIN: narrow managed-helper state API.
+#include <node/geth_startup.h>
 #include <node/utxo_snapshot.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
@@ -13060,25 +13061,6 @@ bool CBlockIndexDB::Prune(const uint32_t &nHeight) {
 }
 // SYSCOIN END: Retain pending index writes and deletions until batch success.
 
-void recursive_copy(const fs::path &src, const fs::path &dst)
-{
-  if (fs::exists(dst)){
-    throw std::runtime_error(dst.generic_string() + " exists");
-  }
-
-  if (fs::is_directory(src)) {
-    TryCreateDirectories(dst);
-    for (const auto &item : fs::directory_iterator(src)) {
-      recursive_copy(item.path(), dst/fs::u8path(fs::PathToString(item.path().filename())));
-    }
-  }
-  else if (fs::is_regular_file(src)) {
-    fs::copy(src, dst);
-  }
-  else {
-    throw std::runtime_error(dst.generic_string() + " not dir or file");
-  }
-}
 size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t written = fwrite(ptr, size, nmemb, stream);
     return written;
@@ -13918,6 +13900,14 @@ bool Chainstate::StartGethNode()
         LogPrintf("Could not find sysgeth\n");
         return false;
     }
+    // Every managed launch, including RPC restart, must refuse ambiguous old
+    // backups. Only a requested reindex clears the reconstructible database.
+    const bool reindex = fReindexGeth.load();
+    std::string preparation_error;
+    if (!node::PrepareGethDataDirectory(m_chainman.m_options.datadir, reindex, preparation_error)) {
+        LogPrintf("%s: %s\n", __func__, preparation_error);
+        return false;
+    }
     const fs::path dataDir = m_chainman.m_options.datadir / "geth";
     const fs::path bootstrap_status_path = dataDir / "geth" / GETH_STATE_BOOTSTRAP_STATUS_FILENAME;
     if (fs::exists(bootstrap_status_path)) {
@@ -13933,6 +13923,7 @@ bool Chainstate::StartGethNode()
     }
     if(gethpid > 0)
         LogPrintf("%s: Geth Started with pid %d\n", __func__, gethpid);
+    if (reindex) fReindexGeth = false;
     return true;
 #endif
 }
@@ -14047,82 +14038,12 @@ bool Chainstate::DoGethStartupProcedure() {
     if(m_chainman.m_interrupt) {
         return false;
     }
-    // hasn't started yet so start
-    if(!fReindexGeth) {
-        LogPrintf("%s: Stopping Geth\n", __func__);
-        StopGethNode(true);
-        LogPrintf("%s: Starting Geth because PID's were uninitialized\n", __func__);
-        if(!StartGethNode()) {
-            LogPrintf("%s: Failed to start Geth\n", __func__);
-            return false;
-        }
-    } else {
-        fReindexGeth = false;
-        LogPrintf("%s: Stopping Geth\n", __func__);
-        StopGethNode(true);
-        // copy wallet dir if exists
-        const fs::path dataDir = m_chainman.m_options.datadir;
-        const fs::path gethDir = dataDir / "geth";
-        const fs::path gethKeyStoreDir = gethDir / "keystore";
-        const fs::path gethNodeKeyPath = gethDir / "geth" / "nodekey";
-        const fs::path keyStoreTmpDir = dataDir / "keystoretmp";
-        const fs::path nodeKeyTmpDir = dataDir / "nodekeytmp";
-        bool existedKeystore = fs::exists(gethKeyStoreDir);
-        bool existedKeystoreTmp = fs::exists(keyStoreTmpDir);
-        if(existedKeystore && !existedKeystoreTmp){
-            LogPrintf("%s: Copying keystore for Geth to a temp directory\n", __func__);
-            try{
-                recursive_copy(gethKeyStoreDir, keyStoreTmpDir);
-            } catch(const  std::runtime_error& e) {
-                LogPrintf("Failed copying keystore geth directory to keystoretmp %s\n", e.what());
-                return false;
-            }
-        }
-        bool existedNodekey = fs::exists(gethNodeKeyPath);
-        bool existedNodekeyTmp = fs::exists(nodeKeyTmpDir);
-        if(existedNodekey && !existedNodekeyTmp){
-            LogPrintf("%s: Copying temporary nodekey\n", __func__);
-            try{
-                recursive_copy(gethNodeKeyPath, nodeKeyTmpDir);
-            } catch(const  std::runtime_error& e) {
-                LogPrintf("Failed copying nodekey %s\n", e.what());
-                return false;
-            }
-        }
-        LogPrintf("%s: Removing Geth data directory\n", __func__);
-        // clean geth data dir
-        fs::remove_all(gethDir);
-        UninterruptibleSleep(std::chrono::milliseconds{100});
-        // replace keystore dir
-        if(existedKeystore){
-            LogPrintf("%s: Replacing keystore with temp keystore directory\n", __func__);
-            try{
-                fs::create_directory(gethDir);
-                recursive_copy(keyStoreTmpDir, gethKeyStoreDir);
-            } catch(const  std::runtime_error& e) {
-                LogPrintf("Failed copying keystore geth keystoretmp directory to keystore %s\n", e.what());
-                return false;
-            }
-            fs::remove_all(keyStoreTmpDir);
-        }
-        // preserve nodekey file
-        if(existedNodekey){
-            LogPrintf("%s: Replacing nodekey with temp nodekey\n", __func__);
-            try{
-                fs::create_directory(gethDir / "geth");
-                recursive_copy(nodeKeyTmpDir, gethNodeKeyPath);
-            } catch(const  std::runtime_error& e) {
-                LogPrintf("Failed copying temporary nodekey %s\n", e.what());
-                return false;
-            }
-            fs::remove_all(nodeKeyTmpDir);
-        }
-        LogPrintf("%s: Restarting Geth \n", __func__);
-        if(!StartGethNode()) {
-            LogPrintf("%s: Failed to start Geth\n", __func__);
-            return false;
-        }
-        LogPrintf("%s: Done, waiting for resync...\n", __func__);
+    LogPrintf("%s: Stopping Geth\n", __func__);
+    StopGethNode(true);
+    LogPrintf("%s: Starting Geth\n", __func__);
+    if(!StartGethNode()) {
+        LogPrintf("%s: Failed to start Geth\n", __func__);
+        return false;
     }
     return true;
 }

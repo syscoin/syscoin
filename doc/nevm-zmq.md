@@ -226,3 +226,21 @@ With managed `--exitwhensynced`, Core preserves its clean shutdown callback
 before classifying a failed connect as an operational error, including a
 matching invalid response. It does not persist a failed-block flag on that
 shutdown path.
+
+## Managed Geth reindex and key preservation
+
+Core reindex clears the managed Geth chain database at `geth/geth/chaindata`
+and its supported legacy location, `geth/chaindata`, relative to the Core
+network data directory. Paired NEVM metadata and default ancient storage are
+inside that database. Keystore files, modern and legacy node identity keys,
+JWT secrets, and other entries outside these database directories stay in
+place. Interrupted database removal can be retried without copying or
+relocating key files. Custom ancient database locations are not cleared by
+this operation and may require an explicit engine rebuild.
+
+If `keystoretmp` or `nodekeytmp` exists from an older copy/restore attempt,
+managed startup and reindex stop before resetting data or launching Geth.
+These paths may contain the only complete keys; an existing original may
+also be a partial restoration. Establish the authoritative key set and
+recover it before resuming. Core does not choose between, merge, or discard
+these ambiguous copies automatically.
