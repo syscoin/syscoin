@@ -38,6 +38,7 @@ extern std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>
 #include <cmath>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -1727,14 +1728,20 @@ bool CTxMemPool::RebuildPQRegistryReservations(
     }
     llmq::pq::PQRegistryMempoolView view;
     std::string error;
-    const bool loaded{
-        active_tip != nullptr && deterministicMNManager &&
-        requested_set.size() <=
-            llmq::pq::MAX_PQ_MEMPOOL_OPERATOR_REQUESTS &&
-        deterministicMNManager->GetPQRegistryMempoolView(
-            active_tip,
-            std::vector<uint256>{requested_set.begin(), requested_set.end()},
-            view, error)};
+    bool loaded{false};
+    try {
+        loaded = active_tip != nullptr && deterministicMNManager &&
+            requested_set.size() <=
+                llmq::pq::MAX_PQ_MEMPOOL_OPERATOR_REQUESTS &&
+            deterministicMNManager->GetPQRegistryMempoolView(
+                active_tip,
+                std::vector<uint256>{requested_set.begin(), requested_set.end()},
+                view, error);
+    } catch (const std::runtime_error& e) {
+        // A committed tip still needs its connection notifications. Treat a
+        // local read exception like any other unavailable reservation view.
+        error = e.what();
+    }
     if (!loaded) {
         LogPrint(BCLog::MEMPOOL,
                  "%s: dropping PQ reservations after view failure: %s\n",

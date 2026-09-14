@@ -8,8 +8,11 @@
 #include <evo/pq_registry.h> // SYSCOIN: PQ registry reservation fixtures.
 #include <evo/providertx.h> // SYSCOIN: provider transaction fixtures.
 #include <evo/specialtx.h> // SYSCOIN: special-transaction mempool fixtures.
+#include <llmq/quorums_commitment.h>
 #include <netbase.h> // SYSCOIN: provider service fixtures.
 #include <policy/policy.h>
+#include <test/util/logging.h>
+#include <test/util/pq_registry_read_error.h>
 #include <test/util/txmempool.h>
 #include <txmempool.h>
 #include <util/time.h>
@@ -225,6 +228,57 @@ CDeterministicMNList PQMempoolMNList(const uint256& pro_tx_hash,
     list.AddMN(std::move(dmn), /*fBumpTotalCount=*/false);
     return list;
 }
+
+struct PQMempoolRegistrySetup : TestingSetup {
+    Consensus::Params& consensus{
+        const_cast<Consensus::Params&>(Params().GetConsensus())};
+    const int previous_dip3_height{consensus.DIP0003Height};
+    const uint256 previous_hash{PQMempoolHash(150'000)};
+    uint256 preparation_hash;
+    CBlockIndex previous_index;
+    CBlockIndex preparation_index;
+
+    PQMempoolRegistrySetup()
+        : TestingSetup{ChainType::REGTEST,
+                       {"-pqpreparationheight=999",
+                        "-pqchainlockepochorigin=1440",
+                        "-pqregistrationcutoffblocks=144",
+                        "-pqfuturehorizonepochs=8"}}
+    {
+        LOCK(cs_main);
+        // BasicTestingSetup forces its own DIP3 argument. Anchor this small
+        // fixture explicitly so the first inverse journal has a real base.
+        consensus.DIP0003Height = 998;
+        BOOST_REQUIRE_EQUAL(consensus.nPQPreparationHeight, 999);
+        previous_index.nHeight = 998;
+        previous_index.phashBlock = &previous_hash;
+        deterministicMNManager->m_evoDb->WriteCache(
+            previous_hash, CDeterministicMNList{previous_hash, 998, 0});
+
+        CBlock preparation;
+        preparation.hashPrevBlock = previous_hash;
+        preparation.nTime = 999;
+        preparation.vtx.emplace_back(MakeTransactionRef(CMutableTransaction{}));
+        preparation_hash = preparation.GetHash();
+        preparation_index.nHeight = 999;
+        preparation_index.phashBlock = &preparation_hash;
+        preparation_index.pprev = &previous_index;
+        CCoinsView base_view;
+        CCoinsViewCache view{&base_view};
+        const llmq::CFinalCommitmentTxPayload no_legacy_commitment;
+        BlockValidationState state;
+        CDeterministicMNListNEVMAddressDiff diff;
+        BOOST_REQUIRE_MESSAGE(deterministicMNManager->ProcessBlock(
+            preparation, &preparation_index, state, view,
+            no_legacy_commitment, diff, /*fJustCheck=*/false, /*ibd=*/true),
+            state.ToString());
+    }
+
+    ~PQMempoolRegistrySetup()
+    {
+        consensus.DIP0003Height = previous_dip3_height;
+    }
+};
 
 } // namespace
 
@@ -1042,6 +1096,130 @@ BOOST_AUTO_TEST_CASE(PQRegistryMempoolCapacity)
     BOOST_CHECK_EQUAL(pool.size(), unrelated_count);
     pool.RemoveProviderTransactionsForReorg();
     BOOST_CHECK_EQUAL(pool.size(), 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(PQRegistryReadFailureClearsReservationsAndRecovers,
+                       PQMempoolRegistrySetup)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const uint256 operator_a{PQMempoolHash(151'001)};
+    const uint256 operator_b{PQMempoolHash(151'002)};
+    const uint256 operator_ready{PQMempoolHash(151'003)};
+    const COutPoint collateral_a{PQMempoolHash(151'004), 0};
+    const COutPoint collateral_ready{PQMempoolHash(151'005), 0};
+    const auto global{PQGlobalKeyTransaction(operator_a, 21)};
+    auto second_global{PQGlobalKeyTransaction(operator_b, 22)};
+    second_global.vin[0].prevout = COutPoint{PQMempoolHash(151'006), 0};
+    const auto ready{PQReadinessTransaction(operator_ready)};
+    auto global_child{PQMempoolBaseTransaction(2, 151'007)};
+    global_child.vin[0].prevout = COutPoint{global.GetHash(), 0};
+    auto ready_child{PQMempoolBaseTransaction(2, 151'008)};
+    ready_child.vin[0].prevout = COutPoint{ready.GetHash(), 0};
+    const auto ordinary{PQMempoolBaseTransaction(2, 151'009)};
+    const auto service{PQServiceTransaction(PQMempoolHash(151'010))};
+
+    std::vector<uint256> requested{operator_a, operator_b, operator_ready};
+    std::sort(requested.begin(), requested.end());
+    llmq::pq::PQRegistryMempoolView view;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(deterministicMNManager->GetPQRegistryMempoolView(
+        &preparation_index, requested, view, error), error);
+    BOOST_REQUIRE(view.has_next_block_schedule);
+    BOOST_REQUIRE_EQUAL(view.operator_state_count, 0U);
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(global), true,
+                                    &preparation_index, collateral_a));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(ready), true,
+                                    &preparation_index, collateral_ready));
+    for (const auto& tx : {global_child, ready_child, ordinary, service}) {
+        BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(tx)));
+    }
+    auto capacity_view{view};
+    capacity_view.operator_state_count = llmq::pq::MAX_PQ_OPERATOR_STATES - 1;
+    const auto at_capacity = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+        return PQMempoolTestAccess::FindPackageProviderTxConflict(
+            pool, {MakeTransactionRef(second_global)},
+            CDeterministicMNList{}, capacity_view);
+    };
+    BOOST_CHECK(at_capacity() == 0U);
+
+    llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+        *deterministicMNManager);
+    {
+        ASSERT_DEBUG_LOG("dropping PQ reservations after view failure: injected EvoDB flush-batch failure");
+        bool rebuilt{true};
+        BOOST_CHECK_NO_THROW(rebuilt = pool.RebuildPQRegistryReservations(
+            &preparation_index));
+        BOOST_CHECK(!rebuilt);
+    }
+    for (const auto& tx : {global, ready, global_child, ready_child}) {
+        BOOST_CHECK(!pool.exists(GenTxid::Txid(tx.GetHash())));
+    }
+    BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(service.GetHash())));
+    BOOST_CHECK_EQUAL(pool.size(), 2U);
+    BOOST_CHECK(!at_capacity());
+    for (const auto& collateral : {collateral_a, collateral_ready}) {
+        auto spend{PQMempoolBaseTransaction(2, 151'011)};
+        spend.vin[0].prevout = collateral;
+        BOOST_CHECK(!pool.existsProviderTxConflict(
+            CTransaction{spend}, &preparation_index));
+    }
+
+    // A retry reads the same persisted snapshot and can reserve the released
+    // operator and key again, with capacity and uniqueness checks intact.
+    BOOST_REQUIRE_MESSAGE(deterministicMNManager->GetPQRegistryMempoolView(
+        &preparation_index, requested, view, error), error);
+    BOOST_CHECK(!pool.existsProviderTxConflict(
+        CTransaction{global}, &preparation_index));
+    BOOST_CHECK(!pool.existsProviderTxConflict(
+        CTransaction{ready}, &preparation_index));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(global), true,
+                                    &preparation_index, collateral_a));
+    BOOST_CHECK(pool.RebuildPQRegistryReservations(&preparation_index));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(global.GetHash())));
+    BOOST_CHECK(at_capacity() == 0U);
+    auto same_key{PQGlobalKeyTransaction(operator_b, 21, 23)};
+    same_key.vin[0].prevout = COutPoint{PQMempoolHash(151'012), 0};
+    BOOST_CHECK(pool.existsProviderTxConflict(
+        CTransaction{same_key}, &preparation_index));
+    BOOST_CHECK(!pool.existsProviderTxConflict(
+        CTransaction{second_global}, &preparation_index));
+    pool.removeRecursive(CTransaction{global}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!at_capacity());
+}
+
+BOOST_FIXTURE_TEST_CASE(PQRegistryRebuildWithoutReservationsDoesNotRead,
+                       PQMempoolRegistrySetup)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const auto ordinary{PQMempoolBaseTransaction(2, 152'001)};
+    const auto service{PQServiceTransaction(PQMempoolHash(152'002))};
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(ordinary)));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(service)));
+    llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+        *deterministicMNManager);
+    BOOST_CHECK(pool.RebuildPQRegistryReservations(&preparation_index));
+    BOOST_CHECK_EQUAL(pool.size(), 2U);
+
+    // The empty-reservation fast path must leave the one-shot read failure
+    // armed, including when unrelated provider updates remain in the pool.
+    const auto ready{PQReadinessTransaction(PQMempoolHash(152'003))};
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(ready)));
+    {
+        ASSERT_DEBUG_LOG("dropping PQ reservations after view failure: injected EvoDB flush-batch failure");
+        bool rebuilt{true};
+        BOOST_CHECK_NO_THROW(rebuilt = pool.RebuildPQRegistryReservations(
+            &preparation_index));
+        BOOST_CHECK(!rebuilt);
+    }
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(ready.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(service.GetHash())));
+    BOOST_CHECK_EQUAL(pool.size(), 2U);
 }
 
 // SYSCOIN END: PQ provider mempool conflict and reservation tests.

@@ -12,6 +12,7 @@
 #include <evo/specialtx_payload.h>
 #include <evo/pq_payment_probation_db.h> // SYSCOIN: multi-chainstate probation GC.
 #include <evo/pq_registry.h> // SYSCOIN: deep rollback registry roots.
+#include <evo/pq_providertx.h> // SYSCOIN: outstanding PQ reservation fixture.
 #include <governance/governanceclasses.h> // SYSCOIN: adaptive budget rollback.
 #include <governance/governance.h> // SYSCOIN: tip-bound block fixture readiness.
 #include <key_io.h> // SYSCOIN: valid mining RPC payout address.
@@ -54,6 +55,7 @@
 #include <test/util/logging.h>
 #include <test/util/mining.h>
 #include <test/util/nevm_mint.h> // SYSCOIN: fully valid mint block read-error regressions.
+#include <test/util/pq_registry_read_error.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <test/util/txmempool.h> // SYSCOIN: observe mint reservations across NEVM rollback.
@@ -10183,6 +10185,209 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
     }
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(pq_reservation_read_failure_finishes_forward_tip,
+                        TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    auto& pool{*Assert(m_node.mempool)};
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    struct RestoreConsensus {
+        Consensus::Params& consensus;
+        Consensus::Params original;
+        ~RestoreConsensus() { consensus = std::move(original); }
+    } restore{consensus, consensus};
+    const int preparation_height{
+        WITH_LOCK(::cs_main, return chainman.ActiveHeight() + 1)};
+    consensus.DIP0003Height = preparation_height;
+    consensus.DIP0003EnforcementHeight = preparation_height;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQChainLockEpochOrigin = 1'440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    llmq::pq::PQRegistryConfig registry_config;
+    BOOST_REQUIRE(llmq::pq::GetPQRegistryConfig(consensus, registry_config) ==
+                  llmq::pq::PQRegistryDeploymentResult::VALID);
+
+    // Produce a real preparation snapshot before the target connection. A
+    // pre-preparation view would not read the registry database at all.
+    mineBlocks(1);
+    SyncWithValidationInterfaceQueue();
+    const auto* parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(parent);
+    BOOST_REQUIRE_EQUAL(parent->nHeight, preparation_height);
+    BOOST_REQUIRE_LT(parent->nHeight + 1, consensus.nNEVMStartBlock);
+    BOOST_REQUIRE(!Consensus::IsPQProviderMempoolTransitionTip(
+        consensus, parent->nHeight + 1));
+    const auto candidate{std::make_shared<const CBlock>(
+        CreateBlock({}, CScript{} << OP_TRUE, chainstate))};
+    BOOST_REQUIRE_EQUAL(candidate->vtx.size(), 1U);
+
+    const uint256 pro_tx_hash{GetRandHash()};
+    const std::array<uint256, 1> requested{pro_tx_hash};
+    llmq::pq::PQRegistryMempoolView parent_view;
+    std::string registry_error;
+    BOOST_REQUIRE_MESSAGE(deterministicMNManager->GetPQRegistryMempoolView(
+        parent, requested, parent_view, registry_error), registry_error);
+    BOOST_REQUIRE(parent_view.has_next_block_schedule);
+
+    // These addUnchecked entries exercise reservation and descendant
+    // bookkeeping; they do not model signed PQ transaction admission. Build
+    // the empty candidate first so none can enter its transaction list.
+    CMutableTransaction global;
+    global.nVersion = SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY;
+    global.vin.emplace_back(COutPoint{m_coinbase_txns[0]->GetHash(), 0});
+    global.vout.emplace_back(COIN, CScript{} << OP_TRUE);
+    llmq::pq::GlobalKeyTxPayload payload;
+    payload.pro_tx_hash = pro_tx_hash;
+    payload.operation = llmq::pq::GlobalKeyOperation::ROTATE;
+    payload.candidate.key_version = 2;
+    payload.candidate.public_key[0] = 1;
+    auto& commitment{payload.candidate.child_key_commitment};
+    commitment.generation = 1;
+    commitment.first_epoch = parent_view.next_first_mutable_epoch;
+    commitment.tree_id = GetRandHash();
+    commitment.root = GetRandHash();
+    BOOST_REQUIRE(commitment.IsStructurallyValid());
+    payload.transaction_inputs_hash = CalcTxInputsHash(CTransaction{global});
+    payload.authorization[0] = 1;
+    SetTxPayload(global, payload);
+    CMutableTransaction child;
+    child.vin.emplace_back(COutPoint{global.GetHash(), 0});
+    child.vout.emplace_back(COIN - 1, CScript{} << OP_TRUE);
+    CMutableTransaction ordinary;
+    ordinary.vin.emplace_back(COutPoint{m_coinbase_txns[1]->GetHash(), 0});
+    ordinary.vout.emplace_back(COIN, CScript{} << OP_TRUE);
+    TestMemPoolEntryHelper entry;
+    const auto add_reservation = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+        BOOST_REQUIRE(pool.addUnchecked(entry
+            .Fee(m_coinbase_txns[0]->vout[0].nValue - COIN)
+            .SpendsCoinbase(true).FromTx(global)));
+        BOOST_REQUIRE(pool.addUnchecked(entry.Fee(1).SpendsCoinbase(false).FromTx(child)));
+    };
+    {
+        LOCK2(::cs_main, pool.cs);
+        add_reservation();
+        BOOST_REQUIRE(pool.addUnchecked(entry
+            .Fee(m_coinbase_txns[1]->vout[0].nValue - COIN)
+            .SpendsCoinbase(true).FromTx(ordinary)));
+        BOOST_REQUIRE(pool.RebuildPQRegistryReservations(parent));
+        BOOST_REQUIRE_EQUAL(pool.size(), 3U);
+    }
+
+    struct PublicationObserver final : CValidationInterface {
+        ChainstateManager& chainman;
+        const CBlockIndex* parent;
+        uint256 target;
+        unsigned checked{0};
+        bool publication_valid{true};
+        std::vector<std::string> published;
+
+        PublicationObserver(ChainstateManager& manager,
+                            const CBlockIndex* previous, const uint256& hash)
+            : chainman{manager}, parent{previous}, target{hash}
+        {
+            RegisterValidationInterface(this);
+        }
+        ~PublicationObserver()
+        {
+            UnregisterValidationInterface(this);
+            SyncWithValidationInterfaceQueue();
+        }
+        void BlockChecked(const CBlock& block, const BlockValidationState& state) override
+        {
+            BOOST_REQUIRE(block.GetHash() == target);
+            BOOST_REQUIRE(state.IsValid());
+            BOOST_REQUIRE_EQUAL(++checked, 1U);
+            LOCK(::cs_main);
+            BOOST_CHECK(chainman.ActiveTip() == parent);
+            BOOST_CHECK(chainman.ActiveChainstate().CoinsTip().GetBestBlock() ==
+                        parent->GetBlockHash());
+        }
+        void CheckPublished(const CBlockIndex* index)
+        {
+            LOCK(::cs_main);
+            publication_valid &= index && index->GetBlockHash() == target &&
+                chainman.ActiveTip() == index &&
+                chainman.ActiveChainstate().CoinsTip().GetBestBlock() == target;
+        }
+        void BlockConnected(ChainstateRole role, const std::shared_ptr<const CBlock>& block,
+                            const CBlockIndex* index) override
+        {
+            publication_valid &= role == WITH_LOCK(::cs_main,
+                return chainman.ActiveChainstate().GetRole());
+            publication_valid &= block->GetHash() == target;
+            CheckPublished(index);
+            published.emplace_back("connected");
+        }
+        void UpdatedBlockTip(const CBlockIndex* index, const CBlockIndex* fork,
+                             ChainstateManager& manager, bool) override
+        {
+            publication_valid &= &manager == &chainman && fork == parent;
+            CheckPublished(index);
+            published.emplace_back("tip");
+        }
+    } observer{chainman, parent, candidate->GetHash()};
+
+    SyncWithValidationInterfaceQueue();
+    bool injected{false};
+    {
+        // UpdateTip logs after governance has finished reading the registry,
+        // immediately before ConnectTip rebuilds the reservations. Evict the
+        // cached snapshot here so that refresh takes the real cold read path.
+        // The logging callback must only arm the silent test helper: a read
+        // or log from inside it would reenter the logger's mutex.
+        DebugLogHelper inject_after_tip{
+            "UpdateTip: new best=" + candidate->GetHash().ToString(),
+            [&](const std::string* line) {
+                if (!line) return false;
+                llmq::pq::test::PQRegistryReadErrorTestAccess::FailNextRead(
+                    *deterministicMNManager);
+                injected = true;
+                return true;
+            }};
+        ASSERT_DEBUG_LOG("RebuildPQRegistryReservations: dropping PQ reservations after view failure: injected EvoDB flush-batch failure");
+        BOOST_REQUIRE(chainman.ProcessNewBlock(candidate, true, true, nullptr));
+    }
+    BOOST_CHECK(injected);
+    SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(observer.publication_valid);
+    BOOST_CHECK_EQUAL(observer.checked, 1U);
+    BOOST_CHECK(!m_node.kernel->interrupt);
+    BOOST_CHECK(observer.published == (std::vector<std::string>{"connected", "tip"}));
+    {
+        LOCK2(::cs_main, pool.cs);
+        const auto* tip{chainman.ActiveTip()};
+        BOOST_REQUIRE(tip);
+        BOOST_CHECK(tip->GetBlockHash() == candidate->GetHash());
+        BOOST_CHECK(tip->IsValid(BLOCK_VALID_SCRIPTS));
+        BOOST_CHECK_EQUAL(tip->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin(
+            COutPoint{candidate->vtx.front()->GetHash(), 0}));
+        BOOST_CHECK_EQUAL(pool.size(), 1U);
+        BOOST_CHECK(!pool.exists(GenTxid::Txid(global.GetHash())));
+        BOOST_CHECK(!pool.exists(GenTxid::Txid(child.GetHash())));
+        BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+
+        // The one-shot failure leaves the committed registry readable and
+        // reservation bookkeeping reusable at the same newly published tip.
+        add_reservation();
+        BOOST_REQUIRE(pool.RebuildPQRegistryReservations(tip));
+        BOOST_CHECK_EQUAL(pool.size(), 3U);
+        BOOST_CHECK(pool.exists(GenTxid::Txid(global.GetHash())));
+        BOOST_CHECK(pool.exists(GenTxid::Txid(child.GetHash())));
+        BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+        pool.removeRecursive(CTransaction{global}, MemPoolRemovalReason::REPLACED);
+        pool.removeRecursive(CTransaction{ordinary}, MemPoolRemovalReason::REPLACED);
+    }
+    BlockValidationState repeat_state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(repeat_state));
+    BOOST_CHECK(repeat_state.IsValid());
+    SyncWithValidationInterfaceQueue();
+    BOOST_CHECK_EQUAL(observer.checked, 1U);
+    BOOST_CHECK(observer.published == (std::vector<std::string>{"connected", "tip"}));
+}
 
 // SYSCOIN BEGIN: Continue selection after cacheable candidate rejection.
 BOOST_FIXTURE_TEST_CASE(activation_cacheable_tip_rejection_selects_known_sibling,
