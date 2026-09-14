@@ -353,6 +353,24 @@ private:
     CActiveMasternodeInfo m_previous;
 };
 
+class ActiveOperatorRuntimeOptions {
+    const bool m_original_listen{fListen};
+    const std::string m_original_stub{
+        gArgs.GetArg("-pqoperatorcommitmentteststub", "0")};
+
+public:
+    ActiveOperatorRuntimeOptions()
+    {
+        fListen = false;
+        gArgs.ForceSetArg("-pqoperatorcommitmentteststub", "1");
+    }
+    ~ActiveOperatorRuntimeOptions()
+    {
+        fListen = m_original_listen;
+        gArgs.ForceSetArg("-pqoperatorcommitmentteststub", m_original_stub);
+    }
+};
+
 // Exercise the live completion handler against authenticated persisted registry
 // records. The successor changes only the remote key or its advertised service.
 class CompletionPublicationFixture {
@@ -743,11 +761,6 @@ class RollbackNotificationFixture {
     std::array<CService, 3> m_parent_services;
     std::array<CService, 3> m_tip_services;
 
-    static uint256 Provider(std::size_t member)
-    {
-        return NonNullHash(500 + member);
-    }
-
 public:
     static constexpr std::size_t KEY_CHANGED{0};
     static constexpr std::size_t SERVICE_CHANGED{1};
@@ -757,7 +770,11 @@ public:
     PeerManager& peerman;
     CBlockIndex* const tip;
 
-    explicit RollbackNotificationFixture(TestChain100Setup& fixture)
+    explicit RollbackNotificationFixture(
+        TestChain100Setup& fixture,
+        std::optional<std::size_t> local_member = std::nullopt,
+        bool parent_revoked = false,
+        bool parent_enforced = true)
         : m_consensus{const_cast<Consensus::Params&>(Params().GetConsensus())},
           m_restore{m_consensus, m_consensus, std::move(deterministicMNManager),
                     static_cast<ConnmanTestMsg&>(*fixture.m_node.connman)},
@@ -768,7 +785,8 @@ public:
     {
         const int preparation_height{tip->nHeight - 2};
         m_consensus.DIP0003Height = preparation_height - 1;
-        m_consensus.DIP0003EnforcementHeight = preparation_height - 1;
+        m_consensus.DIP0003EnforcementHeight = parent_enforced
+            ? preparation_height - 1 : tip->nHeight;
         m_consensus.nPQPreparationHeight = preparation_height;
         m_consensus.nPQActivationHeight = preparation_height + 1;
         m_consensus.nPQChainLockEpochOrigin = 1440;
@@ -786,12 +804,26 @@ public:
                 key.child_key_commitment.first_epoch)};
             BOOST_REQUIRE(tree_id);
             key.child_key_commitment.tree_id = *tree_id;
+            if (local_member == member) {
+                const auto& commitment{key.child_key_commitment};
+                CHashWriter writer{SER_GETHASH, 0};
+                writer << std::string{"SYS_PQ_OPERATOR_TEST_STUB_V1"}
+                       << m_consensus.hashGenesisBlock << commitment.tree_id
+                       << commitment.generation << commitment.first_epoch
+                       << commitment.depth;
+                key.child_key_commitment.root = writer.GetHash();
+            }
             return key;
         };
         for (std::size_t member{0}; member < m_parent_keys.size(); ++member) {
             m_parent_keys[member] = key_for(member, 1, member, preparation_height);
             m_tip_keys[member] = m_parent_keys[member];
             m_parent_services[member] = Service(10 + member);
+            if (local_member == member) {
+                const auto service{Lookup("127.0.0.1", GetListenPort(), false)};
+                BOOST_REQUIRE(service);
+                m_parent_services[member] = *service;
+            }
             m_tip_services[member] = m_parent_services[member];
         }
         m_tip_keys[KEY_CHANGED] = key_for(4, 2, KEY_CHANGED, tip->nHeight);
@@ -829,6 +861,11 @@ public:
                     state.global_key_active = 1;
                     state.global_key = height == tip->nHeight
                         ? m_tip_keys[member] : m_parent_keys[member];
+                    if (parent_revoked && local_member == member &&
+                        height < tip->nHeight) {
+                        state.global_key_active = 0;
+                        state.revoked_height = preparation_height;
+                    }
                     BOOST_REQUIRE(state.IsStructurallyValid());
                     snapshot.operator_states.push_back(state);
                 }
@@ -937,6 +974,21 @@ public:
             BOOST_REQUIRE(view.FindOperator(Provider(UNCHANGED)));
         }
         deterministicMNManager->UpdatedBlockTip(tip);
+    }
+
+    static uint256 Provider(std::size_t member)
+    {
+        return NonNullHash(500 + member);
+    }
+
+    const GlobalKeyRecord& Key(std::size_t member, bool parent_authority) const
+    {
+        return parent_authority ? m_parent_keys[member] : m_tip_keys[member];
+    }
+
+    const CService& Address(std::size_t member, bool parent_authority) const
+    {
+        return parent_authority ? m_parent_services[member] : m_tip_services[member];
     }
 
     CNode& AddCompletedPeer(std::size_t member, bool parent_authority = false)
@@ -1049,21 +1101,7 @@ public:
 // Keep the actual Init path inexpensive: regtest accepts the loopback service,
 // and its existing commitment stub avoids requesting a full child-key tree.
 class ActiveOperatorTipFixture {
-    struct RuntimeOptions {
-        const bool original_listen{fListen};
-        const std::string original_stub{
-            gArgs.GetArg("-pqoperatorcommitmentteststub", "0")};
-        RuntimeOptions()
-        {
-            fListen = false;
-            gArgs.ForceSetArg("-pqoperatorcommitmentteststub", "1");
-        }
-        ~RuntimeOptions()
-        {
-            fListen = original_listen;
-            gArgs.ForceSetArg("-pqoperatorcommitmentteststub", original_stub);
-        }
-    } m_options;
+    ActiveOperatorRuntimeOptions m_options;
 
 public:
     CompletionPublicationFixture publication;
@@ -1075,7 +1113,7 @@ public:
     explicit ActiveOperatorTipFixture(TestingSetup& fixture)
         : publication{fixture, /*outbound=*/true, /*rotate_key=*/false,
                       /*active_manager_setup=*/true},
-          active{publication.connman},
+          active{publication.connman, publication.chainman},
           tip{WITH_LOCK(cs_main, return publication.chainman.ActiveTip())},
           key_manager{WITH_LOCK(activeMasternodeInfoCs,
               return activeMasternodeInfo.operatorKeyManager)},
@@ -1163,6 +1201,175 @@ public:
         }
     }
 };
+
+class DisconnectReadFault final : public CValidationInterface {
+public:
+    std::optional<AuthorityReadFailure> next_failure;
+    unsigned injected{0};
+
+    void BlockDisconnected(const std::shared_ptr<const CBlock>&,
+                           const CBlockIndex*) override
+    {
+        if (const auto failure{std::exchange(next_failure, std::nullopt)}) {
+            // Undo has committed before this event is delivered, so its reads
+            // cannot consume the one-shot failure intended for the subscriber.
+            FailNextAuthorityRead(*failure);
+            ++injected;
+        }
+    }
+};
+
+class ActiveOperatorRollbackFixture {
+    ActiveMasternodeInfoGuard m_active_info_guard;
+    ActiveOperatorRuntimeOptions m_options;
+    const std::size_t m_member;
+    const bool m_parent_key;
+
+public:
+    RollbackNotificationFixture chain;
+    CActiveMasternodeManager active;
+    const uint256 provider;
+    const std::shared_ptr<LocalOperatorKeyManager> key_manager;
+    const ActiveChildKeyCache* const child_cache;
+
+    ActiveOperatorRollbackFixture(TestChain100Setup& fixture,
+                                  std::size_t member,
+                                  bool parent_key = true,
+                                  bool parent_revoked = false,
+                                  bool parent_enforced = true)
+        : m_member{member}, m_parent_key{parent_key},
+          chain{fixture, member, parent_revoked, parent_enforced},
+          active{chain.connman, chain.chainman},
+          provider{RollbackNotificationFixture::Provider(member)},
+          key_manager{[&] {
+              ChainLockMasterSeed master_seed{};
+              master_seed[0] = 1;
+              return std::make_shared<LocalOperatorKeyManager>(
+                  DeterministicKey(member == RollbackNotificationFixture::KEY_CHANGED &&
+                                   !parent_key ? 4 : member),
+                  std::move(master_seed));
+          }()},
+          child_cache{[&] {
+              LOCK(activeMasternodeInfoCs);
+              activeMasternodeInfo.operatorKeyManager = key_manager;
+              activeMasternodeInfo.childKeyCache =
+                  std::make_unique<ActiveChildKeyCache>(
+                      *key_manager, fixture.m_path_root / "rollback-child-cache");
+              fMasternodeMode = true;
+              return activeMasternodeInfo.childKeyCache.get();
+          }()}
+    {
+        BOOST_REQUIRE(key_manager->Matches(chain.Key(member, parent_key)));
+    }
+
+    ~ActiveOperatorRollbackFixture() { SyncWithValidationInterfaceQueue(); }
+
+    ActiveChildSigningMaterial Lease() const
+    {
+        LOCK(activeMasternodeInfoCs);
+        ActiveChildSigningMaterial lease;
+        lease.active_key_manager = activeMasternodeInfo.operatorKeyManager;
+        lease.active_global_key_version = activeMasternodeInfo.globalKeyVersion;
+        lease.active_identity_generation = activeMasternodeInfo.identityGeneration;
+        return lease;
+    }
+
+    void CheckRetained() const
+    {
+        LOCK(activeMasternodeInfoCs);
+        BOOST_CHECK(activeMasternodeInfo.operatorKeyManager == key_manager);
+        BOOST_CHECK(activeMasternodeInfo.childKeyCache.get() == child_cache);
+        BOOST_CHECK(key_manager->IsValid());
+    }
+
+    void CheckReady(bool parent_authority) const
+    {
+        BOOST_REQUIRE_EQUAL(active.GetStateString(), "READY");
+        uint256 actual_provider;
+        uint32_t version{0};
+        GlobalPublicKey public_key{};
+        CService service;
+        BOOST_REQUIRE(GetActiveMasternodeIdentity(
+            actual_provider, version, public_key, service));
+        BOOST_CHECK(actual_provider == provider);
+        BOOST_CHECK_EQUAL(version, chain.Key(m_member, parent_authority).key_version);
+        BOOST_CHECK(public_key == chain.Key(m_member, parent_authority).public_key);
+        BOOST_CHECK(service == chain.Address(m_member, parent_authority));
+        BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(provider, Lease()));
+        LOCK(activeMasternodeInfoCs);
+        BOOST_CHECK(activeMasternodeInfo.outpoint ==
+                    (COutPoint{NonNullHash(600 + m_member), 0}));
+        CheckRetained();
+    }
+
+    void CheckInactive() const
+    {
+        uint256 actual_provider;
+        uint32_t version{0};
+        GlobalPublicKey public_key{};
+        CService service;
+        BOOST_CHECK(!GetActiveMasternodeIdentity(
+            actual_provider, version, public_key, service));
+        GlobalSignature signature;
+        signature.fill(1);
+        BOOST_CHECK(!SignActiveMasternodeMNAUTH(
+            provider, chain.Key(m_member, m_parent_key).key_version,
+            NonNullHash(70'007), signature));
+        BOOST_CHECK(std::all_of(signature.begin(), signature.end(),
+                                [](uint8_t value) { return value == 0; }));
+        LOCK(activeMasternodeInfoCs);
+        BOOST_CHECK(activeMasternodeInfo.proTxHash.IsNull());
+        BOOST_CHECK_EQUAL(activeMasternodeInfo.globalKeyVersion, 0U);
+        BOOST_CHECK(activeMasternodeInfo.outpoint.IsNull());
+        CheckRetained();
+    }
+
+    void NotifyChildTip()
+    {
+        GetMainSignals().UpdatedBlockTip(
+            chain.tip, chain.tip->pprev, chain.chainman, /*fInitialDownload=*/false);
+        SyncWithValidationInterfaceQueue();
+    }
+
+    ActiveChildSigningMaterial InitParentAndNotifyChild()
+    {
+        // Seed the previously published local identity using ordinary Init.
+        // The actual chain stays on the mined child throughout this setup;
+        // its queued notification disables the no-longer-authorized identity.
+        active.Init(chain.tip->pprev);
+        CheckReady(/*parent_authority=*/true);
+        const auto lease{Lease()};
+        NotifyChildTip();
+        BOOST_CHECK(active.GetStateString() != "READY");
+        CheckInactive();
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
+        return lease;
+    }
+
+    void Rollback(CBlockIndex* index = nullptr)
+    {
+        if (!index) index = chain.tip;
+        BlockValidationState invalidate_state;
+        BOOST_REQUIRE_MESSAGE(chain.chainman.ActiveChainstate().InvalidateBlock(
+            invalidate_state, index), invalidate_state.ToString());
+        BlockValidationState activate_state;
+        BOOST_REQUIRE_MESSAGE(chain.chainman.ActiveChainstate().ActivateBestChain(
+            activate_state), activate_state.ToString());
+        SyncWithValidationInterfaceQueue();
+        LOCK(cs_main);
+        BOOST_CHECK(chain.chainman.ActiveTip() == index->pprev);
+        BOOST_CHECK(chain.chainman.ActiveChainstate().CoinsTip().GetBestBlock() ==
+                    index->pprev->GetBlockHash());
+    }
+};
+
+void CheckRollbackOnly(const RollbackNotifications& notifications,
+                       unsigned disconnected = 1)
+{
+    BOOST_CHECK_EQUAL(notifications.disconnected, disconnected);
+    BOOST_CHECK_EQUAL(notifications.connected, 0U);
+    BOOST_CHECK_EQUAL(notifications.updated_tips, 0U);
+}
 
 // The default fixture initializes a disabled global overlay. Supply a real
 // overlay with an eligible schedule so queued CDS notifications reach its
@@ -1391,6 +1598,202 @@ BOOST_FIXTURE_TEST_CASE(active_operator_dmn_removal_survives_registry_read_failu
     BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(provider, lease));
     fixture.CheckRetained();
     BOOST_CHECK_EQUAL(notifications.updated_tips, 2U);
+}
+
+BOOST_AUTO_TEST_CASE(active_operator_rollback_restores_parent_key_and_service)
+{
+    for (const auto member : {RollbackNotificationFixture::KEY_CHANGED,
+                              RollbackNotificationFixture::SERVICE_CHANGED}) {
+        TestChain100Setup setup;
+        ActiveOperatorRollbackFixture fixture{setup, member};
+        ValidationRegistration register_active{fixture.active};
+        const auto old_lease{fixture.InitParentAndNotifyChild()};
+        RollbackNotifications notifications;
+        ValidationRegistration observe{notifications};
+
+        // Recovery must come from the real committed disconnect, with no
+        // replacement block or manual local-manager refresh afterward.
+        fixture.Rollback();
+        CheckRollbackOnly(notifications);
+        fixture.CheckReady(/*parent_authority=*/true);
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(
+            fixture.provider, old_lease));
+        const auto restored_lease{fixture.Lease()};
+
+        // Only after independently proving recovery, deliver stale forward
+        // metadata. It must retain authority from the actual parent tip.
+        fixture.NotifyChildTip();
+        fixture.CheckReady(/*parent_authority=*/true);
+        BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(
+            fixture.provider, restored_lease));
+        BOOST_CHECK_EQUAL(fixture.Lease().active_identity_generation,
+                          restored_lease.active_identity_generation);
+        BOOST_CHECK_EQUAL(notifications.updated_tips, 1U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(active_operator_rollback_preserves_unchanged_identity,
+                        TestChain100Setup)
+{
+    ActiveOperatorRollbackFixture fixture{
+        *this, RollbackNotificationFixture::UNCHANGED};
+    fixture.active.Init(fixture.chain.tip);
+    fixture.CheckReady(/*parent_authority=*/false);
+    const auto lease{fixture.Lease()};
+    RollbackNotifications notifications;
+    ValidationRegistration register_active{fixture.active};
+    ValidationRegistration observe{notifications};
+
+    fixture.Rollback();
+    CheckRollbackOnly(notifications);
+    fixture.CheckReady(/*parent_authority=*/true);
+    BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
+    BOOST_CHECK_EQUAL(fixture.Lease().active_identity_generation,
+                      lease.active_identity_generation);
+}
+
+BOOST_AUTO_TEST_CASE(active_operator_rollback_refuses_nonmatching_or_revoked_parent)
+{
+    for (const bool revoked : {false, true}) {
+        TestChain100Setup setup;
+        ActiveOperatorRollbackFixture fixture{
+            setup, revoked ? RollbackNotificationFixture::UNCHANGED
+                           : RollbackNotificationFixture::KEY_CHANGED,
+            /*parent_key=*/revoked, /*parent_revoked=*/revoked};
+        fixture.active.Init(fixture.chain.tip);
+        fixture.CheckReady(/*parent_authority=*/false);
+        const auto lease{fixture.Lease()};
+        RollbackNotifications notifications;
+        ValidationRegistration register_active{fixture.active};
+        ValidationRegistration observe{notifications};
+
+        fixture.Rollback();
+        CheckRollbackOnly(notifications);
+        fixture.CheckInactive();
+        BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
+        const auto refused_generation{fixture.Lease().active_identity_generation};
+
+        // The disconnected child authorized this held key, but delayed child
+        // metadata cannot grant authority absent from the current parent.
+        fixture.NotifyChildTip();
+        fixture.CheckInactive();
+        BOOST_CHECK_EQUAL(fixture.Lease().active_identity_generation, refused_generation);
+        BOOST_CHECK_EQUAL(notifications.updated_tips, 1U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(active_operator_rollback_below_enforcement_clears_identity,
+                        TestChain100Setup)
+{
+    ActiveOperatorRollbackFixture fixture{
+        *this, RollbackNotificationFixture::UNCHANGED, /*parent_key=*/true,
+        /*parent_revoked=*/false, /*parent_enforced=*/false};
+    fixture.active.Init(fixture.chain.tip);
+    fixture.CheckReady(/*parent_authority=*/false);
+    const auto lease{fixture.Lease()};
+    RollbackNotifications notifications;
+    ValidationRegistration register_active{fixture.active};
+    ValidationRegistration observe{notifications};
+
+    fixture.Rollback();
+    CheckRollbackOnly(notifications);
+    BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "WAITING_FOR_PROTX");
+    fixture.CheckInactive();
+    BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
+}
+
+BOOST_FIXTURE_TEST_CASE(active_operator_private_and_failed_undo_preserve_identity,
+                        TestChain100Setup)
+{
+    ActiveOperatorRollbackFixture fixture{
+        *this, RollbackNotificationFixture::KEY_CHANGED, /*parent_key=*/false};
+    fixture.active.Init(fixture.chain.tip);
+    fixture.CheckReady(/*parent_authority=*/false);
+    const auto lease{fixture.Lease()};
+    RollbackNotifications notifications;
+    ValidationRegistration register_active{fixture.active};
+    ValidationRegistration observe{notifications};
+    const auto block{fixture.chain.ReadBlock(fixture.chain.tip)};
+    {
+        LOCK(cs_main);
+        CCoinsViewCache private_view{&fixture.chain.chainman.ActiveChainstate().CoinsTip()};
+        NEVMMintTxSet mint_txs;
+        std::vector<uint256> nevm_blocks;
+        std::vector<std::pair<uint256, uint32_t>> txid_pairs;
+        BOOST_REQUIRE(fixture.chain.chainman.ActiveChainstate().DisconnectBlock(
+            *block, fixture.chain.tip, private_view, mint_txs, nevm_blocks, txid_pairs) ==
+            DISCONNECT_OK);
+        BOOST_CHECK(private_view.GetBestBlock() == fixture.chain.tip->pprev->GetBlockHash());
+        BOOST_CHECK(fixture.chain.chainman.ActiveChainstate().CoinsTip().GetBestBlock() ==
+                    fixture.chain.tip->GetBlockHash());
+    }
+    SyncWithValidationInterfaceQueue();
+    CheckRollbackOnly(notifications, /*disconnected=*/0);
+    fixture.CheckReady(/*parent_authority=*/false);
+    BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
+
+    BOOST_REQUIRE(deterministicMNManager->CorruptInverseJournalForTesting(
+        fixture.chain.tip->GetBlockHash()));
+    BlockValidationState state;
+    BOOST_CHECK(!fixture.chain.chainman.ActiveChainstate().InvalidateBlock(
+        state, fixture.chain.tip));
+    SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(WITH_LOCK(cs_main, return fixture.chain.chainman.ActiveTip()) ==
+                fixture.chain.tip);
+    CheckRollbackOnly(notifications, /*disconnected=*/0);
+    fixture.CheckReady(/*parent_authority=*/false);
+    BOOST_CHECK(IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
+    BOOST_CHECK_EQUAL(fixture.Lease().active_identity_generation,
+                      lease.active_identity_generation);
+}
+
+BOOST_AUTO_TEST_CASE(active_operator_rollback_authority_read_errors_revoke_leases_and_recover)
+{
+    for (const auto failure : {AuthorityReadFailure::REGISTRY,
+                               AuthorityReadFailure::DETERMINISTIC_LIST}) {
+        for (const bool ready : {false, true}) {
+            TestChain100Setup setup;
+            ActiveOperatorRollbackFixture fixture{
+                setup, ready ? RollbackNotificationFixture::UNCHANGED
+                             : RollbackNotificationFixture::KEY_CHANGED};
+            DisconnectReadFault fault;
+            ValidationRegistration arm{fault};
+            ValidationRegistration register_active{fixture.active};
+            ActiveChildSigningMaterial lease;
+            if (ready) {
+                fixture.active.Init(fixture.chain.tip);
+                fixture.CheckReady(/*parent_authority=*/false);
+                lease = fixture.Lease();
+            } else {
+                lease = fixture.InitParentAndNotifyChild();
+            }
+            RollbackNotifications notifications;
+            ValidationRegistration observe{notifications};
+            fault.next_failure = failure;
+            {
+                ASSERT_DEBUG_LOG("Active operator local authority read failed:");
+                BOOST_CHECK_NO_THROW(fixture.Rollback());
+            }
+            CheckRollbackOnly(notifications);
+            BOOST_CHECK_EQUAL(fault.injected, 1U);
+            BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
+            fixture.CheckRetained();
+            if (ready) {
+                // READY revokes the failed-read lease before its immediate
+                // readable Init retry restores the same visible identity.
+                fixture.CheckReady(/*parent_authority=*/true);
+            } else {
+                BOOST_CHECK_EQUAL(fixture.active.GetStateString(), "ERROR");
+                fixture.CheckInactive();
+                // A subsequent real rollback retries non-READY discovery.
+                // No direct Init or synthetic tip notification restores it.
+                BOOST_CHECK_NO_THROW(fixture.Rollback(fixture.chain.tip->pprev));
+                CheckRollbackOnly(notifications, /*disconnected=*/2);
+                fixture.CheckReady(/*parent_authority=*/true);
+            }
+            BOOST_CHECK(!IsActiveMasternodeChildSigningMaterialCurrent(fixture.provider, lease));
+        }
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(rollback_only_notifications_retire_completed_authentication,

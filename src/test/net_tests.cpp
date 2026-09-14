@@ -70,6 +70,7 @@ struct ShutdownSnapshotState {
     std::atomic<unsigned> connected_finalized{0};
     std::atomic<unsigned> disconnected_finalized{0};
     std::atomic<unsigned> late_tip_calls{0};
+    std::atomic<unsigned> late_disconnect_calls{0};
     std::atomic<unsigned> final_flush_calls{0};
     std::atomic<bool> client_stopped_after_flush{false};
     ShutdownOverlayMode overlay_mode{ShutdownOverlayMode::NONE};
@@ -211,11 +212,15 @@ class ShutdownTipObserver final : public CActiveMasternodeManager {
     ShutdownSnapshotState& m_state;
 
 public:
-    ShutdownTipObserver(CConnman& connman, ShutdownSnapshotState& state)
-        : CActiveMasternodeManager{connman}, m_state{state} {}
+    ShutdownTipObserver(CConnman& connman, ChainstateManager& chainman, ShutdownSnapshotState& state)
+        : CActiveMasternodeManager{connman, chainman}, m_state{state} {}
     void UpdatedBlockTip(const CBlockIndex*, const CBlockIndex*, ChainstateManager&, bool) override
     {
         ++m_state.late_tip_calls;
+    }
+    void BlockDisconnected(const std::shared_ptr<const CBlock>&, const CBlockIndex*) override
+    {
+        ++m_state.late_disconnect_calls;
     }
 };
 
@@ -254,7 +259,7 @@ void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_cal
     options.m_msgproc = &events;
     connman.Init(options);
     node.chain_clients.push_back(std::make_unique<ShutdownFlushClient>(state));
-    activeMasternodeManager = std::make_unique<ShutdownTipObserver>(connman, state);
+    activeMasternodeManager = std::make_unique<ShutdownTipObserver>(connman, *node.chainman, state);
     RegisterValidationInterface(activeMasternodeManager.get());
     // Chainstate loading creates the real overlay. Select the absent-owner
     // control after draining the initial validation queue above.
@@ -319,6 +324,7 @@ void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_cal
     }
     BOOST_REQUIRE(tip);
     GetMainSignals().UpdatedBlockTip(tip, tip, *node.chainman, true);
+    GetMainSignals().BlockDisconnected(std::make_shared<CBlock>(), tip);
     shutdown = std::async(std::launch::async, [&] {
         ::Interrupt(node);
         ::Shutdown(node);
@@ -339,6 +345,7 @@ void CheckShutdownWaitsForSnapshots(node::NodeContext& node, bool validation_cal
     BOOST_CHECK_EQUAL(state.connected_finalized.load(), 1U);
     BOOST_CHECK_EQUAL(state.disconnected_finalized.load(), 1U);
     BOOST_CHECK_EQUAL(state.late_tip_calls.load(), 0U);
+    BOOST_CHECK_EQUAL(state.late_disconnect_calls.load(), 0U);
     BOOST_CHECK_GT(state.final_flush_calls.load(), 0U);
     BOOST_CHECK(state.client_stopped_after_flush.load());
     if (overlay_mode == ShutdownOverlayMode::DELAYED_REINSTALL) {

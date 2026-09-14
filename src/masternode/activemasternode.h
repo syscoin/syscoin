@@ -194,11 +194,14 @@ private:
     masternode_state_t state{MASTERNODE_WAITING_FOR_PROTX};
     std::string strError;
     CConnman& connman;
+    ChainstateManager& m_chainman;
 
 public:
-    CActiveMasternodeManager(CConnman& _connman): connman(_connman) {}
+    CActiveMasternodeManager(CConnman& _connman, ChainstateManager& chainman)
+        : connman(_connman), m_chainman(chainman) {}
     virtual ~CActiveMasternodeManager() {}
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, ChainstateManager& chainman, bool fInitialDownload) override;
+    void BlockDisconnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* pindex) override;
 
     void Init(const CBlockIndex* pindex);
 
@@ -208,6 +211,7 @@ public:
     static bool IsValidNetAddr(CService addrIn);
 
 private:
+    void ReconcileActiveTip();
     bool GetLocalAddress(CService& addrRet);
 };
 extern std::unique_ptr<CActiveMasternodeManager> activeMasternodeManager;

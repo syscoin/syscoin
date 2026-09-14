@@ -2195,7 +2195,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     RegisterValidationInterface(pdsNotificationInterface);
     if (fMasternodeMode) {
         // Create and register activeMasternodeManager, will init later in ThreadImport
-        activeMasternodeManager = std::make_unique<CActiveMasternodeManager>(*node.connman);
+        activeMasternodeManager = std::make_unique<CActiveMasternodeManager>(*node.connman, chainman);
         RegisterValidationInterface(activeMasternodeManager.get());
     }
 

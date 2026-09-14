@@ -1132,12 +1132,32 @@ void CActiveMasternodeManager::Init(const CBlockIndex* pindex)
     state = MASTERNODE_READY;
 }
 
-void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, ChainstateManager& chainman, bool fInitialDownload)
+void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex*, const CBlockIndex*, ChainstateManager&, bool)
+{
+    ReconcileActiveTip();
+}
+
+void CActiveMasternodeManager::BlockDisconnected(const std::shared_ptr<const CBlock>&, const CBlockIndex*)
+{
+    ReconcileActiveTip();
+}
+
+void CActiveMasternodeManager::ReconcileActiveTip()
 {
     LOCK2(cs_main, activeMasternodeInfoCs);
 
     if (!fMasternodeMode) return;
-    if (!deterministicMNManager || !deterministicMNManager->IsDIP3Enforced(pindexNew->nHeight)) return;
+    // Either notification can arrive after further transitions. Reconcile
+    // only the currently published active tip, including rollback-only changes.
+    const CBlockIndex* pindexNew{m_chainman.ActiveTip()};
+    if (!pindexNew || !deterministicMNManager ||
+        !deterministicMNManager->IsDIP3Enforced(pindexNew->nHeight)) {
+        if (state == MASTERNODE_READY || !activeMasternodeInfo.proTxHash.IsNull()) {
+            ClearActiveIdentity();
+        }
+        state = MASTERNODE_WAITING_FOR_PROTX;
+        return;
+    }
 
     if (state == MASTERNODE_READY) {
         ActiveOperatorSnapshot snapshot;
