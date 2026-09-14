@@ -4477,6 +4477,9 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
         } restore{chainstate, *m_node.notifications, m_node.exit_status,
             m_node.notifications->m_shutdown_on_fatal_error, m_node.exit_status.load()};
         if (fail_sync) m_node.notifications->m_shutdown_on_fatal_error = false;
+        // Isolate the pending-connection barrier from setup WAL writes.
+        // A dirty DB would consume the failure at pre-DMN maintenance first.
+        BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.CoinsDB().Sync()));
         std::size_t syncs{0}, checked{0};
         WITH_LOCK(::cs_main, chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
             ++syncs;
@@ -4523,6 +4526,8 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
         BOOST_CHECK(!chainstate.MarkConflictingBlocksInactive(conflicted, conflicts));
         BOOST_CHECK_EQUAL(conflicted.GetRejectReason(), "nevm-pending-connect-not-durable");
         BOOST_CHECK_EQUAL(candidate_index->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK), 0U);
+        // The injected barrier failure is over; shutdown may now flush P.
+        chainstate.CoinsDB().SetSyncCallbackForTesting({});
         BlockValidationState flushed;
         BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(flushed, FlushStateMode::ALWAYS), flushed.ToString());
         CDiskBlockIndex persisted;
@@ -4539,6 +4544,9 @@ struct ReopenedPendingNEVMConnectSetup : LostAckDescendantMiningSetup {
         {
             std::size_t parent_syncs{0};
             auto& parent_state{chainman.ActiveChainstate()};
+            // Count only the barrier publishing the attempted connection's
+            // parent, not the fixture's earlier asynchronous coins writes.
+            BOOST_REQUIRE(WITH_LOCK(::cs_main, return parent_state.CoinsDB().Sync()));
             struct ClearCoinsSync {
                 Chainstate& state;
                 ~ClearCoinsSync() { WITH_LOCK(::cs_main, state.CoinsDB().SetSyncCallbackForTesting({})); }

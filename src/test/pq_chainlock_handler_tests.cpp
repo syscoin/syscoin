@@ -2448,24 +2448,28 @@ struct BTCCPresealDurabilitySetup : TestingSetup {
         BOOST_CHECK_EQUAL(marker.terminal_carrier_height, NEW_TERMINAL);
         BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == active->GetBlockHash());
         BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(terminal_coin));
-        CDBWrapper manifest{DBParams{.path = manifest_path, .cache_bytes = 1U << 20}};
-        CDBBatch batch{manifest};
-        batch.Write(std::string{"root"}, fs::PathToString(m_path_root));
-        batch.Write(std::string{"datadir"}, fs::PathToString(chainman.m_options.datadir));
-        batch.Write(std::string{"blocks"}, fs::PathToString(m_args.GetBlocksDirPath()));
-        batch.Write(std::string{"index"}, fs::PathToString(*blockman.m_block_tree_db->StoragePath()));
-        batch.Write(std::string{"coins"}, fs::PathToString(*chainstate.CoinsDB().StoragePath()));
-        batch.Write(std::string{"active"}, active->GetBlockHash());
-        batch.Write(std::string{"alternate"}, alternate->GetBlockHash());
-        batch.Write(std::string{"terminal"}, terminal->GetBlockHash());
-        batch.Write(std::string{"old_earliest"}, old_marker.earliest_carrier_hash);
-        batch.Write(std::string{"old_predecessor"}, old_marker.predecessor_receipt_state);
-        batch.Write(std::string{"old_receipt"}, old_marker.terminal_receipt);
-        batch.Write(std::string{"parent_coin"}, parent_coin);
-        batch.Write(std::string{"terminal_coin"}, terminal_coin);
-        BOOST_REQUIRE(manifest.WriteBatch(batch, true));
-        // No handler, block manager, coins or DB destructor runs after the
-        // marker publication. The parent never held these index objects.
+        {
+            // This handoff-only DB is not part of the crash durability claim.
+            // Release its Windows file locks before the parent reopens it.
+            CDBWrapper manifest{DBParams{.path = manifest_path, .cache_bytes = 1U << 20}};
+            CDBBatch batch{manifest};
+            batch.Write(std::string{"root"}, fs::PathToString(m_path_root));
+            batch.Write(std::string{"datadir"}, fs::PathToString(chainman.m_options.datadir));
+            batch.Write(std::string{"blocks"}, fs::PathToString(m_args.GetBlocksDirPath()));
+            batch.Write(std::string{"index"}, fs::PathToString(*blockman.m_block_tree_db->StoragePath()));
+            batch.Write(std::string{"coins"}, fs::PathToString(*chainstate.CoinsDB().StoragePath()));
+            batch.Write(std::string{"active"}, active->GetBlockHash());
+            batch.Write(std::string{"alternate"}, alternate->GetBlockHash());
+            batch.Write(std::string{"terminal"}, terminal->GetBlockHash());
+            batch.Write(std::string{"old_earliest"}, old_marker.earliest_carrier_hash);
+            batch.Write(std::string{"old_predecessor"}, old_marker.predecessor_receipt_state);
+            batch.Write(std::string{"old_receipt"}, old_marker.terminal_receipt);
+            batch.Write(std::string{"parent_coin"}, parent_coin);
+            batch.Write(std::string{"terminal_coin"}, terminal_coin);
+            BOOST_REQUIRE(manifest.WriteBatch(batch, true));
+        }
+        // No handler, block manager, coins or consensus DB destructor runs
+        // after marker publication. The parent never held these index objects.
         std::_Exit(73);
     }
 
@@ -13385,6 +13389,7 @@ struct DMNGCCoinsSetup : LatePaymentAuditPresealSetup {
         chainstate.CoinsTip().SetBestBlock(durable_tip->GetBlockHash());
         BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
         BOOST_REQUIRE(deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
+        const auto next_snapshot{deterministicMNManager->GetListForBlock(chain.back())};
 
         chainstate.m_chain.SetTip(*visible_tip);
         deterministicMNManager->UpdatedBlockTip(visible_tip);
@@ -13401,6 +13406,12 @@ struct DMNGCCoinsSetup : LatePaymentAuditPresealSetup {
         BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == visible_tip->GetBlockHash());
         BOOST_REQUIRE(deterministicMNManager->VerifyPersistedSnapshot(durable_tip));
 
+        // Maintenance at visible_tip may prune the prebuilt future child.
+        // Connecting that synthetic child must republish its exact snapshot,
+        // as ordinary ConnectBlock does before advancing the manager tip.
+        BOOST_REQUIRE(deterministicMNManager->m_evoDb->WriteThrough(
+            chain.back()->GetBlockHash(), next_snapshot, false));
+        BOOST_REQUIRE(deterministicMNManager->VerifyPersistedSnapshot(chain.back()));
         chainstate.m_chain.SetTip(*chain.back());
         deterministicMNManager->UpdatedBlockTip(chain.back());
         chainstate.CoinsTip().SetBestBlock(chain.back()->GetBlockHash());
