@@ -4,6 +4,7 @@
 
 #include <governance/governanceclasses.h>
 #include <governance/governancevalidators.h>
+#include <governance/pq_governance_auth_interface.h>
 #include <validation.h>
 #include <rpc/server.h>
 #include <wallet/rpc/util.h>
@@ -276,8 +277,17 @@ static RPCHelpMan gobject_prepare()
     {
         LOCK(cs_main);
         std::string strError;
-        if (!govobj.IsValidLocally(*node.chainman, deterministicMNManager->GetListAtChainTip(), strError, false))
+        const auto validation_result{govobj.IsValidLocally(
+            *node.chainman, deterministicMNManager->GetListAtChainTip(),
+            strError, false)};
+        if (validation_result == llmq::pq::GovernanceAuthResult::UNAVAILABLE) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "Governance authority state is unavailable: " + strError);
+        }
+        if (validation_result == llmq::pq::GovernanceAuthResult::INVALID) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + govobj.GetHash().ToString() + " - " + strError);
+        }
     }
     
     // If specified, spend this outpoint as the proposal fee

@@ -735,20 +735,20 @@ private:
         const uint256& object_hash, const vote_time_pair_t& vote_pair)
         EXCLUSIVE_LOCKS_REQUIRED(cs);
 
-    [[nodiscard]] bool VerifyPQVoteUnlocked(
+    [[nodiscard]] llmq::pq::GovernanceAuthResult VerifyPQVoteUnlocked(
         const CGovernanceVote& vote,
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         llmq::pq::GovernanceAuthPurpose purpose,
         std::string& error) const;
 
-    [[nodiscard]] bool VerifyOrphanPQVoteUnlocked(
+    [[nodiscard]] llmq::pq::GovernanceAuthResult VerifyOrphanPQVoteUnlocked(
         const CGovernanceVote& vote,
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
         std::string& error) const;
 
-    [[nodiscard]] bool VerifyTriggerObjectUnlocked(
+    [[nodiscard]] llmq::pq::GovernanceAuthResult VerifyTriggerObjectUnlocked(
         const CGovernanceObject& object,
         const CBlockIndex& validation_tip,
         const CDeterministicMNList& validation_mn_list,
@@ -909,7 +909,8 @@ private:
         const CDeterministicMNList& validation_mn_list,
         const CGovernanceVote& vote,
         CGovernanceException& exception,
-        bool pq_signature_preverified)
+        bool pq_signature_preverified,
+        const vote_time_pair_t* transferred_orphan = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(cs);
     [[nodiscard]] bool RebuildPersistedVoteBytes()
         EXCLUSIVE_LOCKS_REQUIRED(cs);

@@ -26,6 +26,7 @@ class PeerManager;
 
 namespace llmq::pq {
 enum class GovernanceAuthPurpose : uint8_t;
+enum class GovernanceAuthResult : uint8_t;
 struct PQRegistrySnapshot;
 class PQRegistryReadView;
 }
@@ -141,11 +142,12 @@ public:
                 const uint256& pro_tx_hash,
                 uint32_t global_key_version,
                 llmq::pq::GovernanceAuthPurpose purpose);
-    bool CheckPQSignature(const CBlockIndex& validation_branch,
-                          const CDeterministicMNList& validation_mn_list,
-                          llmq::pq::GovernanceAuthPurpose purpose,
-                          std::string& error) const;
-    bool CheckPQAuthorizationContext(
+    llmq::pq::GovernanceAuthResult CheckPQSignature(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        llmq::pq::GovernanceAuthPurpose purpose,
+        std::string& error) const;
+    llmq::pq::GovernanceAuthResult CheckPQAuthorizationContext(
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,
         std::string& error,
@@ -163,14 +165,16 @@ public:
         std::string& error,
         llmq::pq::GovernanceAuthPurpose purpose) const;
     bool IsValid(const CDeterministicMNList& tip_mn_list) const;
-    bool IsValidPQ(const CBlockIndex& validation_branch,
-                   const CDeterministicMNList& validation_mn_list,
-                   llmq::pq::GovernanceAuthPurpose purpose,
-                   std::string& error) const;
-    bool IsValidPQContext(const CBlockIndex& validation_branch,
-                          const CDeterministicMNList& validation_mn_list,
-                          std::string& error,
-                          llmq::pq::GovernanceAuthPurpose purpose) const;
+    llmq::pq::GovernanceAuthResult IsValidPQ(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        llmq::pq::GovernanceAuthPurpose purpose,
+        std::string& error) const;
+    llmq::pq::GovernanceAuthResult IsValidPQContext(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        std::string& error,
+        llmq::pq::GovernanceAuthPurpose purpose) const;
     void Relay(PeerManager& peerman, const CDeterministicMNList& tip_mn_list) const;
 
     const COutPoint& GetMasternodeOutpoint() const { return masternodeOutpoint; }

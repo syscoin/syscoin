@@ -267,10 +267,11 @@ public:
     bool SignPQ(const CBlockIndex& signing_block,
                 const uint256& pro_tx_hash,
                 uint32_t global_key_version);
-    bool CheckPQSignature(const CBlockIndex& validation_branch,
-                          const CDeterministicMNList& validation_mn_list,
-                          std::string& error) const;
-    bool CheckPQAuthorizationContext(
+    llmq::pq::GovernanceAuthResult CheckPQSignature(
+        const CBlockIndex& validation_branch,
+        const CDeterministicMNList& validation_mn_list,
+        std::string& error) const;
+    llmq::pq::GovernanceAuthResult CheckPQAuthorizationContext(
         const CBlockIndex& validation_branch,
         const CDeterministicMNList& validation_mn_list,
         std::string& error) const;
@@ -289,9 +290,15 @@ public:
 
     // CORE OBJECT FUNCTIONS
 
-    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool fCheckCollateral, bool fPQSignaturePreverified = false) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    llmq::pq::GovernanceAuthResult IsValidLocally(
+        ChainstateManager& chainman, const CDeterministicMNList& tip_mn_list,
+        std::string& strError, bool fCheckCollateral,
+        bool fPQSignaturePreverified = false) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    bool IsValidLocally(ChainstateManager &chainman,const CDeterministicMNList& tip_mn_list, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral, bool fPQSignaturePreverified = false) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    llmq::pq::GovernanceAuthResult IsValidLocally(
+        ChainstateManager& chainman, const CDeterministicMNList& tip_mn_list,
+        std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral,
+        bool fPQSignaturePreverified = false) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /// Check the collateral transaction for the budget proposal/finalized budget
     bool IsCollateralValid(ChainstateManager &chainman, std::string& strError, bool& fMissingConfirmations) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);

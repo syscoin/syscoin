@@ -42,6 +42,7 @@
 #include <uint256.h>
 #include <util/time.h>
 #include <validation.h>
+#include <timedata.h>
 
 // SYSCOIN BEGIN: fork governance/PQ chainstate test dependencies.
 #include <node/blockstorage.h>
@@ -182,6 +183,23 @@ public:
     {
         LOCK(manager.cs);
         return manager.cmmapOrphanVotes.GetSize();
+    }
+
+    static std::vector<vote_time_pair_t> OrphanVotes(
+        CGovernanceManager& manager, const uint256& object_hash)
+    {
+        LOCK(manager.cs);
+        std::vector<vote_time_pair_t> votes;
+        manager.cmmapOrphanVotes.GetAll(object_hash, votes);
+        return votes;
+    }
+
+    static bool ProcessVote(
+        CGovernanceManager& manager, const CGovernanceVote& vote,
+        CGovernanceException& exception, CConnman& connman,
+        bool* retained = nullptr)
+    {
+        return manager.ProcessVote(nullptr, vote, exception, connman, retained);
     }
 
     static bool StoreOrphanVote(
@@ -4983,7 +5001,7 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
         BOOST_CHECK(admitted->CheckPQSignature(
             indices[final_height], deterministicMNManager->GetListForBlock(
                 &indices[final_height]), GovernanceAuthPurpose::TRIGGER_VOTE,
-            authorization_error));
+            authorization_error) == GovernanceAuthResult::VALID);
         BOOST_CHECK(governance->IsReadyForTip(&indices[final_height]));
         BOOST_CHECK(Access::ValidationContextEpoch(*governance) == signing_ready_epoch);
         {
@@ -6493,15 +6511,14 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 1U);
 }
 
-BOOST_FIXTURE_TEST_CASE(
-    governance_pq_orphan_funding_promotion_requires_matching_parent_authority,
-    TestChain100Setup)
+static void CheckGovernancePQOrphanAdmission(
+    TestChain100Setup& fixture, bool check_read_failures)
 {
     using Access = governance_tests::CGovernanceManagerTestAccess;
     using namespace llmq::pq;
     BOOST_REQUIRE(governance != nullptr);
     BOOST_REQUIRE(deterministicMNManager != nullptr);
-    auto& chainman{*m_node.chainman};
+    auto& chainman{*fixture.m_node.chainman};
     auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
     constexpr int preparation_height{1295};
     constexpr int activation_height{1296};
@@ -6564,8 +6581,8 @@ BOOST_FIXTURE_TEST_CASE(
     member->proTxHash = pro_tx_hash;
     member->collateralOutpoint = collateral;
     auto member_state{std::make_shared<CDeterministicMNState>()};
-    member_state->keyIDOwner = coinbaseKey.GetPubKey().GetID();
-    member_state->keyIDVoting = coinbaseKey.GetPubKey().GetID();
+    member_state->keyIDOwner = fixture.coinbaseKey.GetPubKey().GetID();
+    member_state->keyIDVoting = fixture.coinbaseKey.GetPubKey().GetID();
     member_state->nRegisteredHeight = preparation_height - 1;
     member_state->pqVotingKey = voting_record;
     member->pdmnState = std::move(member_state);
@@ -6595,14 +6612,14 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_REQUIRE(operator_state.IsStructurallyValid());
 
     const DBParams dmn_db_params{
-        .path = m_path_root / "governance_pq_orphans_evodb",
+        .path = fixture.m_path_root / "governance_pq_orphans_evodb",
         .cache_bytes = 1 << 20,
         .memory_only = false,
         .wipe_data = false,
     };
     DBParams registry_db_params{dmn_db_params};
     registry_db_params.path =
-        m_path_root / "governance_pq_orphans_evodb_pq_registry";
+        fixture.m_path_root / "governance_pq_orphans_evodb_pq_registry";
     registry_db_params.cache_bytes /= 2;
     auto previous_root{PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
         consensus.hashGenesisBlock)};
@@ -6665,6 +6682,303 @@ BOOST_FIXTURE_TEST_CASE(
     uint64_t accepted_bytes{0};
     int revision{0};
 
+    if (check_read_failures) {
+        using ReadAccess = llmq::pq::test::PQRegistryReadErrorTestAccess;
+        auto& connman{*fixture.m_node.connman};
+        auto& peerman{*fixture.m_node.peerman};
+        const auto ready_epoch{Access::ValidationContextEpoch(*governance)};
+        BOOST_REQUIRE(ready_epoch);
+        const auto check_ready = [&] {
+            BOOST_CHECK(WITH_LOCK(::cs_main,
+                return chainman.ActiveTip() == &indices[tip_height]));
+            BOOST_CHECK(governance->IsReadyForTip(&indices[tip_height]));
+            BOOST_CHECK(Access::ValidationContextEpoch(*governance) == ready_epoch);
+        };
+        const auto make_parent = [&](bool proposal) {
+            std::vector<CGovernancePayment> payments;
+            payments.emplace_back(
+                PKHash(fixture.coinbaseKey.GetPubKey()), COIN, pro_tx_hash);
+            CSuperblock schedule{event_height, std::move(payments)};
+            return CGovernanceObject{
+                uint256{}, ++revision, GetTime<std::chrono::seconds>().count(),
+                uint256{}, proposal ? "7b2274797065223a317d" : schedule.GetHexStrData()};
+        };
+        const auto insert_parent = [&](CGovernanceObject&& parent) {
+            const uint256 hash{parent.GetHash()};
+            if (parent.GetObjectType() == GOVERNANCE_OBJECT_PROPOSAL) {
+                BOOST_REQUIRE(Access::InsertObject(*governance, std::move(parent)) == hash);
+            } else {
+                uint256 inserted;
+                BOOST_REQUIRE(Access::InsertPreviouslyAdmittedTrigger(
+                    *governance, std::move(parent), inserted));
+                BOOST_REQUIRE(inserted == hash);
+            }
+        };
+        const auto make_vote = [&](const uint256& parent,
+                                   GovernanceAuthPurpose purpose,
+                                   vote_signal_enum_t signal = VOTE_SIGNAL_FUNDING) {
+            CGovernanceVote vote{collateral, parent, signal, VOTE_OUTCOME_YES};
+            vote.SetTime(100 + revision);
+            GovernanceAuthorization authorization;
+            authorization.signed_height = tip_height;
+            authorization.signed_block_hash = hashes[tip_height];
+            authorization.pro_tx_hash = pro_tx_hash;
+            authorization.global_key_version = 1;
+            const bool funding{purpose == GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE};
+            const auto digest{funding
+                ? GetGovernanceFundingAuthorizationHash(
+                      consensus.hashGenesisBlock, voting_record, authorization,
+                      vote.GetSignatureHash())
+                : GetGovernanceAuthorizationHash(
+                      consensus.hashGenesisBlock, operator_state.global_key,
+                      authorization, purpose, vote.GetSignatureHash())};
+            BOOST_REQUIRE(digest);
+            BOOST_REQUIRE(slhdsa::SignDeterministic(
+                funding ? *voting_key : *operator_key,
+                std::span<const uint8_t>{digest->begin(), digest->size()},
+                GetGlobalAuthContext(funding
+                    ? GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE
+                    : GlobalAuthPurpose::GOVERNANCE_VOTE), authorization.signature));
+            std::vector<unsigned char> encoded;
+            BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+            vote.SetSignature(std::move(encoded));
+            return vote;
+        };
+        const auto admit_orphan = [&](const CGovernanceVote& vote) {
+            bool retained{false};
+            CGovernanceException exception;
+            BOOST_CHECK(!Access::ProcessVote(
+                *governance, vote, exception, connman, &retained));
+            BOOST_REQUIRE_MESSAGE(retained, exception.what());
+            BOOST_CHECK_EQUAL(exception.GetType(), GOVERNANCE_EXCEPTION_WARNING);
+            const auto stored{Access::OrphanVotes(*governance, vote.GetParentHash())};
+            const auto it{std::find_if(stored.begin(), stored.end(), [&](const auto& pair) {
+                return pair.first.HasSameWireEncoding(vote);
+            })};
+            BOOST_REQUIRE(it != stored.end());
+            return *it;
+        };
+        const auto check_only_orphan = [&](const vote_time_pair_t& expected) {
+            const auto stored{Access::OrphanVotes(*governance, expected.first.GetParentHash())};
+            BOOST_REQUIRE_EQUAL(stored.size(), 1U);
+            BOOST_CHECK(stored.front().first.HasSameWireEncoding(expected.first));
+            BOOST_CHECK_EQUAL(stored.front().second, expected.second);
+            BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 1U);
+            BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance),
+                              accepted_bytes + Access::VoteBytes(expected.first));
+            BOOST_CHECK(!governance->HaveVoteForHash(expected.first.GetHash()));
+            check_ready();
+        };
+        const auto check_promoted = [&](const CGovernanceVote& vote,
+                                        std::size_t expected_votes = 1) {
+            Access::CheckOrphanVotes(*governance, vote.GetParentHash(), peerman);
+            accepted_bytes += Access::VoteBytes(vote);
+            BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 0U);
+            const auto stored{Access::RetainedVote(
+                *governance, vote.GetParentHash(), vote.GetHash())};
+            BOOST_REQUIRE(stored);
+            BOOST_CHECK(stored->HasSameWireEncoding(vote));
+            BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), accepted_bytes);
+            Access::CheckOrphanVotes(*governance, vote.GetParentHash(), peerman);
+            BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), accepted_bytes);
+            {
+                LOCK(governance->cs);
+                const auto* object{governance->FindConstGovernanceObject(vote.GetParentHash())};
+                BOOST_REQUIRE(object);
+                BOOST_CHECK_EQUAL(object->GetVoteFile().GetVoteCount(), expected_votes);
+            }
+            check_ready();
+        };
+        enum class ReadFailure { MISSING_REGISTRY, THROWING_REGISTRY, THROWING_DMN };
+        const auto failure_name = [](ReadFailure failure) {
+            switch (failure) {
+            case ReadFailure::MISSING_REGISTRY: return "missing registry snapshot";
+            case ReadFailure::THROWING_REGISTRY: return "throwing registry read";
+            case ReadFailure::THROWING_DMN: return "throwing DMN read";
+            }
+            return "unknown read failure";
+        };
+        const auto with_read_failure = [&](ReadFailure failure, const auto& action) {
+            if (failure == ReadFailure::THROWING_DMN) {
+                deterministicMNManager->m_evoDb->EraseCache(uint256{});
+                deterministicMNManager->m_evoDb->FailNextFlushBatchForTesting();
+                action();
+            } else if (failure == ReadFailure::THROWING_REGISTRY) {
+                ReadAccess::FailNextRead(*deterministicMNManager);
+                action();
+            } else {
+                ReadAccess::ScopedMissingSnapshot missing{
+                    *deterministicMNManager, hashes[tip_height]};
+                PQRegistryReadView view;
+                std::string error;
+                bool available{true};
+                BOOST_CHECK_NO_THROW(available = deterministicMNManager->GetPQRegistryReadView(
+                    &indices[tip_height], view, error));
+                BOOST_REQUIRE(!available);
+                BOOST_CHECK(error.find("snapshot-not-found") != std::string::npos);
+                action();
+                BOOST_REQUIRE(missing.Restore());
+            }
+            check_ready();
+        };
+
+        // A stable, published authority epoch does not make a missing local
+        // registry record evidence that an already retained signature is bad.
+        for (const auto failure : {ReadFailure::MISSING_REGISTRY, ReadFailure::THROWING_DMN}) {
+            BOOST_TEST_CONTEXT("retained orphan, " << failure_name(failure)) {
+                auto parent{make_parent(true)};
+                const auto vote{make_vote(parent.GetHash(),
+                    GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE)};
+                const auto retained{admit_orphan(vote)};
+                insert_parent(std::move(parent));
+                with_read_failure(failure, [&] {
+                    BOOST_CHECK_NO_THROW(Access::CheckOrphanVotes(
+                        *governance, vote.GetParentHash(), peerman));
+                    check_only_orphan(retained);
+                });
+                check_promoted(vote);
+            }
+        }
+
+        // One unavailable result must not poison the other candidates in a
+        // batch: later valid votes promote and established invalid votes drop.
+        {
+            BOOST_TEST_CONTEXT("mixed orphan batch, one throwing registry read") {
+                auto parent{make_parent(false)};
+                const auto first{make_vote(parent.GetHash(), GovernanceAuthPurpose::TRIGGER_VOTE)};
+                const auto second{make_vote(parent.GetHash(), GovernanceAuthPurpose::TRIGGER_VOTE,
+                                            VOTE_SIGNAL_VALID)};
+                auto invalid{make_vote(parent.GetHash(), GovernanceAuthPurpose::TRIGGER_VOTE,
+                                       VOTE_SIGNAL_DELETE)};
+                invalid.SetTime(invalid.GetTimestamp() + 1); // Preserve the envelope but break its signature.
+                const auto retained{admit_orphan(first)};
+                (void)admit_orphan(second);
+                BOOST_REQUIRE(first < second);
+                BOOST_REQUIRE(second < invalid);
+                BOOST_REQUIRE(Access::StoreOrphanVote(
+                    *governance, parent.GetHash(), invalid, retained.second));
+                insert_parent(std::move(parent));
+                with_read_failure(ReadFailure::THROWING_REGISTRY, [&] {
+                    BOOST_CHECK_NO_THROW(Access::CheckOrphanVotes(
+                        *governance, first.GetParentHash(), peerman));
+                });
+                accepted_bytes += Access::VoteBytes(second);
+                BOOST_CHECK(Access::ObjectHasVote(*governance, second.GetParentHash(), second.GetHash()));
+                BOOST_CHECK(!governance->HaveVoteForHash(invalid.GetHash()));
+                check_only_orphan(retained);
+                check_promoted(first, 2);
+            }
+        }
+
+        // A log emitted by a later basic-invalid candidate occurs after the
+        // first vote's full verification, but before its locked context check.
+        // Injecting the existing one-shot read fault there exercises transfer
+        // failure without a production callback or an asynchronous race.
+        {
+            BOOST_TEST_CONTEXT("orphan commit-context read failure") {
+                auto parent{make_parent(false)};
+                const auto vote{make_vote(parent.GetHash(), GovernanceAuthPurpose::TRIGGER_VOTE)};
+                const auto retained{admit_orphan(vote)};
+                CGovernanceVote invalid{collateral, parent.GetHash(), VOTE_SIGNAL_VALID,
+                    VOTE_OUTCOME_NO};
+                invalid.SetTime(TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime()) + 3601);
+                BOOST_REQUIRE(vote < invalid);
+                BOOST_REQUIRE(Access::StoreOrphanVote(
+                    *governance, parent.GetHash(), invalid, retained.second));
+                insert_parent(std::move(parent));
+                bool injected{false};
+                {
+                    DebugLogHelper inject{
+                        "vote is too far ahead of current time",
+                        [&](const std::string* line) {
+                            if (line == nullptr) return false;
+                            injected = true;
+                            ReadAccess::FailNextRead(*deterministicMNManager);
+                            return true;
+                        }};
+                    BOOST_CHECK_NO_THROW(Access::CheckOrphanVotes(
+                        *governance, vote.GetParentHash(), peerman));
+                }
+                BOOST_REQUIRE(injected);
+                check_only_orphan(retained);
+                check_promoted(vote);
+            }
+        }
+
+        for (const bool known_parent : {false, true}) {
+            for (const auto failure : {ReadFailure::MISSING_REGISTRY,
+                                       ReadFailure::THROWING_REGISTRY, ReadFailure::THROWING_DMN}) {
+                BOOST_TEST_CONTEXT("fresh vote, known_parent=" << known_parent
+                                   << ", " << failure_name(failure)) {
+                    auto parent{make_parent(true)};
+                    const auto vote{make_vote(parent.GetHash(),
+                        GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE)};
+                    if (known_parent) insert_parent(std::move(parent));
+                    with_read_failure(failure, [&] {
+                        bool retained{true};
+                        bool admitted{true};
+                        CGovernanceException exception;
+                        BOOST_CHECK_NO_THROW(admitted = Access::ProcessVote(
+                            *governance, vote, exception, connman, &retained));
+                        BOOST_CHECK(!admitted);
+                        BOOST_CHECK(!retained);
+                        BOOST_CHECK_EQUAL(exception.GetType(), GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
+                        BOOST_CHECK_EQUAL(exception.GetNodePenalty(), 0);
+                        BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 0U);
+                        BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), accepted_bytes);
+                    });
+                    if (known_parent) {
+                        CGovernanceException exception;
+                        BOOST_REQUIRE_MESSAGE(Access::ProcessVote(
+                            *governance, vote, exception, connman), exception.what());
+                        accepted_bytes += Access::VoteBytes(vote);
+                        BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), accepted_bytes);
+                    } else {
+                        (void)admit_orphan(vote);
+                        insert_parent(std::move(parent));
+                        check_promoted(vote);
+                    }
+                }
+            }
+        }
+
+        // Actual signature corruption and a revoked delegated voting key
+        // still carry permanent rejection and release retained orphan bytes.
+        for (const bool revoked : {false, true}) {
+            BOOST_TEST_CONTEXT("invalid control, revoked=" << revoked) {
+                auto parent{make_parent(true)};
+                auto vote{make_vote(parent.GetHash(), GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE)};
+                const auto retained{admit_orphan(vote)};
+                if (revoked) {
+                    auto revoked_state{std::make_shared<CDeterministicMNState>(*member->pdmnState)};
+                    revoked_state->pqVotingKey.public_key = {};
+                    auto revoked_member{std::make_shared<CDeterministicMN>(*member)};
+                    revoked_member->pdmnState = std::move(revoked_state);
+                    CDeterministicMNList revoked_list{hashes[tip_height], tip_height, 1};
+                    revoked_list.AddMN(revoked_member, false);
+                    deterministicMNManager->m_evoDb->WriteCache(hashes[tip_height], revoked_list);
+                } else {
+                    Access::ClearOrphanVotes(*governance);
+                    vote.SetTime(vote.GetTimestamp() + 1);
+                    BOOST_REQUIRE(Access::StoreOrphanVote(
+                        *governance, parent.GetHash(), vote, retained.second));
+                }
+                insert_parent(std::move(parent));
+                CGovernanceException exception;
+                BOOST_CHECK(!Access::ProcessVote(*governance, vote, exception, connman));
+                BOOST_CHECK_EQUAL(exception.GetType(), GOVERNANCE_EXCEPTION_PERMANENT_ERROR);
+                BOOST_CHECK_EQUAL(exception.GetNodePenalty(), 20);
+                Access::CheckOrphanVotes(*governance, vote.GetParentHash(), peerman);
+                BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 0U);
+                BOOST_CHECK_EQUAL(Access::PersistedVoteBytes(*governance), accepted_bytes);
+                BOOST_CHECK(!governance->HaveVoteForHash(vote.GetHash()));
+                deterministicMNManager->m_evoDb->WriteCache(hashes[tip_height], validation_mn_list);
+                check_ready();
+            }
+        }
+        return;
+    }
+
     for (const bool proposal_parent : {true, false}) {
         for (const bool voting_authority : {true, false}) {
             BOOST_TEST_CONTEXT("proposal_parent=" << proposal_parent
@@ -6672,7 +6986,7 @@ BOOST_FIXTURE_TEST_CASE(
                 ++revision;
                 std::vector<CGovernancePayment> payments;
                 payments.emplace_back(
-                    PKHash(coinbaseKey.GetPubKey()), COIN, pro_tx_hash);
+                    PKHash(fixture.coinbaseKey.GetPubKey()), COIN, pro_tx_hash);
                 CSuperblock schedule{event_height, std::move(payments)};
                 // Parent admission is separate from the orphan's signature
                 // verification; the minimal proposal keeps this role test focused.
@@ -6715,7 +7029,7 @@ BOOST_FIXTURE_TEST_CASE(
                 CGovernanceException exception;
                 BOOST_CHECK(!Access::ProcessVoteAtHeight(
                     *governance, tip_height, vote, exception,
-                    *m_node.connman, &retained));
+                    *fixture.m_node.connman, &retained));
                 BOOST_REQUIRE_MESSAGE(retained, exception.what());
                 BOOST_CHECK_EQUAL(exception.GetType(), GOVERNANCE_EXCEPTION_WARNING);
                 BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 1U);
@@ -6731,7 +7045,7 @@ BOOST_FIXTURE_TEST_CASE(
                         *governance, std::move(parent), inserted_hash));
                     BOOST_REQUIRE(inserted_hash == parent_hash);
                 }
-                Access::CheckOrphanVotes(*governance, parent_hash, *m_node.peerman);
+                Access::CheckOrphanVotes(*governance, parent_hash, *fixture.m_node.peerman);
                 const bool accepted{proposal_parent == voting_authority};
                 if (accepted) accepted_bytes += vote_bytes;
                 BOOST_CHECK_EQUAL(Access::OrphanVoteCount(*governance), 0U);
@@ -6746,6 +7060,20 @@ BOOST_FIXTURE_TEST_CASE(
             }
         }
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_pq_orphan_funding_promotion_requires_matching_parent_authority,
+    TestChain100Setup)
+{
+    CheckGovernancePQOrphanAdmission(*this, false);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    governance_registry_unavailability_preserves_orphans_and_vote_retries,
+    TestChain100Setup)
+{
+    CheckGovernancePQOrphanAdmission(*this, true);
 }
 
 // SYSCOIN: invalid orphan votes never consume retained admission capacity.

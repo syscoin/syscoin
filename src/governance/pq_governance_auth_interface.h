@@ -7,6 +7,7 @@
 
 #include <llmq/pq_global_auth.h>
 
+#include <cstdint>
 #include <span>
 #include <string>
 
@@ -15,6 +16,13 @@ class CDeterministicMNList;
 class COutPoint;
 
 namespace llmq::pq {
+
+/** A local authority read failure does not establish invalid authorization. */
+enum class GovernanceAuthResult : uint8_t {
+    VALID,
+    INVALID,
+    UNAVAILABLE,
+};
 
 struct PQRegistrySnapshot;
 class PQRegistryReadView;
@@ -32,7 +40,7 @@ class PQRegistryReadView;
     std::string& error);
 
 /** Cheap branch/current-authority checks used to revalidate cached objects. */
-[[nodiscard]] bool CheckGovernanceAuthorizationContextForBranch(
+[[nodiscard]] GovernanceAuthResult CheckGovernanceAuthorizationContextForBranch(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const COutPoint& masternode_outpoint,
@@ -66,7 +74,7 @@ class PQRegistryReadView;
  * remains an ancestry/freshness commitment, while rotation or revocation at
  * the validation tip immediately invalidates an off-chain authorization.
  */
-[[nodiscard]] bool VerifyGovernanceAuthorizationForBranch(
+[[nodiscard]] GovernanceAuthResult VerifyGovernanceAuthorizationForBranch(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const COutPoint& masternode_outpoint,

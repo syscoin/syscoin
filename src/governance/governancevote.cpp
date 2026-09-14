@@ -295,7 +295,7 @@ bool CGovernanceVote::SignPQ(const CBlockIndex& signing_block,
     return true;
 }
 
-bool CGovernanceVote::CheckPQSignature(
+llmq::pq::GovernanceAuthResult CGovernanceVote::CheckPQSignature(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     llmq::pq::GovernanceAuthPurpose purpose,
@@ -310,7 +310,7 @@ bool CGovernanceVote::CheckPQSignature(
         purpose, GetSignatureHash(), vchSig, error);
 }
 
-bool CGovernanceVote::CheckPQAuthorizationContext(
+llmq::pq::GovernanceAuthResult CGovernanceVote::CheckPQAuthorizationContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     std::string& error,
@@ -390,7 +390,7 @@ bool CGovernanceVote::IsValid(
     return dmn && CheckSignature(dmn->pdmnState->keyIDVoting);
 }
 
-bool CGovernanceVote::IsValidPQ(
+llmq::pq::GovernanceAuthResult CGovernanceVote::IsValidPQ(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     llmq::pq::GovernanceAuthPurpose purpose,
@@ -398,13 +398,13 @@ bool CGovernanceVote::IsValidPQ(
 {
     if (!IsValidBasic(validation_mn_list)) {
         error = "invalid governance vote fields or masternode identity";
-        return false;
+        return llmq::pq::GovernanceAuthResult::INVALID;
     }
     return CheckPQSignature(validation_branch, validation_mn_list, purpose,
                             error);
 }
 
-bool CGovernanceVote::IsValidPQContext(
+llmq::pq::GovernanceAuthResult CGovernanceVote::IsValidPQContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     std::string& error,
@@ -412,7 +412,7 @@ bool CGovernanceVote::IsValidPQContext(
 {
     if (!IsValidBasic(validation_mn_list)) {
         error = "invalid governance vote fields or masternode identity";
-        return false;
+        return llmq::pq::GovernanceAuthResult::INVALID;
     }
     return CheckPQAuthorizationContext(validation_branch, validation_mn_list,
                                        error, purpose);

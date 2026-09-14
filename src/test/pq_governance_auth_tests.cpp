@@ -245,6 +245,72 @@ BOOST_AUTO_TEST_CASE(unavailable_dmn_context_fails_closed_without_height_access)
 }
 
 BOOST_FIXTURE_TEST_CASE(
+    unavailable_authority_is_distinct_from_invalid_vote_or_payload,
+    BasicTestingSetup)
+{
+    const int height{Params().GetConsensus().DIP0003Height};
+    ScopedPQActivation activation{height};
+    std::array<CBlockIndex, 2> branch;
+    std::array<uint256, 2> hashes;
+    BuildBranch(branch, hashes, nullptr, height - 1, 0x39, false);
+    const uint256 pro_tx_hash{uint256{39}};
+    const COutPoint collateral{uint256{40}, 0};
+    const auto list{CurrentMNList(branch.back(), pro_tx_hash, collateral)};
+    GovernanceAuthorization authorization;
+    authorization.signed_height = height;
+    authorization.signed_block_hash = branch.back().GetBlockHash();
+    authorization.pro_tx_hash = pro_tx_hash;
+    authorization.global_key_version = 1;
+    authorization.signature[0] = 1;
+    std::vector<unsigned char> encoded;
+    BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+
+    CGovernanceVote vote{
+        collateral, uint256{41}, VOTE_SIGNAL_VALID, VOTE_OUTCOME_YES};
+    vote.SetTime(100);
+    vote.SetSignature(encoded);
+    std::string error;
+    GovernanceAuthorization decoded;
+    const auto check_unavailable = [&] {
+        BOOST_CHECK(VerifyGovernanceAuthorizationForBranch(
+            branch.back(), list, collateral, GovernanceAuthPurpose::PROPOSAL_VOTE,
+            vote.GetSignatureHash(), encoded, error) ==
+            GovernanceAuthResult::UNAVAILABLE);
+        BOOST_CHECK(CheckGovernanceAuthorizationContextForBranch(
+            branch.back(), list, collateral, encoded, decoded, error,
+            GovernanceAuthPurpose::PROPOSAL_VOTE) ==
+            GovernanceAuthResult::UNAVAILABLE);
+        BOOST_CHECK(vote.IsValidPQ(
+            branch.back(), list, GovernanceAuthPurpose::PROPOSAL_VOTE, error) ==
+            GovernanceAuthResult::UNAVAILABLE);
+        BOOST_CHECK(vote.IsValidPQContext(
+            branch.back(), list, error, GovernanceAuthPurpose::PROPOSAL_VOTE) ==
+            GovernanceAuthResult::UNAVAILABLE);
+    };
+
+    // The local manager cannot supply registry authority for this branch.
+    BOOST_REQUIRE(deterministicMNManager != nullptr);
+    check_unavailable();
+    deterministicMNManager.reset();
+    check_unavailable();
+
+    // Independently invalid fields remain invalid even without authority data.
+    BOOST_CHECK(VerifyGovernanceAuthorizationForBranch(
+        branch.back(), list, collateral, GovernanceAuthPurpose::PROPOSAL_VOTE,
+        uint256{}, encoded, error) == GovernanceAuthResult::INVALID);
+    CGovernanceVote invalid_vote{
+        collateral, uint256{41}, VOTE_SIGNAL_NONE, VOTE_OUTCOME_YES};
+    invalid_vote.SetTime(100);
+    invalid_vote.SetSignature(encoded);
+    BOOST_CHECK(invalid_vote.IsValidPQ(
+        branch.back(), list, GovernanceAuthPurpose::PROPOSAL_VOTE, error) ==
+        GovernanceAuthResult::INVALID);
+    BOOST_CHECK(invalid_vote.IsValidPQContext(
+        branch.back(), list, error, GovernanceAuthPurpose::PROPOSAL_VOTE) ==
+        GovernanceAuthResult::INVALID);
+}
+
+BOOST_FIXTURE_TEST_CASE(
     current_key_authorizes_activation_block_until_rotation_or_revocation,
     BasicTestingSetup)
 {

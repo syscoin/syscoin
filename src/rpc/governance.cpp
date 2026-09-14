@@ -7,6 +7,7 @@
 #include <governance/governance.h>
 #include <governance/governanceclasses.h>
 #include <governance/governancevalidators.h>
+#include <governance/pq_governance_auth_interface.h>
 #include <evo/deterministicmns.h>
 #include <validation.h>
 #include <masternode/masternodesync.h>
@@ -217,11 +218,17 @@ static RPCHelpMan gobject_submit()
                 RPC_INTERNAL_ERROR,
                 "Governance authority state changed during validation");
         }
-        if (!govobj.IsValidLocally(*node.chainman,
-                                   deterministicMNManager->GetListForBlock(
-                                       validation_tip),
-                                   strError, fMissingConfirmations, true,
-                                   /*fPQSignaturePreverified=*/false) &&
+        const auto validation_result{govobj.IsValidLocally(
+            *node.chainman,
+            deterministicMNManager->GetListForBlock(validation_tip),
+            strError, fMissingConfirmations, true,
+            /*fPQSignaturePreverified=*/false)};
+        if (validation_result == llmq::pq::GovernanceAuthResult::UNAVAILABLE) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "Governance authority state is unavailable: " + strError);
+        }
+        if (validation_result == llmq::pq::GovernanceAuthResult::INVALID &&
             !fMissingConfirmations) {
             LogPrintf("gobject(submit) -- Object submission rejected because object is not valid - hash = %s, strError = %s\n", strHash, strError);
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Governance object is not valid - " + strHash + " - " + strError);
@@ -320,7 +327,8 @@ UniValue ListObjects(ChainstateManager& chainman,
 
         // REPORT VALIDITY AND CACHING FLAGS FOR VARIOUS SETTINGS
         std::string strError = "";
-        bObj.pushKV("fBlockchainValidity",  govObj.IsValidLocally(chainman, tip_mn_list, strError, false));
+        bObj.pushKV("fBlockchainValidity",  govObj.IsValidLocally(chainman, tip_mn_list, strError, false) ==
+            llmq::pq::GovernanceAuthResult::VALID);
         bObj.pushKV("IsValidReason",  strError.c_str());
         bObj.pushKV("fCachedValid",  govObj.IsSetCachedValid());
         bObj.pushKV("fCachedFunding",  govObj.IsSetCachedFunding());
@@ -490,7 +498,8 @@ static RPCHelpMan gobject_get()
 
     // --
     std::string strError;
-    objResult.pushKV("fLocalValidity",  pGovObj->IsValidLocally(*node.chainman, validation_mn_list, strError, false));
+    objResult.pushKV("fLocalValidity",  pGovObj->IsValidLocally(*node.chainman, validation_mn_list, strError, false) ==
+        llmq::pq::GovernanceAuthResult::VALID);
     objResult.pushKV("IsValidReason",  strError.c_str());
     objResult.pushKV("fCachedValid",  pGovObj->IsSetCachedValid());
     objResult.pushKV("fCachedFunding",  pGovObj->IsSetCachedFunding());
@@ -640,17 +649,21 @@ static RPCHelpMan voteraw()
     vote.SetTime(nTime);
     vote.SetSignature(*vchSig);
 
-    bool signature_valid{false};
     std::string signature_error;
     const auto pq_purpose{GetGovernanceVoteAuthPurpose(
         govObjType, eVoteSignal, validation_tip->nHeight)};
-    if (pq_purpose) {
-        signature_valid = vote.IsValidPQ(
-            *validation_tip, mnList, *pq_purpose, signature_error);
-    } else {
-        signature_valid = vote.IsValid(mnList);
+    const auto signature_result{pq_purpose
+        ? vote.IsValidPQ(
+              *validation_tip, mnList, *pq_purpose, signature_error)
+        : vote.IsValid(mnList)
+            ? llmq::pq::GovernanceAuthResult::VALID
+            : llmq::pq::GovernanceAuthResult::INVALID};
+    if (signature_result == llmq::pq::GovernanceAuthResult::UNAVAILABLE) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            "Governance authority state is unavailable: " + signature_error);
     }
-    if (!signature_valid) {
+    if (signature_result == llmq::pq::GovernanceAuthResult::INVALID) {
         if (signature_error.empty()) {
             signature_error = "invalid governance voting-key signature";
         }

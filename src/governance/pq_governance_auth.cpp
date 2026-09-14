@@ -216,7 +216,7 @@ bool GetCurrentGovernanceSigningKey(const CBlockIndex& signing_tip,
     return true;
 }
 
-bool CheckGovernanceAuthorizationContextForBranch(
+GovernanceAuthResult CheckGovernanceAuthorizationContextForBranch(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const COutPoint& masternode_outpoint,
@@ -226,15 +226,26 @@ bool CheckGovernanceAuthorizationContextForBranch(
     GovernanceAuthPurpose purpose)
 {
     PQRegistryReadView current_snapshot;
-    if (deterministicMNManager == nullptr ||
-        !deterministicMNManager->GetPQRegistryReadView(
-            &validation_branch, current_snapshot, error)) {
+    if (deterministicMNManager == nullptr) {
+        error = "deterministic masternode manager is unavailable";
+        return GovernanceAuthResult::UNAVAILABLE;
+    }
+    bool available{false};
+    try {
+        available = deterministicMNManager->GetPQRegistryReadView(
+            &validation_branch, current_snapshot, error);
+    } catch (const std::runtime_error& e) {
+        error = e.what();
+    }
+    if (!available) {
         error = "unable to reconstruct current governance registry: " + error;
-        return false;
+        return GovernanceAuthResult::UNAVAILABLE;
     }
     return CheckGovernanceAuthorizationContext(
         validation_branch, validation_mn_list, current_snapshot,
-        masternode_outpoint, encoded, authorization, error, purpose);
+        masternode_outpoint, encoded, authorization, error, purpose)
+        ? GovernanceAuthResult::VALID
+        : GovernanceAuthResult::INVALID;
 }
 
 bool CheckGovernanceAuthorizationContext(
@@ -277,7 +288,7 @@ bool CheckGovernanceAuthorizationContext(
         /*resolved_current_key=*/nullptr, error, purpose);
 }
 
-bool VerifyGovernanceAuthorizationForBranch(
+GovernanceAuthResult VerifyGovernanceAuthorizationForBranch(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     const COutPoint& masternode_outpoint,
@@ -288,14 +299,23 @@ bool VerifyGovernanceAuthorizationForBranch(
 {
     if (unsigned_payload_hash.IsNull()) {
         error = "invalid governance unsigned payload hash";
-        return false;
+        return GovernanceAuthResult::INVALID;
     }
     PQRegistryReadView current_snapshot;
-    if (deterministicMNManager == nullptr ||
-        !deterministicMNManager->GetPQRegistryReadView(
-            &validation_branch, current_snapshot, error)) {
+    if (deterministicMNManager == nullptr) {
+        error = "deterministic masternode manager is unavailable";
+        return GovernanceAuthResult::UNAVAILABLE;
+    }
+    bool available{false};
+    try {
+        available = deterministicMNManager->GetPQRegistryReadView(
+            &validation_branch, current_snapshot, error);
+    } catch (const std::runtime_error& e) {
+        error = e.what();
+    }
+    if (!available) {
         error = "unable to reconstruct current governance registry: " + error;
-        return false;
+        return GovernanceAuthResult::UNAVAILABLE;
     }
     return VerifyGovernanceAuthorizationWithCurrentRegistry(
         validation_branch, validation_mn_list, current_snapshot.Height(),
@@ -303,7 +323,9 @@ bool VerifyGovernanceAuthorizationForBranch(
         [&](const uint256& pro_tx_hash) {
             return current_snapshot.FindOperator(pro_tx_hash);
         },
-        masternode_outpoint, purpose, unsigned_payload_hash, encoded, error);
+        masternode_outpoint, purpose, unsigned_payload_hash, encoded, error)
+        ? GovernanceAuthResult::VALID
+        : GovernanceAuthResult::INVALID;
 }
 
 bool VerifyGovernanceAuthorizationForBranch(

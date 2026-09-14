@@ -14,6 +14,7 @@
 #include <governance/governanceclasses.h>
 #include <governance/governancecommon.h>
 #include <governance/governancevalidators.h>
+#include <governance/pq_governance_auth_interface.h>
 #include <llmq/pq_global_auth.h>
 #include <masternode/masternodemeta.h>
 #include <masternode/activemasternode.h>
@@ -28,6 +29,9 @@
 #include <timedata.h>
 
 #include <algorithm>
+#include <stdexcept>
+
+using llmq::pq::GovernanceAuthResult;
 
 std::unique_ptr<CGovernanceManager> governance;
 int nSubmittedFinalBudget;
@@ -40,6 +44,20 @@ void AssertGovernanceLockNotHeld()
 namespace {
 
 constexpr int GOVERNANCE_AUTH_SIGNING_DEPTH{6};
+
+bool ReadGovernanceMNList(const CBlockIndex* tip,
+                          CDeterministicMNList& list)
+{
+    if (tip == nullptr || deterministicMNManager == nullptr) return false;
+    try {
+        list = deterministicMNManager->GetListForBlock(tip);
+        return true;
+    } catch (const std::runtime_error& e) {
+        LogPrint(BCLog::GOBJECT, "%s: governance masternode list unavailable: %s\n",
+                 __func__, e.what());
+        return false;
+    }
+}
 
 const CBlockIndex* GetGovernanceSigningBlock(const CBlockIndex* tip)
 {
@@ -1411,24 +1429,23 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
         CDeterministicMNList object_mn_list;
         if (govobj.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER) {
             std::string authorization_error;
-            bool authorization_context_valid{false};
+            GovernanceAuthResult authorization{GovernanceAuthResult::UNAVAILABLE};
             {
                 LOCK(cs_main);
                 pq_preverified_tip = chainman.ActiveTip();
                 if (pq_preverified_tip == nullptr) return;
-                object_mn_list = deterministicMNManager->GetListForBlock(
-                    pq_preverified_tip);
-                authorization_context_valid =
+                if (!ReadGovernanceMNList(pq_preverified_tip, object_mn_list)) return;
+                authorization =
                     govobj.CheckPQAuthorizationContext(
                         *pq_preverified_tip, object_mn_list,
                         authorization_error);
             }
-            const bool signature_valid{
-                authorization_context_valid &&
-                govobj.CheckPQSignature(*pq_preverified_tip,
-                                        object_mn_list,
-                                        authorization_error)};
-            if (!signature_valid) {
+            if (authorization == GovernanceAuthResult::VALID) {
+                authorization = govobj.CheckPQSignature(
+                    *pq_preverified_tip, object_mn_list, authorization_error);
+            }
+            if (authorization == GovernanceAuthResult::UNAVAILABLE) return;
+            if (authorization == GovernanceAuthResult::INVALID) {
                 bool stable_context{false};
                 {
                     LOCK(cs_main);
@@ -1467,8 +1484,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                 return;
             }
             if (pq_preverified_tip == nullptr) {
-                object_mn_list =
-                    deterministicMNManager->GetListForBlock(active_tip);
+                if (!ReadGovernanceMNList(active_tip, object_mn_list)) return;
             }
 
             if (const auto known{mapObjects.find(nHash)};
@@ -1537,9 +1553,11 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
             // CHECK OBJECT AGAINST LOCAL BLOCKCHAIN
 
             bool fMissingConfirmations = false;
-            bool fIsValid = govobj.IsValidLocally(
+            const auto local_result{govobj.IsValidLocally(
                 chainman, object_mn_list, strError, fMissingConfirmations, true,
-                pq_preverified_tip != nullptr);
+                pq_preverified_tip != nullptr)};
+            if (local_result == GovernanceAuthResult::UNAVAILABLE) return;
+            const bool fIsValid{local_result == GovernanceAuthResult::VALID};
 
             if (fRateCheckBypassed && fIsValid && !MasternodeRateCheck(govobj, true)) {
                 LogPrint(BCLog::GOBJECT, "MNGOVERNANCEOBJECT -- masternode rate check failed (after signature verification) - %s - (current block height %d)\n", strHash, GetCachedBlockHeight());
@@ -1709,9 +1727,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                     if (const auto found_vote{
                             object.GetVoteFile().GetVote(nHash)}) {
                         stored_vote.emplace(*found_vote);
-                        known_mn_list =
-                            deterministicMNManager->GetListForBlock(
-                                known_tip);
+                        if (!ReadGovernanceMNList(known_tip, known_mn_list)) return;
                         known_purpose = GetGovernanceVoteAuthPurpose(
                             known_object_type, vote.GetSignal(), known_tip->nHeight);
                     }
@@ -1733,11 +1749,13 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
             }
 
             std::string known_error;
-            const bool valid_alternate{known_purpose
+            const auto alternate_result{known_purpose
                 ? VerifyPQVoteUnlocked(
                       vote, *known_tip, known_mn_list,
                       *known_purpose, known_error)
-                : vote.IsValid(known_mn_list)};
+                : vote.IsValid(known_mn_list)
+                    ? GovernanceAuthResult::VALID : GovernanceAuthResult::INVALID};
+            if (alternate_result == GovernanceAuthResult::UNAVAILABLE) return;
             bool stable_known_vote{false};
             {
                 LOCK2(chainman.GetMutex(), cs);
@@ -1774,7 +1792,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                 }
             }
             if (!stable_known_vote) return;
-            if (!valid_alternate) {
+            if (alternate_result == GovernanceAuthResult::INVALID) {
                 response.SetOutcome(
                     GovernanceRequestTracker::ResponseOutcome::
                         PAYLOAD_INVALID);
@@ -1863,9 +1881,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                         }
                     }
                     if (rejected_tip != nullptr) {
-                        rejected_mn_list =
-                            deterministicMNManager->GetListForBlock(
-                                rejected_tip);
+                        if (!ReadGovernanceMNList(rejected_tip, rejected_mn_list)) return;
                         rejected_purpose =
                             GetGovernanceVoteAuthPurpose(
                                 rejected_object_type,
@@ -1876,13 +1892,15 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                 }
                 if (rejected_tip != nullptr) {
                     std::string rejected_error;
-                    const bool valid_rejected{rejected_purpose
+                    const auto rejected_result{rejected_purpose
                         ? VerifyPQVoteUnlocked(
                               vote, *rejected_tip,
                               rejected_mn_list,
                               *rejected_purpose,
                               rejected_error)
-                        : vote.IsValid(rejected_mn_list)};
+                        : vote.IsValid(rejected_mn_list)
+                            ? GovernanceAuthResult::VALID : GovernanceAuthResult::INVALID};
+                    if (rejected_result == GovernanceAuthResult::UNAVAILABLE) return;
                     bool stable_rejected_context{false};
                     {
                         LOCK2(chainman.GetMutex(), cs);
@@ -1918,12 +1936,12 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
                     }
                     if (stable_rejected_context) {
                         response.SetOutcome(
-                            valid_rejected
+                            rejected_result == GovernanceAuthResult::VALID
                                 ? GovernanceRequestTracker::
                                       ResponseOutcome::VALID_SUPERSEDED
                                 : GovernanceRequestTracker::
                                       ResponseOutcome::PAYLOAD_INVALID);
-                        if (valid_rejected) {
+                        if (rejected_result == GovernanceAuthResult::VALID) {
                             if (peer) peerman.AddKnownTx(*peer, nHash);
                         } else if (peer && masternodeSync.IsSynced() &&
                                    !response.Authorization().page_required) {
@@ -1949,7 +1967,7 @@ void CGovernanceManager::ProcessMessage(CNode* pfrom, const std::string& strComm
     }
 }
 
-bool CGovernanceManager::VerifyPQVoteUnlocked(
+GovernanceAuthResult CGovernanceManager::VerifyPQVoteUnlocked(
     const CGovernanceVote& vote, const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
     llmq::pq::GovernanceAuthPurpose purpose,
@@ -1961,7 +1979,7 @@ bool CGovernanceManager::VerifyPQVoteUnlocked(
                           error);
 }
 
-bool CGovernanceManager::VerifyOrphanPQVoteUnlocked(
+GovernanceAuthResult CGovernanceManager::VerifyOrphanPQVoteUnlocked(
     const CGovernanceVote& vote, const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
     std::string& error) const
@@ -1970,30 +1988,32 @@ bool CGovernanceManager::VerifyOrphanPQVoteUnlocked(
     AssertLockNotHeld(cs);
 
     std::string proposal_error;
-    if (VerifyPQVoteUnlocked(
+    const auto proposal_result{VerifyPQVoteUnlocked(
             vote, validation_tip, validation_mn_list,
             vote.GetSignal() == VOTE_SIGNAL_FUNDING
                 ? llmq::pq::GovernanceAuthPurpose::PROPOSAL_FUNDING_VOTE
                 : llmq::pq::GovernanceAuthPurpose::PROPOSAL_VOTE,
-            proposal_error)) {
-        error.clear();
-        return true;
+            proposal_error)};
+    if (proposal_result != GovernanceAuthResult::INVALID) {
+        error = std::move(proposal_error);
+        return proposal_result;
     }
 
     std::string trigger_error;
-    if (VerifyPQVoteUnlocked(
+    const auto trigger_result{VerifyPQVoteUnlocked(
             vote, validation_tip, validation_mn_list,
             llmq::pq::GovernanceAuthPurpose::TRIGGER_VOTE,
-            trigger_error)) {
-        error.clear();
-        return true;
+            trigger_error)};
+    if (trigger_result != GovernanceAuthResult::INVALID) {
+        error = std::move(trigger_error);
+        return trigger_result;
     }
     error = "proposal authorization: " + proposal_error +
             "; trigger authorization: " + trigger_error;
-    return false;
+    return GovernanceAuthResult::INVALID;
 }
 
-bool CGovernanceManager::VerifyTriggerObjectUnlocked(
+GovernanceAuthResult CGovernanceManager::VerifyTriggerObjectUnlocked(
     const CGovernanceObject& object, const CBlockIndex& validation_tip,
     const CDeterministicMNList& validation_mn_list,
     std::string& error) const
@@ -2011,7 +2031,7 @@ void CGovernanceManager::CheckOrphanVotes(
 
     struct CheckedVote {
         vote_time_pair_t pair;
-        bool signature_valid{false};
+        GovernanceAuthResult authorization{GovernanceAuthResult::UNAVAILABLE};
     };
 
     // SYSCOIN: one ordinary tip advance must not strand an orphan batch after
@@ -2036,8 +2056,7 @@ void CGovernanceManager::CheckOrphanVotes(
             m_pq_inactive_triggers.contains(object_hash)) {
             return;
         }
-        validation_mn_list =
-            deterministicMNManager->GetListForBlock(validation_tip);
+        if (!ReadGovernanceMNList(validation_tip, validation_mn_list)) return;
         object_type = object_it->second.GetObjectType();
 
         std::vector<vote_time_pair_t> stored;
@@ -2061,7 +2080,7 @@ void CGovernanceManager::CheckOrphanVotes(
     std::vector<CheckedVote> checked;
     checked.reserve(candidates.size());
     for (const auto& pair : candidates) {
-        bool signature_valid{false};
+        GovernanceAuthResult authorization{GovernanceAuthResult::UNAVAILABLE};
         const auto pq_purpose{GetGovernanceVoteAuthPurpose(
             object_type, pair.first.GetSignal(), validation_tip->nHeight)};
         if (pq_purpose) {
@@ -2070,13 +2089,14 @@ void CGovernanceManager::CheckOrphanVotes(
             AssertLockNotHeld(cs_main);
             AssertLockNotHeld(cs);
             std::string signature_error;
-            signature_valid = VerifyPQVoteUnlocked(
+            authorization = VerifyPQVoteUnlocked(
                 pair.first, *validation_tip, validation_mn_list,
                 *pq_purpose, signature_error);
         } else {
-            signature_valid = pair.first.IsValid(validation_mn_list);
+            authorization = pair.first.IsValid(validation_mn_list)
+                ? GovernanceAuthResult::VALID : GovernanceAuthResult::INVALID;
         }
-        checked.push_back(CheckedVote{pair, signature_valid});
+        checked.push_back(CheckedVote{pair, authorization});
     }
 
     std::vector<CGovernanceVote> accepted;
@@ -2117,26 +2137,30 @@ void CGovernanceManager::CheckOrphanVotes(
                     })};
                 if (!still_orphaned) continue;
 
-                // Move, rather than duplicate, the persisted vote budget.
-                // Stable invalid candidates are discarded in this same
-                // atomic manager critical section.
-                EraseOrphanVote(object_hash, result.pair);
-
-                if (result.signature_valid) {
+                if (result.authorization == GovernanceAuthResult::UNAVAILABLE) {
+                    continue;
+                }
+                if (result.authorization == GovernanceAuthResult::INVALID) {
+                    EraseOrphanVote(object_hash, result.pair);
+                } else {
                     CGovernanceException exception;
                     const bool pq_signature_preverified{
                         GetGovernanceVoteAuthPurpose(
                             object_type, result.pair.first.GetSignal(), validation_tip->nHeight)
                             .has_value()};
-                    if (ProcessVoteWithBudget(
+                    const bool admitted{ProcessVoteWithBudget(
                             object, *validation_tip, validation_mn_list,
                             result.pair.first, exception,
-                            pq_signature_preverified) &&
+                            pq_signature_preverified, &result.pair)};
+                    if (admitted &&
                         cmapVoteToObject.Insert(
                             result.pair.first.GetHash(), &object)) {
                         IndexGovernanceVote(
                             object_hash, object_type, result.pair.first);
                         accepted.push_back(result.pair.first);
+                    } else if (!admitted &&
+                               exception.GetType() != GOVERNANCE_EXCEPTION_TEMPORARY_ERROR) {
+                        EraseOrphanVote(object_hash, result.pair);
                     }
                 }
             }
@@ -2241,8 +2265,9 @@ GovernanceObjectAdmissionResult CGovernanceManager::AddGovernanceObject(
         // was verified; independently sampling the manager tip permits an
         // A-to-B-to-A race to pair the proof with the wrong list.
         if (validation_tip != nullptr) {
-            tip_mn_list =
-                deterministicMNManager->GetListForBlock(validation_tip);
+            if (!ReadGovernanceMNList(validation_tip, tip_mn_list)) {
+                return GovernanceObjectAdmissionResult::UNAVAILABLE;
+            }
         }
     }
 
@@ -2269,8 +2294,12 @@ GovernanceObjectAdmissionResult CGovernanceManager::AddGovernanceObject(
         }
 
         // Make sure this object is valid locally
-        if (!govobj.IsValidLocally(chainman, tip_mn_list, strError, true,
-                                   use_preverified_pq)) {
+        const auto local_result{govobj.IsValidLocally(
+            chainman, tip_mn_list, strError, true, use_preverified_pq)};
+        if (local_result == GovernanceAuthResult::UNAVAILABLE) {
+            return GovernanceObjectAdmissionResult::UNAVAILABLE;
+        }
+        if (local_result == GovernanceAuthResult::INVALID) {
             LogPrint(BCLog::GOBJECT, "CGovernanceManager::AddGovernanceObject -- invalid governance object - %s - (nCachedBlockHeight %d) \n", strError, GetCachedBlockHeight());
             return GovernanceObjectAdmissionResult::INVALID;
         }
@@ -2804,9 +2833,9 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
         return std::nullopt;
     }
     std::string signature_error;
-    if (!VerifyTriggerObjectUnlocked(
+    if (VerifyTriggerObjectUnlocked(
             gov_sb, *validation_tip, validation_mn_list,
-            signature_error)) {
+            signature_error) != GovernanceAuthResult::VALID) {
         LogPrint(BCLog::GOBJECT,
                  "CGovernanceManager::%s Created trigger has invalid PQ authorization: %s\n",
                  __func__, signature_error);
@@ -2830,9 +2859,9 @@ std::optional<const CGovernanceObject> CGovernanceManager::CreateGovernanceTrigg
         // SYSCOIN: only cheap authorization context is repeated while the
         // exact verified tip is locked for commit.
         if (std::string strError;
-            !gov_sb.IsValidLocally(chainman, validation_mn_list, strError,
+            gov_sb.IsValidLocally(chainman, validation_mn_list, strError,
                                    /*fCheckCollateral=*/true,
-                                   /*fPQSignaturePreverified=*/true)) {
+                                   /*fPQSignaturePreverified=*/true) != GovernanceAuthResult::VALID) {
             LogPrint(BCLog::GOBJECT,
                      "CGovernanceManager::%s Created trigger is invalid: %s\n",
                      __func__, strError);
@@ -3285,6 +3314,13 @@ bool CGovernanceManager::ProcessVote(
     int object_type{GOVERNANCE_OBJECT_UNKNOWN};
     std::optional<llmq::pq::GovernanceAuthPurpose> pq_purpose;
     bool orphan_signature_is_pq{false};
+    const auto read_validation_list = [&]() {
+        if (ReadGovernanceMNList(validation_tip, validation_mn_list)) return true;
+        exception = CGovernanceException(
+            "CGovernanceManager::ProcessVote -- masternode authority unavailable",
+            GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
+        return false;
+    };
 
     {
         LOCK2(chainman.GetMutex(), cs);
@@ -3310,8 +3346,7 @@ bool CGovernanceManager::ProcessVote(
             cmapVoteToObject.Erase(nHashVote);
         }
         if (it == mapObjects.end()) {
-            validation_mn_list =
-                deterministicMNManager->GetListForBlock(validation_tip);
+            if (!read_validation_list()) return false;
             if (!vote.IsValidBasic(validation_mn_list) ||
                 !IsPotentialOrphanGovernanceVoteAuthorization(
                     vote.GetSignal(), vote.GetSignatureSize(), validation_tip->nHeight)) {
@@ -3356,8 +3391,7 @@ bool CGovernanceManager::ProcessVote(
                 }
             }
 
-            validation_mn_list =
-                deterministicMNManager->GetListForBlock(validation_tip);
+            if (!read_validation_list()) return false;
             pq_purpose = GetGovernanceVoteAuthPurpose(
                 object_type, vote.GetSignal(), validation_tip->nHeight);
             if (!pq_purpose) {
@@ -3384,12 +3418,20 @@ bool CGovernanceManager::ProcessVote(
         for (std::size_t attempt{0};
              attempt < MAX_ORPHAN_ADMISSION_ATTEMPTS; ++attempt) {
             std::string signature_error;
-            const bool signature_valid{orphan_signature_is_pq
+            const auto signature_result{orphan_signature_is_pq
                 ? VerifyOrphanPQVoteUnlocked(
                       vote, *validation_tip, validation_mn_list,
                       signature_error)
-                : vote.IsValid(validation_mn_list)};
-            if (!signature_valid) {
+                : vote.IsValid(validation_mn_list)
+                    ? GovernanceAuthResult::VALID : GovernanceAuthResult::INVALID};
+            if (signature_result == GovernanceAuthResult::UNAVAILABLE) {
+                exception = CGovernanceException(
+                    "CGovernanceManager::ProcessVote -- orphan vote authority unavailable: " +
+                        signature_error,
+                    GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
+                return false;
+            }
+            if (signature_result == GovernanceAuthResult::INVALID) {
                 const std::string error{strprintf(
                     "CGovernanceManager::ProcessVote -- Invalid orphan vote authorization for object %s%s%s",
                     nHashGovobj.ToString(),
@@ -3412,9 +3454,7 @@ bool CGovernanceManager::ProcessVote(
                                 GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
                             return false;
                         }
-                        validation_mn_list =
-                            deterministicMNManager->GetListForBlock(
-                                validation_tip);
+                        if (!read_validation_list()) return false;
                         continue;
                     }
                     exception = CGovernanceException(
@@ -3468,8 +3508,7 @@ bool CGovernanceManager::ProcessVote(
                 LOCK2(chainman.GetMutex(), cs);
                 validation_tip = chainman.ActiveTip();
                 if (!IsReadyForTip(validation_tip)) return false;
-                validation_mn_list =
-                    deterministicMNManager->GetListForBlock(validation_tip);
+                if (!read_validation_list()) return false;
                 continue;
             }
 
@@ -3490,9 +3529,17 @@ bool CGovernanceManager::ProcessVote(
     // work outside chain/governance/object locks, then bind the result to the
     // exact branch again before mutating vote state.
     std::string signature_error;
-    if (!pq_purpose || !VerifyPQVoteUnlocked(
+    const auto signature_result{pq_purpose ? VerifyPQVoteUnlocked(
             vote, *validation_tip, validation_mn_list,
-            *pq_purpose, signature_error)) {
+            *pq_purpose, signature_error) : GovernanceAuthResult::INVALID};
+    if (signature_result == GovernanceAuthResult::UNAVAILABLE) {
+        exception = CGovernanceException(
+            "CGovernanceManager::ProcessVote -- vote authority unavailable: " +
+                signature_error,
+            GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
+        return false;
+    }
+    if (signature_result == GovernanceAuthResult::INVALID) {
         const std::string error{strprintf(
             "CGovernanceManager::ProcessVote -- Invalid PQ vote: %s",
             signature_error)};
@@ -3591,7 +3638,12 @@ void CGovernanceManager::CheckPostponedObjects(PeerManager& peerman)
             std::string strError;
             bool fMissingConfirmations;
             if (govobj.IsCollateralValid(chainman, strError, fMissingConfirmations)) {
-                if (govobj.IsValidLocally(chainman, mnList, strError, false)) {
+                const auto local_result{govobj.IsValidLocally(chainman, mnList, strError, false)};
+                if (local_result == GovernanceAuthResult::UNAVAILABLE) {
+                    ++it;
+                    continue;
+                }
+                if (local_result == GovernanceAuthResult::VALID) {
                     ready_objects.push_back(govobj);
                 } else {
                     LogPrint(BCLog::GOBJECT, "CGovernanceManager::CheckPostponedObjects -- %s invalid\n", nHash.ToString());
@@ -3681,17 +3733,22 @@ bool CGovernanceManager::ProcessVoteWithBudget(
     const CDeterministicMNList& validation_mn_list,
     const CGovernanceVote& vote,
     CGovernanceException& exception,
-    bool pq_signature_preverified)
+    bool pq_signature_preverified,
+    const vote_time_pair_t* transferred_orphan)
 {
     AssertLockHeld(cs);
     const uint64_t current_bytes{
         object.GetVoteFile().GetSerializedVoteBytes()};
+    // Credit the orphan's existing reservation without removing its exact
+    // wire or expiration before the commit-time authority check succeeds.
+    const uint64_t released_bytes{current_bytes +
+        (transferred_orphan ? PersistedVoteBytes(transferred_orphan->first) : 0)};
     const uint64_t projected_bytes{
         object.GetVoteFile().ProjectedSerializedVoteBytes(
             vote, /*retain_replaced=*/
                       object.GetObjectType() == GOVERNANCE_OBJECT_TRIGGER ||
                       object.GetObjectType() == GOVERNANCE_OBJECT_PROPOSAL)};
-    if (!CanAdmitPersistedVoteBytes(current_bytes, projected_bytes)) {
+    if (!CanAdmitPersistedVoteBytes(released_bytes, projected_bytes)) {
         exception = CGovernanceException(
             "CGovernanceManager::ProcessVote -- persisted vote byte budget exhausted",
             GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
@@ -3703,12 +3760,15 @@ bool CGovernanceManager::ProcessVoteWithBudget(
     }
     const uint64_t actual_bytes{
         object.GetVoteFile().GetSerializedVoteBytes()};
-    if (!CanAdmitPersistedVoteBytes(current_bytes, actual_bytes)) {
+    if (!CanAdmitPersistedVoteBytes(released_bytes, actual_bytes)) {
         // ProjectedSerializedVoteBytes is intentionally the same replacement
         // rule as AddVote. Treat divergence as an invariant failure rather
         // than retaining state beyond the persisted budget.
         throw std::logic_error(
             "governance vote byte projection diverged from admission");
+    }
+    if (transferred_orphan) {
+        EraseOrphanVote(object.GetHash(), *transferred_orphan);
     }
     m_persisted_vote_bytes =
         m_persisted_vote_bytes - current_bytes + actual_bytes;

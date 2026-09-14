@@ -8,13 +8,20 @@
 #include <compat/compat.h>
 #include <consensus/validation.h>
 #include <cstdint>
+#include <crypto/common.h>
+#include <crypto/slhdsa/slhdsa.h>
+#include <evo/deterministicmns.h>
+#include <evo/pq_registry.h>
 #include <governance/governance.h>
+#include <governance/governanceexceptions.h>
+#include <governance/pq_governance_auth.h>
 #include <governance/governancepages.h> // SYSCOIN: fork relay tests.
 #include <init.h>
 #include <interfaces/chain.h>
 #include <llmq/pq_quorum_overlay.h>
 #include <llmq/quorums_init.h>
 #include <masternode/activemasternode.h>
+#include <masternode/masternodesync.h>
 #include <net.h>
 #include <net_processing.h>
 #include <netaddress.h>
@@ -25,7 +32,9 @@
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
+#include <test/util/logging.h>
 #include <test/util/net.h> // SYSCOIN: fork connection-role test hooks.
+#include <test/util/pq_registry_read_error.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
@@ -3521,6 +3530,342 @@ BOOST_AUTO_TEST_CASE(
     }
 
     m_node.peerman->FinalizeNode(node);
+}
+
+// Exercise the serialized payload handler and its scoped response destructor,
+// including the distinction between a bad peer and unavailable local authority.
+BOOST_AUTO_TEST_CASE(pq_governance_vote_handler_defers_unavailable_registry)
+{
+    using namespace llmq::pq;
+    using ReadFault = test::PQRegistryReadErrorTestAccess;
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    auto& chainman{static_cast<TestChainstateManager&>(*m_node.chainman)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    constexpr int preparation_height{1295};
+    constexpr int activation_height{1296};
+    constexpr int tip_height{1297};
+    const auto original_time{GetMockTime()};
+    SetMockTime(std::chrono::seconds{1'700'000'000});
+    std::vector<uint256> hashes(tip_height + 1);
+    std::vector<CBlockIndex> indices(tip_height + 1);
+    for (int height{0}; height <= tip_height; ++height) {
+        WriteLE32(hashes[height].begin(), 920'000 + height);
+        indices[height].nHeight = height;
+        indices[height].nTime = GetTime<std::chrono::seconds>().count();
+        indices[height].pprev = height ? &indices[height - 1] : nullptr;
+        indices[height].phashBlock = &hashes[height];
+        indices[height].BuildSkip();
+    }
+    struct RestoreContext {
+        ChainstateManager& chainman;
+        Consensus::Params& consensus;
+        Consensus::Params original_consensus;
+        CBlockIndex* original_tip;
+        std::unique_ptr<CDeterministicMNManager> original_manager;
+        int sync_mode;
+        std::chrono::seconds time;
+        ~RestoreContext()
+        {
+            masternodeSync.SetSyncMode(sync_mode);
+            LOCK(::cs_main);
+            governance->ObserveChainTip(nullptr);
+            chainman.ActiveChain().SetTip(*original_tip);
+            deterministicMNManager = std::move(original_manager);
+            consensus = original_consensus;
+            SetMockTime(time);
+        }
+    } restore{chainman, consensus, consensus,
+              WITH_LOCK(::cs_main, return chainman.ActiveTip()),
+              std::move(deterministicMNManager), masternodeSync.GetAssetID(),
+              original_time};
+    BOOST_REQUIRE(restore.original_tip);
+    consensus.DIP0003Height = preparation_height - 1;
+    consensus.DIP0003EnforcementHeight = preparation_height - 1;
+    consensus.nPQPreparationHeight = preparation_height;
+    consensus.nPQActivationHeight = activation_height;
+    consensus.nPQChainLockEpochOrigin = 1440;
+    consensus.nPQRegistrationCutoffBlocks = 144;
+    consensus.nPQFutureHorizonEpochs = 8;
+    PQRegistryConfig config;
+    BOOST_REQUIRE(GetPQRegistryConfig(consensus, config) ==
+                  PQRegistryDeploymentResult::VALID);
+    const DBParams dmn_params{
+        .path = m_path_root / "governance_vote_handler_evodb",
+        .cache_bytes = 1 << 20,
+        .memory_only = false,
+        .wipe_data = false,
+    };
+    auto registry_params{dmn_params};
+    registry_params.path = m_path_root / "governance_vote_handler_evodb_pq_registry";
+    registry_params.cache_bytes /= 2;
+    const auto root{PQRegistrySnapshot{}.RecomputeConsensusStateRoot(
+        consensus.hashGenesisBlock)};
+    BOOST_REQUIRE(root);
+    {
+        PQRegistryManager writer{
+            registry_params, consensus.hashGenesisBlock, config,
+            evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id};
+        for (int height{preparation_height}; height <= tip_height; ++height) {
+            PQRegistryDiskSnapshot disk;
+            disk.is_checkpoint = height == preparation_height;
+            disk.height = height;
+            disk.block_hash = hashes[height];
+            disk.previous_block_hash = hashes[height - 1];
+            disk.previous_consensus_state_root = *root;
+            disk.consensus_state_root = *root;
+            BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(disk.block_hash, disk));
+        }
+    }
+    slhdsa::KeyGenerationSeed seed{};
+    seed[0] = 71;
+    auto key{slhdsa::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(key);
+    VotingKeyRecord voting_key;
+    BOOST_REQUIRE(key->GetPublicKey(voting_key.public_key));
+    voting_key.key_version = 1;
+    voting_key.activated_height = activation_height;
+    const uint256 pro_tx_hash{uint256{211}};
+    const COutPoint collateral{uint256{212}, 0};
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+    auto state{std::make_shared<CDeterministicMNState>()};
+    state->keyIDOwner = owner_key.GetPubKey().GetID();
+    state->keyIDVoting = state->keyIDOwner;
+    state->nRegisteredHeight = preparation_height - 1;
+    state->pqVotingKey = voting_key;
+    auto member{std::make_shared<CDeterministicMN>(1)};
+    member->proTxHash = pro_tx_hash;
+    member->collateralOutpoint = collateral;
+    member->pdmnState = std::move(state);
+    CDeterministicMNList mn_list{hashes[tip_height], tip_height, 1};
+    mn_list.AddMN(member, /*fBumpTotalCount=*/false);
+    deterministicMNManager = std::make_unique<CDeterministicMNManager>(dmn_params);
+    deterministicMNManager->m_evoDb->WriteCache(hashes[tip_height], mn_list);
+    WITH_LOCK(::cs_main, chainman.ActiveChain().SetTip(indices[tip_height]));
+    if (chainman.IsInitialBlockDownload()) chainman.JumpOutOfIbd();
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
+
+    // Load minimal proposal parents through the existing store format. Parent
+    // collateral admission is independent of the vote/transport boundary here.
+    struct ParentStore : GovernanceStore {
+        void Add(const CGovernanceObject& object)
+        {
+            LOCK(cs);
+            mapObjects.emplace(object.GetHash(), object);
+        }
+    } parents;
+    std::vector<uint256> parent_hashes;
+    for (int revision{1}; revision <= 18; ++revision) {
+        CGovernanceObject parent{
+            {}, revision, GetTime<std::chrono::seconds>().count(), {},
+            "7b2274797065223a317d"};
+        parent_hashes.push_back(parent.GetHash());
+        parents.Add(parent);
+    }
+    CDataStream stored{SER_DISK, PROTOCOL_VERSION};
+    stored << parents;
+    stored >> static_cast<GovernanceStore&>(*governance);
+    BOOST_REQUIRE(governance_tests::PublishGovernanceReadyForTest(
+        *governance, indices[tip_height]));
+    const auto sign_vote{[&](CGovernanceVote& vote, int signed_height,
+                           bool bad_signature = false) {
+        GovernanceAuthorization authorization;
+        authorization.signed_height = signed_height;
+        authorization.signed_block_hash = hashes[signed_height];
+        authorization.pro_tx_hash = pro_tx_hash;
+        authorization.global_key_version = 1;
+        const auto digest{GetGovernanceFundingAuthorizationHash(
+            consensus.hashGenesisBlock, voting_key, authorization,
+            vote.GetSignatureHash())};
+        BOOST_REQUIRE(digest);
+        BOOST_REQUIRE(slhdsa::SignDeterministic(
+            *key, std::span<const uint8_t>{digest->begin(), digest->size()},
+            GetGlobalAuthContext(GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE),
+            authorization.signature));
+        std::vector<unsigned char> encoded;
+        BOOST_REQUIRE(EncodeGovernanceAuthorization(authorization, encoded));
+        if (bad_signature) encoded.back() ^= 1;
+        vote.SetSignature(std::move(encoded));
+    }};
+
+    enum class VoteKind { FRESH, ALTERNATE, SUPERSEDED };
+    enum class Fault { MISSING, THROWN, BAD_SIGNATURE };
+    std::size_t scenario{0};
+    uint64_t nonce{1};
+    for (const auto fault : {Fault::MISSING, Fault::THROWN, Fault::BAD_SIGNATURE}) {
+        for (const bool page : {false, true}) {
+            for (const auto kind : {VoteKind::FRESH, VoteKind::ALTERNATE,
+                                    VoteKind::SUPERSEDED}) {
+                BOOST_TEST_CONTEXT("fault=" << int(fault) << ", page=" << page
+                                   << ", vote kind=" << int(kind)) {
+                    SetMockTime(GetMockTime() + 3s);
+                    const auto parent_hash{parent_hashes.at(scenario++)};
+                    in_addr ip;
+                    ip.s_addr = 0xa0b0c100 + scenario;
+                    CNode node{
+                        NodeId(9200 + scenario), nullptr,
+                        CAddress{CService{ip, 7790}, NODE_NETWORK},
+                        9200 + scenario, 9200 + scenario, CAddress{}, {},
+                        ConnectionType::OUTBOUND_FULL_RELAY, false};
+                    connman.Handshake(node, true,
+                        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                        ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                        PROTOCOL_VERSION, true);
+                    TestOnlyResetTimeData();
+                    struct Finalize {
+                        PeerManager& peerman;
+                        CNode& node;
+                        ~Finalize()
+                        {
+                            peerman.EndGovernancePageSession();
+                            peerman.FinalizeNode(node);
+                        }
+                    } finalize{*m_node.peerman, node};
+                    const auto peer{m_node.peerman->GetPeerRef(node.GetId())};
+                    BOOST_REQUIRE(peer);
+                    CGovernanceVote vote{
+                        collateral, parent_hash, VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+                    vote.SetTime(100);
+                    sign_vote(vote, tip_height, fault == Fault::BAD_SIGNATURE);
+                    CGovernanceVote known{vote};
+                    if (kind == VoteKind::SUPERSEDED) known.SetTime(101);
+                    if (kind != VoteKind::FRESH) sign_vote(known, activation_height);
+                    if (kind == VoteKind::ALTERNATE) {
+                        BOOST_REQUIRE(known.GetHash() == vote.GetHash());
+                        BOOST_REQUIRE(!known.HasSameWireEncoding(vote));
+                    }
+                    const CInv inv{MSG_GOVERNANCE_OBJECT_VOTE, vote.GetHash()};
+                    bool page_session_started{false};
+                    const auto request{[&](bool announce, bool complete_locally = false)
+                        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+                        if (page) {
+                            if (!page_session_started) {
+                                BOOST_REQUIRE(m_node.peerman->BeginGovernancePageSession(node));
+                                page_session_started = true;
+                            }
+                            const auto req{MakeGovernancePageRequest(
+                                parent_hash, {}, {}, nonce++)};
+                            const auto view{ComputeGovernancePageViewHash(parent_hash, {inv})};
+                            BOOST_REQUIRE(view);
+                            const auto response{MakeGovernancePageResponse(
+                                req, {inv}, true, *view, 1)};
+                            BOOST_REQUIRE(m_node.peerman->RequestGovernancePage(
+                                node, req, GetTime<std::chrono::microseconds>() + 30s));
+                            BOOST_REQUIRE(m_node.peerman->ReceiveGovernancePage(
+                                node.GetId(), response, {inv}));
+                        } else if (announce) {
+                            CDataStream inventory{SER_NETWORK, node.GetCommonVersion()};
+                            inventory << std::vector<CInv>{inv};
+                            std::atomic<bool> interrupt{false};
+                            m_node.peerman->ProcessMessage(node, NetMsgType::INV,
+                                inventory, GetTime<std::chrono::microseconds>(), interrupt);
+                        }
+                        connman.FlushSendBuffer(node);
+                        node.fPauseSend = false;
+                        BOOST_REQUIRE(m_node.peerman->SendMessages(&node));
+                        BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main,
+                            return m_node.peerman->GetRequestedCount(node.GetId())),
+                            complete_locally ? 0U : 1U);
+                    }};
+                    const auto install_known{[&] {
+                        if (kind == VoteKind::FRESH) return;
+                        CGovernanceException error;
+                        BOOST_REQUIRE_MESSAGE(governance->ProcessVoteAndRelay(
+                            known, mn_list, error, connman, *m_node.peerman), error.what());
+                    }};
+                    const auto deliver{[&] {
+                        CDataStream payload{SER_NETWORK, node.GetCommonVersion()};
+                        payload << vote;
+                        governance->ProcessMessage(&node, NetMsgType::MNGOVERNANCEOBJECTVOTE,
+                            payload, connman, *m_node.peerman);
+                        BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main,
+                            return m_node.peerman->GetRequestedCount(node.GetId())), 0U);
+                    }};
+                    const auto check_stored{[&](bool accepted) {
+                        LOCK(governance->cs);
+                        const auto* object{governance->FindConstGovernanceObject(parent_hash)};
+                        BOOST_REQUIRE(object);
+                        BOOST_CHECK_EQUAL(object->GetVoteFile().GetVoteCount(),
+                            accepted || kind != VoteKind::FRESH ? 1 : 0);
+                        if (kind != VoteKind::FRESH) {
+                            const auto retained{object->GetVoteFile().GetVote(known.GetHash())};
+                            BOOST_REQUIRE(retained);
+                            BOOST_CHECK(retained->HasSameWireEncoding(known));
+                        }
+                        if (kind == VoteKind::SUPERSEDED) {
+                            BOOST_CHECK(!object->GetVoteFile().HasVote(vote.GetHash()));
+                        }
+                    }};
+                    // Establish transport authorization before admitting a
+                    // same-hash/newer local vote: SendMessages can resolve a
+                    // known hash locally without invoking the payload handler.
+                    request(true);
+                    install_known();
+                    if (kind == VoteKind::SUPERSEDED && fault != Fault::BAD_SIGNATURE) {
+                        // Let full verification and commit-time context binding
+                        // pass, then fail the handler's superseded-response
+                        // recheck. Preparing the guard here keeps disk reads and
+                        // restoration outside the logger callback.
+                        std::optional<ReadFault::ScopedMissingSnapshot> missing;
+                        if (fault == Fault::MISSING) missing.emplace(
+                            *deterministicMNManager, hashes[tip_height],
+                            /*defer_removal=*/true);
+                        bool injected{false};
+                        {
+                            DebugLogHelper inject{
+                                "CGovernanceObject::ProcessVote -- Obsolete vote",
+                                [&](const std::string* line) {
+                                    if (line && !injected) {
+                                        if (missing) missing->Remove();
+                                        else ReadFault::FailNextRead(*deterministicMNManager);
+                                        injected = true;
+                                    }
+                                    return line != nullptr;
+                                }};
+                            deliver();
+                        }
+                        BOOST_REQUIRE(injected);
+                        if (missing) BOOST_REQUIRE(missing->Restore());
+                    } else if (fault == Fault::MISSING) {
+                        ReadFault::ScopedMissingSnapshot missing{
+                            *deterministicMNManager, hashes[tip_height]};
+                        deliver();
+                        BOOST_REQUIRE(missing.Restore());
+                    } else {
+                        if (fault == Fault::THROWN) ReadFault::FailNextRead(*deterministicMNManager);
+                        deliver();
+                    }
+                    const bool invalid{fault == Fault::BAD_SIGNATURE};
+                    BOOST_CHECK_EQUAL(WITH_LOCK(peer->m_misbehavior_mutex,
+                        return peer->m_misbehavior_score), invalid && !page ? 20 : 0);
+                    BOOST_CHECK_EQUAL(m_node.peerman->CanUseGovernancePageSource(node), !invalid);
+                    const auto failed_page{m_node.peerman->TakeGovernancePageResult()};
+                    BOOST_CHECK_EQUAL(failed_page.has_value(), page);
+                    if (failed_page) BOOST_CHECK(!failed_page->success);
+                    check_stored(false);
+                    if (invalid) continue;
+
+                    SetMockTime(GetMockTime() + GovernanceRequestTracker::SOURCE_REFILL_INTERVAL);
+                    // Ordinary deferral retains its announcement; retry without
+                    // a new INV. Both lanes reuse this peer before the failure
+                    // cooldown could expire. An alternate's exact known hash is
+                    // now completed locally by SendMessages; fresh and superseded
+                    // votes pass through the payload handler again after recovery.
+                    const bool complete_locally{kind == VoteKind::ALTERNATE};
+                    request(false, complete_locally);
+                    if (!complete_locally) deliver();
+                    BOOST_CHECK_EQUAL(WITH_LOCK(peer->m_misbehavior_mutex,
+                        return peer->m_misbehavior_score), 0);
+                    BOOST_CHECK(m_node.peerman->CanUseGovernancePageSource(node));
+                    const auto recovered_page{m_node.peerman->TakeGovernancePageResult()};
+                    BOOST_CHECK_EQUAL(recovered_page.has_value(), page);
+                    if (recovered_page) BOOST_CHECK(recovered_page->success);
+                    check_stored(kind == VoteKind::FRESH);
+                }
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(pq_governance_page_session_reservation_is_atomic)

@@ -189,11 +189,20 @@ bool CGovernanceObject::ProcessVote(const CBlockIndex& validation_branch,
     // logical vote hash omits signature bytes, so an invalid alternate wire
     // form must never be classified as an already-valid obsolete vote.
     std::string signature_error;
-    const bool signature_valid = pq_purpose
+    const auto signature_result = pq_purpose
         ? vote.IsValidPQContext(validation_branch, tip_mn_list,
                                signature_error, *pq_purpose)
-        : vote.IsValid(tip_mn_list);
-    if (!signature_valid) {
+        : vote.IsValid(tip_mn_list)
+            ? llmq::pq::GovernanceAuthResult::VALID
+            : llmq::pq::GovernanceAuthResult::INVALID;
+    if (signature_result == llmq::pq::GovernanceAuthResult::UNAVAILABLE) {
+        exception = CGovernanceException(
+            "CGovernanceObject::ProcessVote -- governance authority state is unavailable: " +
+                signature_error,
+            GOVERNANCE_EXCEPTION_TEMPORARY_ERROR);
+        return false;
+    }
+    if (signature_result == llmq::pq::GovernanceAuthResult::INVALID) {
         std::ostringstream ostr;
         ostr << "CGovernanceObject::ProcessVote -- Invalid vote"
              << ", MN outpoint = " << vote.GetMasternodeOutpoint().ToStringShort()
@@ -596,7 +605,7 @@ bool CGovernanceObject::SignPQ(const CBlockIndex& signing_block,
     return true;
 }
 
-bool CGovernanceObject::CheckPQSignature(
+llmq::pq::GovernanceAuthResult CGovernanceObject::CheckPQSignature(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     std::string& error) const
@@ -612,7 +621,7 @@ bool CGovernanceObject::CheckPQSignature(
         m_obj.vchSig, error);
 }
 
-bool CGovernanceObject::CheckPQAuthorizationContext(
+llmq::pq::GovernanceAuthResult CGovernanceObject::CheckPQAuthorizationContext(
     const CBlockIndex& validation_branch,
     const CDeterministicMNList& validation_mn_list,
     std::string& error) const
@@ -752,11 +761,15 @@ void CGovernanceObject::UpdateLocalValidity(ChainstateManager &chainman, const C
 {
     AssertLockHeld(cs_main);
     // THIS DOES NOT CHECK COLLATERAL, THIS IS CHECKED UPON ORIGINAL ARRIVAL
-    fCachedLocalValidity = IsValidLocally(chainman, tip_mn_list, strLocalValidityError, false);
+    fCachedLocalValidity = IsValidLocally(
+        chainman, tip_mn_list, strLocalValidityError, false) ==
+        llmq::pq::GovernanceAuthResult::VALID;
 }
 
 
-bool CGovernanceObject::IsValidLocally(ChainstateManager &chainman, const CDeterministicMNList& tip_mn_list, std::string& strError, bool fCheckCollateral, bool fPQSignaturePreverified) const
+llmq::pq::GovernanceAuthResult CGovernanceObject::IsValidLocally(
+    ChainstateManager& chainman, const CDeterministicMNList& tip_mn_list,
+    std::string& strError, bool fCheckCollateral, bool fPQSignaturePreverified) const
 {
     bool fMissingConfirmations = false;
 
@@ -765,13 +778,16 @@ bool CGovernanceObject::IsValidLocally(ChainstateManager &chainman, const CDeter
                           fPQSignaturePreverified);
 }
 
-bool CGovernanceObject::IsValidLocally(ChainstateManager &chainman, const CDeterministicMNList& tip_mn_list, std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral, bool fPQSignaturePreverified) const
+llmq::pq::GovernanceAuthResult CGovernanceObject::IsValidLocally(
+    ChainstateManager& chainman, const CDeterministicMNList& tip_mn_list,
+    std::string& strError, bool& fMissingConfirmations, bool fCheckCollateral,
+    bool fPQSignaturePreverified) const
 {
     AssertLockHeld(cs_main);
     fMissingConfirmations = false;
     if (fUnparsable) {
         strError = "Object data unparsable";
-        return false;
+        return llmq::pq::GovernanceAuthResult::INVALID;
     }
 
     switch (GetObjectType()) {
@@ -782,43 +798,44 @@ bool CGovernanceObject::IsValidLocally(ChainstateManager &chainman, const CDeter
         // TODO: should they be tagged as "expired" to skip vote downloading?
         if (!validator.Validate(false)) {
             strError = strprintf("Invalid proposal data, error messages: %s", validator.GetErrorMessages());
-            return false;
+            return llmq::pq::GovernanceAuthResult::INVALID;
         }
         if (fCheckCollateral && !IsCollateralValid(chainman, strError, fMissingConfirmations)) {
             strError = "Invalid proposal collateral";
-            return false;
+            return llmq::pq::GovernanceAuthResult::INVALID;
         }
-        return true;
+        return llmq::pq::GovernanceAuthResult::VALID;
     }
     case GOVERNANCE_OBJECT_TRIGGER: {
         std::string strOutpoint = m_obj.masternodeOutpoint.ToStringShort();
         auto dmn = tip_mn_list.GetMNByCollateral(m_obj.masternodeOutpoint);
         if (!dmn) {
             strError = "Failed to find Masternode by UTXO, missing masternode=" + strOutpoint;
-            return false;
+            return llmq::pq::GovernanceAuthResult::INVALID;
         }
 
         // SYSCOIN: callers holding cs_main may only commit a trigger whose SLH
         // proof was verified before taking state locks.
         if (fCheckCollateral && !fPQSignaturePreverified) {
             strError = "trigger requires preverified SLH authorization";
-            return false;
+            return llmq::pq::GovernanceAuthResult::INVALID;
         }
         const CBlockIndex* validation_tip{chainman.ActiveTip()};
-        const bool valid = validation_tip != nullptr &&
-            CheckPQAuthorizationContext(*validation_tip, tip_mn_list,
-                                        strError);
-        if (!valid) {
+        if (validation_tip == nullptr) {
+            strError = "governance validation tip is unavailable";
+            return llmq::pq::GovernanceAuthResult::UNAVAILABLE;
+        }
+        const auto result{CheckPQAuthorizationContext(
+            *validation_tip, tip_mn_list, strError)};
+        if (result == llmq::pq::GovernanceAuthResult::INVALID) {
             strError = "Invalid post-activation SLH trigger authorization for " +
                        strOutpoint + ": " + strError;
-            return false;
         }
-
-        return true;
+        return result;
     }
     default: {
         strError = strprintf("Invalid object type %d", GetObjectType());
-        return false;
+        return llmq::pq::GovernanceAuthResult::INVALID;
     }
     }
 }
