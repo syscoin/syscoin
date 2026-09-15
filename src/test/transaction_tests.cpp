@@ -11,6 +11,7 @@
 #include <clientversion.h>
 #include <consensus/amount.h>
 #include <consensus/tx_check.h>
+#include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <key.h>
@@ -1625,6 +1626,138 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height, Bridg
 
     pnevmtxrootsdb = std::move(previous_roots_db);
     pnevmtxmintdb = std::move(previous_mint_db);
+}
+
+BOOST_AUTO_TEST_CASE(syscoin_mint_authorization_survives_untrusted_representation_changes)
+{
+    struct RestoreDatabases {
+        std::unique_ptr<CNEVMTxRootsDB> roots{std::move(pnevmtxrootsdb)};
+        std::unique_ptr<CNEVMMintedTxDB> mints{std::move(pnevmtxmintdb)};
+        ~RestoreDatabases()
+        {
+            pnevmtxrootsdb = std::move(roots);
+            pnevmtxmintdb = std::move(mints);
+        }
+    } restore;
+    pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
+        .path = "mint_authorization_roots", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    pnevmtxmintdb = std::make_unique<CNEVMMintedTxDB>(DBParams{
+        .path = "mint_authorization_replay", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    const auto& params{Params().GetConsensus()};
+    const uint32_t height = std::max(params.nNexusStartBlock, params.nCLReceiptStartBlock);
+    const WitnessV0KeyHash destination{uint160{}};
+    auto fixture{MakeValidNEVMMintFixture(params, height, destination, uint256S("bc01"))};
+    const COutPoint funding{uint256S("bc02"), 0};
+    fixture.tx.vin.emplace_back(funding);
+    // This test starts at the authenticated-root boundary. Mutated proof bytes
+    // never receive new authority: the stored roots remain fixed throughout.
+    pnevmtxrootsdb->FlushDataToCache({{fixture.mint.nBlockHash,
+        {fixture.mint.nTxRoot, fixture.mint.nReceiptRoot}}});
+    BOOST_REQUIRE(pnevmtxrootsdb->FlushCacheToDisk());
+
+    const auto transaction = [](const CMintSyscoin& mint, CMutableTransaction tx) {
+        CDataStream encoded(SER_NETWORK, PROTOCOL_VERSION);
+        encoded << mint;
+        const auto bytes{MakeUCharSpan(encoded)};
+        const std::vector<unsigned char> payload{bytes.begin(), bytes.end()};
+        tx.vout[1].scriptPubKey = CScript{} << OP_RETURN << payload;
+        // Reparse the wire form, rather than preserving in-memory assetInfo
+        // from a previous payload after modifying its output commitments.
+        CDataStream wire(SER_NETWORK, PROTOCOL_VERSION);
+        wire << tx;
+        CMutableTransaction decoded;
+        wire >> decoded;
+        return CTransaction{std::move(decoded)};
+    };
+    const auto check = [&](const CTransaction& tx, NEVMMintTxSet& reservations,
+                           const bool just_check, const std::string& reason,
+                           const CAssetCoinInfo& funding_asset = CAssetCoinInfo{}) {
+        CCoinsView empty;
+        CCoinsViewCache inputs{&empty};
+        inputs.AddCoin(funding, Coin{CTxOut{1000000, CScript{} << OP_TRUE,
+                                         funding_asset}, 1, false}, false);
+        TxValidationState state;
+        CAmount fee{0};
+        CAssetsMap assets_in, assets_out;
+        BOOST_REQUIRE_MESSAGE(Consensus::CheckTxInputs(tx, state, inputs, height,
+            fee, assets_in, assets_out), state.ToString());
+        const bool accepted{CheckSyscoinInputs(params, tx, tx.GetHash(), state,
+            height, just_check, reservations, assets_in, assets_out)};
+        BOOST_CHECK_EQUAL(accepted, reason.empty());
+        if (!reason.empty()) {
+            BOOST_CHECK(state.IsInvalid());
+            BOOST_CHECK(!state.IsError());
+            if (reason != "any") BOOST_CHECK_EQUAL(state.GetRejectReason(), reason);
+        } else {
+            BOOST_CHECK(state.IsValid());
+            BOOST_CHECK(assets_in.empty());
+            BOOST_CHECK(assets_out.empty());
+        }
+    };
+    const CTransaction valid{transaction(fixture.mint, fixture.tx)};
+    for (const bool just_check : {false, true}) {
+        NEVMMintTxSet reservations;
+        check(valid, reservations, just_check, "");
+        BOOST_REQUIRE_EQUAL(reservations.count(fixture.mint.nTxHash), 1U);
+        BOOST_CHECK(!pnevmtxmintdb->ExistsTx(fixture.mint.nTxHash));
+        auto alternate{fixture.tx};
+        alternate.nLockTime = 1; // A different Core txid cannot reuse the burn.
+        check(transaction(fixture.mint, alternate), reservations, just_check,
+              "mint-duplicate-transfer");
+
+        const auto reject = [&](const CMintSyscoin& mint,
+                                const CMutableTransaction& tx,
+                                const std::string& reason,
+                                const CAssetCoinInfo& asset = CAssetCoinInfo{}) {
+            NEVMMintTxSet attempt;
+            check(transaction(mint, tx), attempt, just_check, reason, asset);
+            BOOST_CHECK(attempt.empty());
+        };
+        auto redirected{fixture.tx};
+        redirected.vout[0].scriptPubKey = GetScriptForDestination(
+            WitnessV0KeyHash{uint160(ParseHex("0100000000000000000000000000000000000000"))});
+        reject(fixture.mint, redirected, "mint-mismatch-destination");
+        CMintSyscoin extra_amount{valid};
+        extra_amount.voutAssets[0].values.emplace_back(2, 1);
+        auto extra_output{fixture.tx};
+        extra_output.vout.emplace_back(0, redirected.vout[0].scriptPubKey);
+        reject(extra_amount, extra_output, "mint-output-mismatch");
+        CMintSyscoin extra_asset{valid};
+        extra_asset.voutAssets.emplace_back(2, std::vector<CAssetOutValue>{{2, 1}});
+        reject(extra_asset, extra_output, "assetallocation-single-asset");
+        CMintSyscoin unspendable{valid};
+        unspendable.voutAssets[0].values[0].n = 1;
+        reject(unspendable, fixture.tx, "mint-mismatch-destination");
+        reject(fixture.mint, fixture.tx, "mint-no-asset-inputs", CAssetCoinInfo{1, 1});
+
+        // Every single-byte mutation is checked against the original roots.
+        // Recompute the claimed transaction hash to reach the proof check
+        // instead of relying only on its earlier hash comparison.
+        for (const bool mutate_receipt : {false, true}) {
+            const auto& bytes = mutate_receipt ? fixture.mint.vchReceiptParentNodes
+                                              : fixture.mint.vchTxParentNodes;
+            for (size_t i = 0; i < bytes.size(); ++i) {
+                BOOST_TEST_CONTEXT("receipt=" << mutate_receipt << " byte=" << i) {
+                    CMintSyscoin altered{valid};
+                    (mutate_receipt ? altered.vchReceiptParentNodes : altered.vchTxParentNodes)[i] ^= 1;
+                    if (!mutate_receipt) {
+                        const auto hash{dev::sha3(dev::bytesConstRef(
+                            altered.vchTxParentNodes.data() + altered.posTx,
+                            altered.vchTxParentNodes.size() - altered.posTx)).asBytes()};
+                        std::copy(hash.begin(), hash.end(), altered.nTxHash.begin());
+                    }
+                    reject(altered, fixture.tx, "any");
+                }
+            }
+        }
+    }
+    pnevmtxmintdb->FlushDataToCache({fixture.mint.nTxHash});
+    BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+    NEVMMintTxSet next_block;
+    check(valid, next_block, false, "mint-exists");
+    BOOST_CHECK(next_block.empty());
 }
 
 BOOST_AUTO_TEST_CASE(asset_amount_aggregate_range_checks)
