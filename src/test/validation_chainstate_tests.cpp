@@ -4978,7 +4978,13 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
         }
         BOOST_CHECK_EQUAL(assemblies.load(), 6U);
         longpoll.pending = std::async(std::launch::async, [&] {
-            return get_template(funded_gbt["longpollid"].get_str());
+            try {
+                return get_template(funded_gbt["longpollid"].get_str());
+            } catch (const UniValue& error) {
+                // Finish exception teardown on this worker before publishing
+                // its copied error value for the main thread to inspect.
+                return error;
+            }
         });
         BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::milliseconds{100}) ==
                       std::future_status::timeout);
@@ -5001,7 +5007,7 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
             };
             BOOST_REQUIRE(longpoll.pending.wait_for(std::chrono::seconds{10}) ==
                           std::future_status::ready);
-            BOOST_CHECK_EXCEPTION(longpoll.pending.get(), UniValue, unavailable);
+            BOOST_CHECK(unavailable(longpoll.pending.get()));
             BOOST_CHECK_EXCEPTION(get_template(), UniValue, unavailable);
             for (std::size_t i{0}; i < funded_blocks.size(); ++i) {
                 BOOST_CHECK_EXCEPTION(aux_block(i), UniValue, unavailable);

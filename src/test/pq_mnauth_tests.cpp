@@ -3200,6 +3200,9 @@ BOOST_AUTO_TEST_CASE(async_runnable_signing_has_priority_and_governance_uses_ack
     std::atomic<int> governance_order{0};
 
     CMNAuth::AsyncHooks hooks;
+    // Exercise signer scheduling independently of real crypto speed on CI.
+    // Deadline expiry is covered separately with the same injected clock.
+    hooks.now_micros = [] { return int64_t{1'000'000}; };
     hooks.verify = [](MNAUTHVerificationTask&) { return true; };
     hooks.sign = [&](const uint256& pro_tx_hash, uint32_t key_version,
                      const uint256& authorization_hash,
@@ -3314,15 +3317,10 @@ BOOST_AUTO_TEST_CASE(async_runnable_signing_has_priority_and_governance_uses_ack
     }
 
     std::vector<CMNAuth::Completion> second_completion;
-    int64_t second_deadline_headroom{0};
     if (first_completion.size() == 1) {
         second_completion =
             async.WaitForCompletions(std::chrono::seconds{40});
         if (second_completion.size() == 1) {
-            second_deadline_headroom =
-                second_completion.front().deadline_micros -
-                TicksSinceEpoch<std::chrono::microseconds>(
-                    SteadyClock::now());
             async.AcknowledgeSignCompletion(
                 second_completion.front().context.peer_id,
                 second_completion.front().registration_generation,
@@ -3348,9 +3346,8 @@ BOOST_AUTO_TEST_CASE(async_runnable_signing_has_priority_and_governance_uses_ack
     BOOST_CHECK_EQUAL(first_mnauth_order.load(std::memory_order_acquire), 1);
     BOOST_CHECK_EQUAL(second_mnauth_order.load(std::memory_order_acquire), 3);
     BOOST_CHECK_EQUAL(governance_order.load(std::memory_order_acquire), 2);
-    BOOST_CHECK_GT(second_deadline_headroom,
-                   std::chrono::duration_cast<std::chrono::microseconds>(
-                       std::chrono::seconds{10}).count());
+    BOOST_CHECK_EQUAL(second_completion.front().deadline_micros,
+                      second_enqueue.deadline_micros);
     BOOST_CHECK_EQUAL(
         GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
 }
