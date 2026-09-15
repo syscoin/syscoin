@@ -750,6 +750,13 @@ public:
         handler.EnforceBestChainLock();
     }
 
+    static void PublishNEVMFinality(CChainLocksHandler& handler)
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        AssertLockNotHeld(::cs_main);
+        handler.MaybePublishNEVMFinality();
+    }
+
     static void RefreshHistory(CChainLocksHandler& handler)
     {
         handler.RefreshPQHistoryAuthState();
@@ -9742,6 +9749,77 @@ BOOST_FIXTURE_TEST_CASE(
         BOOST_CHECK(!(chain[TARGET_HEIGHT]->nStatus & BLOCK_GOVERNANCE_VALIDATED));
         BOOST_CHECK(sibling->nStatus & BLOCK_CONFLICT_CHAINLOCK);
     }
+
+    // Exercise the scheduler's publication seam after real enforcement has
+    // authenticated the restored winner. No new block or certificate is needed.
+    struct FinalitySubscriber final : CValidationInterface {
+        std::vector<std::string> commands;
+        bool acknowledge{false};
+        void NotifyNEVMComms(const std::string& command, bool& response,
+                             std::optional<NEVMBlockReject>*) override
+        {
+            AssertLockNotHeld(::cs_main);
+            commands.push_back(command);
+            response = acknowledge;
+        }
+    };
+    const auto subscriber{std::make_shared<FinalitySubscriber>()};
+    struct RestoreFinalityContext {
+        Consensus::Params& consensus;
+        const int start;
+        const bool connection;
+        const std::shared_ptr<FinalitySubscriber> subscriber;
+        ~RestoreFinalityContext()
+        {
+            UnregisterValidationInterface(subscriber.get());
+            SyncWithValidationInterfaceQueue();
+            LOCK(::cs_main);
+            consensus.nNEVMStartBlock = start;
+            fNEVMConnection = connection;
+        }
+    } restore{consensus, consensus.nNEVMStartBlock, fNEVMConnection, subscriber};
+    RegisterSharedValidationInterface(subscriber);
+    const auto check_suppressed = [&]() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main) {
+        const auto before{subscriber->commands.size()};
+        Access::PublishNEVMFinality(*handler);
+        BOOST_CHECK_EQUAL(subscriber->commands.size(), before);
+    };
+    fNEVMConnection = false;
+    check_suppressed();
+    fNEVMConnection = true;
+    consensus.nNEVMStartBlock = TARGET_HEIGHT + 1;
+    check_suppressed();
+    consensus.nNEVMStartBlock = TARGET_HEIGHT;
+    const std::string expected{"finality-v1:1:" + chain[TARGET_HEIGHT]->GetBlockHash().GetHex()};
+    Access::PublishNEVMFinality(*handler);
+    Access::PublishNEVMFinality(*handler); // Retry a lost acknowledgement.
+    subscriber->acknowledge = true;
+    Access::PublishNEVMFinality(*handler);
+    Access::PublishNEVMFinality(*handler); // Replay to an engine replacement.
+    BOOST_REQUIRE_EQUAL(subscriber->commands.size(), 4U);
+    for (const auto& command : subscriber->commands) BOOST_CHECK_EQUAL(command, expected);
+    {
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().m_chain.SetTip(*sibling);
+    }
+    check_suppressed();
+    {
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+        chain[TARGET_HEIGHT]->nStatus = BLOCK_VALID_TRANSACTIONS;
+    }
+    check_suppressed();
+    {
+        LOCK(::cs_main);
+        chain[TARGET_HEIGHT]->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_ASSUMED_VALID;
+    }
+    check_suppressed();
+    {
+        LOCK(::cs_main);
+        chain[TARGET_HEIGHT]->nStatus = BLOCK_VALID_SCRIPTS;
+    }
+    Access::SetRestoredEnforcementWitness(*handler, witness_id);
+    check_suppressed(); // A durable but still pending import is not public finality.
 }
 
 BOOST_FIXTURE_TEST_CASE(

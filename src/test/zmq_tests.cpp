@@ -442,6 +442,25 @@ public:
 
 BOOST_FIXTURE_TEST_SUITE(zmq_tests, ZMQTestingSetup)
 
+BOOST_AUTO_TEST_CASE(nevm_finality_requires_exact_pair_acknowledgement)
+{
+    const std::string address{"inproc://nevm-finality-ack"};
+    auto interface = CZMQNotificationInterfaceTestAccess::Create(NEVMNotifiers(address));
+    RegisteredInterface registered{interface};
+    NEVMResponder responder{CZMQNotificationInterfaceTestAccess::NEVMContext(*interface), address};
+    const std::string command{"finality-v1:42:" + TestHash(501).GetHex()};
+    for (const auto& reply : {std::string{"ack"},
+                             "finality-v1:41:" + TestHash(501).GetHex(),
+                             "finality-v1:42:" + TestHash(502).GetHex(),
+                             command, command}) {
+        bool response{true};
+        responder.Serve([&] { GetMainSignals().NotifyNEVMComms(command, response); }, {
+            {"nevmcomms", Serialized(command), {"nevmcomms", reply}},
+        });
+        BOOST_CHECK_EQUAL(response, reply == command);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(governance_publication_is_queued_but_observers_and_nevm_remain_synchronous)
 {
     auto state = std::make_shared<NotificationState>();

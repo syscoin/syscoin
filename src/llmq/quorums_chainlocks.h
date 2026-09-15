@@ -2931,6 +2931,10 @@ private:
     void EnforceBestChainLock()
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
                                  !m_btcc_preseal_mutex);
+    // SYSCOIN: Project only an authenticated active ChainLock into NEVM RPC.
+    void MaybePublishNEVMFinality()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_persisted_mutex,
+                                 !m_btcc_preseal_mutex);
     void CompletePeerResponse(NodeId from, const uint256& logical_id);
     void FailPeerResponse(NodeId from, const uint256& logical_id);
     void ForgetAllRequests(const uint256& logical_id);

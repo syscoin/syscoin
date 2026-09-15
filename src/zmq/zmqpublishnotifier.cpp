@@ -408,7 +408,9 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
     LOCK(cs_nevm);
     if (rejection) rejection->reset();
     bResponse = false;
-    const int timeout = (commMessage == "status" || commMessage == "connect-v1" || commMessage == "payload-v1")
+    // SYSCOIN: Finality delivery is a retryable status-sized exchange.
+    const bool finality_command{commMessage.rfind("finality-v1:", 0) == 0};
+    const int timeout = (commMessage == "status" || commMessage == "connect-v1" || commMessage == "payload-v1" || finality_command)
         ? NEVM_STATUS_TIMEOUT_MS : NEVM_COMMS_TIMEOUT_MS;
     if(!SetNEVMReceiveTimeout(psocketsub, timeout)) {
         return false;
@@ -437,9 +439,9 @@ bool CZMQAbstractPublishNotifier::NotifyNEVMCommsCommon(const std::string &commM
                 commMessage == "flush" ? "flushed" :
                 commMessage == "connect-v1" ? "connect-v1" :
                 commMessage == "payload-v1" ? "payload-v1" :
-                // SYSCOIN: The recovery fence must acknowledge the exact
+                // SYSCOIN: Recovery and finality must acknowledge the exact
                 // expected pair; an older engine's generic ack is insufficient.
-                commMessage.rfind("durable-pair-v1:", 0) == 0 ? commMessage : "ack"};
+                (commMessage.rfind("durable-pair-v1:", 0) == 0 || finality_command) ? commMessage : "ack"};
             if(parts[1] != expected_response) {
                 // Only an explicit flush can report buffered block rejection.
                 if (commMessage == "flush" && rejection) {

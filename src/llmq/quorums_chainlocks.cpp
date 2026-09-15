@@ -3429,6 +3429,8 @@ void CChainLocksHandler::Start()
             std::string recovery_error;
             if (!m_chainman.MaybeRecoverNEVMBlockProduction(recovery_error)) {
                 LogPrint(BCLog::CHAINLOCKS, "NEVM block production recovery deferred: %s\n", recovery_error);
+            } else {
+                MaybePublishNEVMFinality();
             }
             MaybeRelayPaymentAuditHave();
             MaybeRetryChainLockFinalization();
@@ -21822,6 +21824,44 @@ void CChainLocksHandler::EnforceBestChainLock()
         m_persisted_best_auth_pending = false;
     }
     MaybeReleaseFinalitySnapshotPublicationRetention();
+}
+
+// SYSCOIN: Replay the accepted boundary even without a new block or ChainLock,
+// including after Geth restarts. A missing acknowledgement only defers delivery.
+void CChainLocksHandler::MaybePublishNEVMFinality()
+{
+    if (!fNEVMConnection || !m_enforced.load() || !m_store ||
+        !m_chainman.IsPQParticipationAllowed() || m_chainman.m_interrupt) {
+        return;
+    }
+    std::string command;
+    {
+        LOCK(cs_main);
+        if (m_chainman.HasPendingNEVMStartupPair() ||
+            m_chainman.HasPendingNEVMPayloadRepair() ||
+            HasNEVMReplayObligation() || HasPendingPQHistoryAuthentication()) {
+            return;
+        }
+        const auto best{m_store->GetBestRecord()};
+        if (!best) return;
+        const auto& statement{best->metadata.statement};
+        const CBlockIndex* target{
+            m_chainman.m_blockman.LookupBlockIndex(statement.block_hash)};
+        const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+        if (target == nullptr || target->nHeight != statement.height ||
+            target->nHeight < start || !target->IsValid(BLOCK_VALID_SCRIPTS) ||
+            target->IsAssumedValid() || !m_chainman.ActiveChain().Contains(target)) {
+            return;
+        }
+        // Match the existing NEVM delivery height. Geth acknowledges only if
+        // that height is executed and its canonical stored SYS pair matches.
+        command = "finality-v1:" +
+            std::to_string(int64_t{target->nHeight} - start + 1) + ":" +
+            target->GetBlockHash().GetHex();
+    }
+    // Never hold validation or finality locks while waiting for the engine.
+    bool response{false};
+    GetMainSignals().NotifyNEVMComms(command, response);
 }
 
 void CChainLocksHandler::NotifyHeaderTip(const CBlockIndex*)
