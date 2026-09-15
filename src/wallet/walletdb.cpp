@@ -65,6 +65,8 @@ const std::string WATCHMETA{"watchmeta"};
 const std::string WATCHS{"watchs"};
 // SYSCOIN
 const std::string GOBJECT{"gobject"};
+const std::string PQ_VOTING_KEY{"pqvotingkey"};
+const std::string PQ_VOTING_CRYPTED_KEY{"pqvotingckey"};
 const std::unordered_set<std::string> LEGACY_TYPES{CRYPTED_KEY, CSCRIPT, DEFAULTKEY, HDCHAIN, KEYMETA, KEY, OLD_KEY, POOL, WATCHMETA, WATCHS};
 } // namespace DBKeys
 
@@ -154,6 +156,25 @@ bool WalletBatch::WriteMasterKey(unsigned int nID, const CMasterKey& kMasterKey)
 {
     return WriteIC(std::make_pair(DBKeys::MASTER_KEY, nID), kMasterKey, true);
 }
+
+// SYSCOIN BEGIN: Persist independent plaintext and encrypted PQ voting keys.
+bool WalletBatch::WriteVotingKey(const slhdsa::PublicKey& public_key,
+                                const CKeyingMaterial& secret)
+{
+    return WriteIC(std::make_pair(DBKeys::PQ_VOTING_KEY, public_key), secret, false);
+}
+
+bool WalletBatch::WriteCryptedVotingKey(const slhdsa::PublicKey& public_key,
+                                       const std::vector<unsigned char>& secret,
+                                       bool erase_plaintext)
+{
+    if (!WriteIC(std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, public_key),
+                 std::make_pair(secret, Hash(secret)), false)) {
+        return false;
+    }
+    return !erase_plaintext || EraseIC(std::make_pair(DBKeys::PQ_VOTING_KEY, public_key));
+}
+// SYSCOIN END: Persist independent plaintext and encrypted PQ voting keys.
 
 bool WalletBatch::WriteCScript(const uint160& hash, const CScript& redeemScript)
 {
@@ -1167,6 +1188,39 @@ static DBErrors LoadDecryptionKeys(CWallet* pwallet, DatabaseBatch& batch) EXCLU
     return mkey_res.m_result;
 }
 
+// SYSCOIN BEGIN: Validate and load independent PQ voting-key records.
+static DBErrors LoadVotingKeys(CWallet* pwallet, DatabaseBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
+{
+    const auto plain = LoadRecords(pwallet, batch, DBKeys::PQ_VOTING_KEY,
+        [](CWallet* wallet, DataStream& key, CDataStream& value, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+            slhdsa::PublicKey public_key;
+            CKeyingMaterial secret;
+            key >> public_key;
+            value >> secret;
+            if (!key.empty() || !value.empty() || !wallet->LoadVotingKey(public_key, secret)) {
+                error = "Invalid or incompatible PQ voting key record";
+                return DBErrors::CORRUPT;
+            }
+            return DBErrors::LOAD_OK;
+        });
+    const auto encrypted = LoadRecords(pwallet, batch, DBKeys::PQ_VOTING_CRYPTED_KEY,
+        [](CWallet* wallet, DataStream& key, CDataStream& value, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+            slhdsa::PublicKey public_key;
+            std::vector<unsigned char> secret;
+            uint256 checksum;
+            key >> public_key;
+            value >> secret >> checksum;
+            if (!key.empty() || !value.empty() || Hash(secret) != checksum ||
+                !wallet->LoadCryptedVotingKey(public_key, secret)) {
+                error = "Invalid or incompatible encrypted PQ voting key record";
+                return DBErrors::CORRUPT;
+            }
+            return DBErrors::LOAD_OK;
+        });
+    return std::max(plain.m_result, encrypted.m_result);
+}
+// SYSCOIN END: Validate and load independent PQ voting-key records.
+
 DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 {
     DBErrors result = DBErrors::LOAD_OK;
@@ -1215,6 +1269,8 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 
         // Load decryption keys
         result = std::max(LoadDecryptionKeys(pwallet, *m_batch), result);
+
+        result = std::max(LoadVotingKeys(pwallet, *m_batch), result);
     } catch (...) {
         // Exceptions that can be ignored or treated as non-critical are handled by the individual loading functions.
         // Any uncaught exceptions will be caught here and treated as critical.

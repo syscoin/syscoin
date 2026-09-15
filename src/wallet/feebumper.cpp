@@ -22,6 +22,18 @@ namespace wallet {
 //! mined, or conflicts with a mined transaction. Return a feebumper::Result.
 static feebumper::Result PreconditionChecks(const CWallet& wallet, const CWalletTx& wtx, bool require_mine, std::vector<bilingual_str>& errors) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
+    // SYSCOIN BEGIN: Generic fee bumping cannot rebuild provider authorization.
+    if (wtx.tx->IsMnTx()) {
+        errors.push_back(Untranslated("Fee bumping is not supported for masternode transactions"));
+        return feebumper::Result::WALLET_ERROR;
+    }
+    // SYSCOIN END: Generic fee bumping cannot rebuild provider authorization.
+    // SYSCOIN BEGIN: Generic fee bumping cannot preserve asset allocations.
+    if (wtx.tx->HasAssets()) {
+        errors.push_back(Untranslated("Fee bumping is not supported for asset transactions"));
+        return feebumper::Result::WALLET_ERROR;
+    }
+    // SYSCOIN END: Generic fee bumping cannot preserve asset allocations.
     if (wallet.HasWalletSpend(wtx.tx)) {
         errors.push_back(Untranslated("Transaction has descendants in the wallet"));
         return feebumper::Result::INVALID_PARAMETER;

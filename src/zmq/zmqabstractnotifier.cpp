@@ -22,11 +22,11 @@ bool CZMQAbstractNotifier::NotifyGovernanceVote(const uint256& /*vote*/)
 {
     return true;
 }
-bool CZMQAbstractNotifier::NotifyNEVMComms(const std::string& commMessage, bool &bResponse) 
+bool CZMQAbstractNotifier::NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection)
 {
     return true;
 }
-bool CZMQAbstractNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff)
+bool CZMQAbstractNotifier::NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection)
 {
     return true;
 }
@@ -34,7 +34,12 @@ bool CZMQAbstractNotifier::NotifyNEVMBlockDisconnect(std::string &state, const u
 {
     return true;
 }
-bool CZMQAbstractNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string &state)
+bool CZMQAbstractNotifier::NotifyNEVMPayloadCheck(const CNEVMHeader& /*evmBlock*/, const CBlock& /*block*/, const uint256& /*syscoin_hash*/, bool& /*valid*/, std::string& /*error*/, std::optional<NEVMBlockReject>* /*rejection*/)
+{
+    return true;
+}
+// SYSCOIN: Carry the paired Syscoin tip hash with NEVM status.
+bool CZMQAbstractNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockHash, std::string &state)
 {
     return true;
 }

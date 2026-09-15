@@ -59,7 +59,9 @@ BOOST_AUTO_TEST_CASE(outbound_slow_chain_eviction)
                      /*sock=*/nullptr,
                      addr1,
                      /*nKeyedNetGroupIn=*/0,
-                     /*nLocalHostNonceIn=*/0,
+                     // SYSCOIN: outbound initialization now binds the PQ MNAUTH
+                     // VERSION transcript, whose production nonce is never zero.
+                     /*nLocalHostNonceIn=*/2,
                      CAddress(),
                      /*addrNameIn=*/"",
                      ConnectionType::OUTBOUND_FULL_RELAY,
@@ -121,11 +123,14 @@ static void AddRandomOutboundPeer(NodeId& id, std::vector<CNode*>& vNodes, PeerM
         addr = CAddress(ip(g_insecure_rand_ctx.randbits(32)), NODE_NONE);
     }
 
-    vNodes.emplace_back(new CNode{id++,
+    const NodeId node_id{id++};
+    vNodes.emplace_back(new CNode{node_id,
                                   /*sock=*/nullptr,
                                   addr,
                                   /*nKeyedNetGroupIn=*/0,
-                                  /*nLocalHostNonceIn=*/0,
+                                  // SYSCOIN: model the nonzero per-connection nonce
+                                  // supplied by CConnman before PushNodeVersion.
+                                  /*nLocalHostNonceIn=*/static_cast<uint64_t>(node_id) + 2,
                                   CAddress(),
                                   /*addrNameIn=*/"",
                                   connType,

@@ -1,0 +1,831 @@
+// Copyright (c) 2026 The Syscoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef SYSCOIN_LLMQ_PQ_CHAINLOCK_STORE_H
+#define SYSCOIN_LLMQ_PQ_CHAINLOCK_STORE_H
+
+#include <llmq/pq_btcc.h>
+#include <llmq/pq_chainlock_schedule.h>
+#include <llmq/pq_chainlock_types.h>
+#include <llmq/pq_chainlock_verify.h>
+#include <llmq/pq_quorum_builder.h>
+#include <sync.h>
+
+#include <cstddef>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <vector>
+
+namespace llmq::pq {
+
+class PQChainLockPersistence;
+class VerifiedHistoricalSyncSuccessor;
+
+inline constexpr std::size_t DEFAULT_SEEN_LOGICAL_CACHE_SIZE{4096};
+inline constexpr std::size_t DEFAULT_SEEN_WITNESS_CACHE_SIZE{4096};
+inline constexpr std::size_t DEFAULT_REJECTED_WITNESS_CACHE_SIZE{4096};
+// A certificate is about one megabyte, so retaining eight is
+// intentionally unlike the legacy BLS cache of 256 tiny certificates.
+inline constexpr std::size_t DEFAULT_RECENT_CHAINLOCKS_SIZE{8};
+inline constexpr std::size_t MAX_FINALITY_ID_CACHE_SIZE{65536};
+inline constexpr std::size_t MAX_RECENT_CHAINLOCKS_SIZE{64};
+// Two full 288-block roster epochs contain at most 116 ChainLock targets.
+// Twelve additional slots cover one trusted boundary plus bounded auxiliary
+// roots without making one-megabyte certificate retention unbounded.
+inline constexpr std::size_t VERIFIED_AUTHORIZATION_BASE_CAPACITY{128};
+
+/**
+ * Bounded memoization for the expensive historical catch-up proof.
+ * Candidate hashes commit to their ancestry, so immutable candidate proofs
+ * survive descendant tip extensions and temporary reorgs. Integration must
+ * independently enforce the exact admission class and signing-window branch
+ * bound, and change the validation domain token whenever the activation
+ * boundary, configuration, active tip, marker, or validation provenance
+ * changes. Ordinary current
+ * catch-up may select a shallow competing branch; marker recovery remains
+ * active-branch-only.
+ */
+class CatchupHistoricalProofCache final {
+public:
+    using Clock = std::function<int64_t()>;
+    struct BuildResult {
+        std::optional<BTCCReceiptState> proof;
+        // A definitive negative is immutable for the supplied validation
+        // token. Transient storage failures are returned but never retained.
+        bool definitive{true};
+    };
+    using Builder = std::function<BuildResult()>;
+
+    explicit CatchupHistoricalProofCache(
+        std::size_t capacity = DEFAULT_RECENT_CHAINLOCKS_SIZE,
+        Clock now = {});
+
+    [[nodiscard]] std::optional<BTCCReceiptState> GetOrCompute(
+        const uint256& branch_token,
+        const uint256& context_token,
+        const Builder& builder)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] std::size_t ComputationsForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::size_t SizeForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    struct Entry {
+        std::optional<BTCCReceiptState> proof;
+        bool transient{false};
+        int64_t retry_after_ms{0};
+        int64_t backoff_ms{0};
+    };
+
+    const std::size_t m_capacity;
+    const Clock m_now;
+    mutable Mutex m_mutex;
+    uint256 m_branch_token GUARDED_BY(m_mutex);
+    // Definitive negatives remain for the immutable context. Transient range
+    // or storage failures use monotonic exponential backoff, preventing a
+    // genuine certificate from becoming an unbounded I/O retry trigger while
+    // still allowing local recovery without a tip change.
+    std::map<uint256, Entry> m_proofs GUARDED_BY(m_mutex);
+    std::deque<uint256> m_order GUARDED_BY(m_mutex);
+    std::size_t m_computations GUARDED_BY(m_mutex){0};
+};
+
+/**
+ * Release-pinned boundary for assuming only historical BTCC receipt
+ * certificates. This is deliberately distinct from the height-only PQ
+ * activation boundary.
+ */
+struct BTCCReceiptAssumptionAnchor {
+    int32_t height{-1};
+    uint256 block_hash;
+    BTCCReceiptState receipt_state;
+
+    [[nodiscard]] bool IsDisabled() const noexcept;
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const BTCCReceiptAssumptionAnchor&,
+                           const BTCCReceiptAssumptionAnchor&) = default;
+};
+
+struct ChainLockFinalityStoreConfig {
+    ChainLockScheduleConfig chainlock_schedule;
+    BTCCScheduleConfig btcc_schedule;
+    int32_t activation_predecessor_height{-1};
+    BTCCReceiptAssumptionAnchor btcc_receipt_assumption_anchor;
+    std::size_t seen_logical_capacity{DEFAULT_SEEN_LOGICAL_CACHE_SIZE};
+    std::size_t seen_witness_capacity{DEFAULT_SEEN_WITNESS_CACHE_SIZE};
+    std::size_t rejected_witness_capacity{DEFAULT_REJECTED_WITNESS_CACHE_SIZE};
+    std::size_t recent_chainlocks_capacity{DEFAULT_RECENT_CHAINLOCKS_SIZE};
+    RecoveryRefreshConfig recovery_refresh{};
+
+    [[nodiscard]] bool IsValid() const noexcept;
+};
+
+/** Durable winner state may advance or remain exact, never regress. */
+[[nodiscard]] bool IsDurableBTCCursorMonotonic(
+    const BTCCursor& previous, const BTCCursor& candidate) noexcept;
+
+struct BTCCCursorReconciliationProof {
+    int32_t carrier_height{-1};
+    uint256 carrier_hash;
+    uint256 carrier_parent_hash;
+    BTCCursor skipped_cursor;
+    BTCCReceiptState previous_receipt_state;
+    BTCCReceiptState current_receipt_state;
+    uint256 receipt_logical_id;
+
+    [[nodiscard]] bool IsStructurallyValid() const noexcept;
+    friend bool operator==(const BTCCCursorReconciliationProof&,
+                           const BTCCCursorReconciliationProof&) = default;
+};
+
+/** Structural half of one candidate-bound canonical-null carrier recovery. */
+[[nodiscard]] bool IsBTCCCursorReconciliation(
+    const FinalChainLock& best,
+    const FinalChainLock& candidate,
+    const ChainLockFinalityStoreConfig& config) noexcept;
+/** Bind an integration-verified carrier proof to the durable transition. */
+[[nodiscard]] bool IsBTCCCursorReconciliationProof(
+    const FinalChainLock& best,
+    const FinalChainLock& candidate,
+    const BTCCCursorReconciliationProof& proof,
+    const ChainLockFinalityStoreConfig& config) noexcept;
+[[nodiscard]] bool IsDurableBTCCReceiptStateMonotonic(
+    const BTCCReceiptState& previous,
+    const BTCCReceiptState& candidate) noexcept;
+[[nodiscard]] bool IsDurablePaymentAuditStateMonotonic(
+    const PaymentAuditReceiptState& previous_receipt,
+    const uint256& previous_probation,
+    const PaymentAuditReceiptState& candidate_receipt,
+    const uint256& candidate_probation) noexcept;
+
+struct ChainLockPredecessor {
+    int32_t height{-1};
+    uint256 block_hash;
+    BTCCursor btcc_cursor;
+
+    friend bool operator==(const ChainLockPredecessor&,
+                           const ChainLockPredecessor&) = default;
+};
+
+enum class ChainLockCandidateAdmission : uint8_t {
+    LIVE = 0,
+    TRUSTED_PERSISTENCE,
+    RECEIPT_ARCHIVE,
+    PRESEAL_RECEIPT,
+    CATCHUP,
+    /** Exact locally fsynced unsealed KEEP/ADVANCE reloaded at startup. */
+    TRUSTED_UNSEALED_PERSISTENCE,
+};
+
+struct ChainLockCandidateContextRequest {
+    ChainLockStatement statement;
+    /** The locally accepted winner, or the candidate's activation predecessor. */
+    ChainLockPredecessor local_best;
+    bool has_local_chainlock{false};
+    /** Present only when this node retained the declared predecessor certificate. */
+    std::optional<BTCCursor> declared_predecessor_btcc_cursor;
+    /** Trusted persistence is reserved for the locally fsynced latest winner. */
+    ChainLockCandidateAdmission admission{ChainLockCandidateAdmission::LIVE};
+    BTCCScheduleConfig btcc_schedule;
+};
+
+/**
+ * Snapshot produced while the integration owns its chain-index lock.
+ *
+ * For live admission, `btcc_transition_validated` means
+ * ValidateBTCCursorTransition was executed against this exact candidate
+ * branch. A trusted-persistence restore may instead attest the already-fsynced
+ * transition because its CBlockIndex metadata can lag the finality fsync after
+ * a crash. The opaque token binds either result to a later chainstate recheck.
+ */
+struct ChainLockCandidateContext {
+    bool block_known{false};
+    bool scripts_validated{false};
+    bool special_transactions_validated{false};
+    bool declared_predecessor_is_ancestor{false};
+    bool descends_from_local_best{false};
+    bool btcc_transition_validated{false};
+    int32_t block_height{-1};
+    uint256 block_hash;
+    uint256 context_token;
+    /** Exact branch proof authorizing one canonical-null cursor reconciliation. */
+    std::optional<BTCCCursorReconciliationProof> btcc_cursor_reconciliation;
+
+    friend bool operator==(const ChainLockCandidateContext&,
+                           const ChainLockCandidateContext&) = default;
+};
+
+enum class AcceptedBranchRelation : uint8_t {
+    MATCH = 0,
+    CONFLICT,
+    UNKNOWN,
+};
+
+/**
+ * Chain access is deliberately inverted so neither the finality store nor its
+ * crypto path owns cs_main. Implementations must acquire the chain-index lock
+ * inside each call and must not call back into ChainLockFinalityStore.
+ */
+class ChainLockFinalityContext {
+public:
+    virtual ~ChainLockFinalityContext() = default;
+
+    [[nodiscard]] virtual std::optional<ChainLockCandidateContext> PrepareCandidate(
+        const ChainLockCandidateContextRequest& request) const = 0;
+
+    [[nodiscard]] virtual std::optional<ChainLockCandidateContext> RecheckCandidate(
+        const ChainLockCandidateContextRequest& request,
+        const ChainLockCandidateContext& prepared) const = 0;
+
+    [[nodiscard]] virtual AcceptedBranchRelation QueryAcceptedBranch(
+        int32_t height,
+        const uint256& block_hash,
+        int32_t accepted_tip_height,
+        const uint256& accepted_tip_hash) const = 0;
+};
+
+enum class ChainLockFinalityError : uint8_t {
+    NONE = 0,
+    INVALID_CONFIG,
+    INVALID_CHAINLOCK,
+    INELIGIBLE_HEIGHT,
+    REJECTED_WITNESS,
+    DUPLICATE_WITNESS,
+    DUPLICATE_LOGICAL,
+    STALE_HEIGHT,
+    HEIGHT_CONFLICT,
+    PREDECESSOR_MISMATCH,
+    CONTEXT_CHANGED,
+    UNKNOWN_BLOCK,
+    BLOCK_MISMATCH,
+    BLOCK_NOT_FULLY_VALIDATED,
+    NOT_PREDECESSOR_DESCENDANT,
+    INVALID_BTCC_TRANSITION,
+    INVALID_CONTEXT_TOKEN,
+    INVALID_SIGNATURES,
+    INVALID_PREPARATION_TOKEN,
+    PERSISTED_IMPORT_NOT_EMPTY,
+    PERSISTENCE_FAILURE,
+};
+
+struct ReceiptArchiveRosterAuthorization;
+
+/**
+ * Proof that one exact reset certificate crossed the complete store
+ * verification boundary. Only ChainLockFinalityStore can mint this token;
+ * persistence may consume it solely to converge conflicting local signer
+ * state while advancing the exact certificate named by the token.
+ */
+class VerifiedRecoveryResetPersistenceCapability final {
+public:
+    VerifiedRecoveryResetPersistenceCapability(
+        const VerifiedRecoveryResetPersistenceCapability&) = default;
+    VerifiedRecoveryResetPersistenceCapability& operator=(
+        const VerifiedRecoveryResetPersistenceCapability&) = default;
+
+private:
+    VerifiedRecoveryResetPersistenceCapability(
+        uint256 logical_id,
+        uint256 witness_id,
+        RosterAuthorizationTransitionKind transition,
+        ChainLockCandidateAdmission candidate_admission) noexcept;
+
+    [[nodiscard]] bool Authorizes(
+        const uint256& genesis_hash,
+        const FinalChainLock& chainlock,
+        RosterAuthorizationTransitionKind transition,
+        ChainLockCandidateAdmission candidate_admission) const noexcept;
+
+    uint256 m_logical_id;
+    uint256 m_witness_id;
+    RosterAuthorizationTransitionKind m_transition{
+        RosterAuthorizationTransitionKind::KEEP};
+    ChainLockCandidateAdmission m_candidate_admission{
+        ChainLockCandidateAdmission::LIVE};
+
+    friend class ChainLockFinalityStore;
+    friend class PQChainLockPersistence;
+};
+
+using ChainLockDurableAccept = std::function<bool(
+    const FinalChainLock&, const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&)>;
+using ChainLockDurableArchive = std::function<bool(
+    const FinalChainLock&, const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&)>;
+using ChainLockDurableReceiptArchive = std::function<bool(
+    const FinalChainLock&, const ReceiptArchiveRosterAuthorization&,
+    const PreparedChainLockContextPtr&, const RecoveryUniverseCapsulePtr&)>;
+using ChainLockDurableCoveringAccept = std::function<bool(
+    const FinalChainLock&, const ReceiptArchiveRosterAuthorization&,
+    const PreparedChainLockContextPtr&, const RecoveryUniverseCapsulePtr&)>;
+using ChainLockDurableCatchup = std::function<bool(
+    const FinalChainLock&,
+    const std::optional<BTCCCursorReconciliationProof>&,
+    const ReceiptArchiveRosterAuthorization*,
+    const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&)>;
+using ChainLockPreDurableCatchup = std::function<bool()>;
+using ChainLockDurableAuthorization = std::function<bool(
+    const std::function<bool()>&, ChainLockFinalityError*)>;
+using ChainLockDurableReset = std::function<bool(
+    const FinalChainLock&,
+    const std::optional<BTCCCursorReconciliationProof>&,
+    const ReceiptArchiveRosterAuthorization*,
+    const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&,
+    const VerifiedRecoveryResetPersistenceCapability&)>;
+using ChainLockDurableAuthorizationBase =
+    std::function<bool(const FinalChainLock&,
+                       const PreparedChainLockContextPtr&,
+                       const RecoveryUniverseCapsulePtr&)>;
+using ChainLockDurableHistoricalSyncAccept = std::function<bool(
+    const FinalChainLock&,
+    const std::optional<BTCCCursorReconciliationProof>&,
+    const ReceiptArchiveRosterAuthorization*,
+    const PreparedChainLockContextPtr&,
+    const RecoveryUniverseCapsulePtr&,
+    const VerifiedRecoveryResetPersistenceCapability*,
+    const VerifiedHistoricalSyncSuccessor&,
+    bool)>;
+
+/** Small immutable token retained while the 801 WOTS+ checks run. */
+struct PreparedFinalChainLockCandidate {
+    uint256 logical_id;
+    uint256 witness_id;
+    ChainLockStatement statement;
+    uint8_t selected_quorum_mask{0};
+    ChainLockPredecessor predecessor;
+    bool has_local_chainlock{false};
+    std::optional<BTCCursor> declared_predecessor_btcc_cursor;
+    ChainLockCandidateContext context;
+    ChainLockCandidateAdmission admission{ChainLockCandidateAdmission::LIVE};
+    uint64_t store_revision{0};
+};
+
+/** Precomputed identity and statement for an already validated certificate. */
+struct FinalChainLockRecordMetadata {
+    uint256 logical_id;
+    uint256 witness_id;
+    ChainLockStatement statement;
+
+    /**
+     * Check the identity available without the large witness. The witness ID
+     * is authoritative only on records produced by the validated store or
+     * persistence views; non-null alone is not proof for arbitrary instances.
+     */
+    [[nodiscard]] bool IsInternallyConsistent(
+        const uint256& genesis_hash) const;
+
+    [[nodiscard]] RosterAuthorizationBaseIdentity AuthorizationBase() const
+        noexcept
+    {
+        return {statement.height, statement.block_hash, logical_id};
+    }
+
+    friend bool operator==(const FinalChainLockRecordMetadata&,
+                           const FinalChainLockRecordMetadata&) = default;
+};
+
+/**
+ * Exact durable authority retained across one catch-up gap.
+ *
+ * Persistence creates this edge from its actual old best record. The owner is
+ * the catch-up winner that consumed that state; a network candidate can never
+ * nominate its own authorization predecessor.
+ */
+struct ReceiptArchiveRosterAuthorization {
+    FinalChainLockRecordMetadata owner;
+    uint256 covering_logical_id;
+    uint256 covering_witness_id;
+    FinalChainLockRecordMetadata predecessor;
+
+    [[nodiscard]] bool IsInternallyConsistent(
+        const uint256& genesis_hash) const;
+
+    friend bool operator==(const ReceiptArchiveRosterAuthorization&,
+                           const ReceiptArchiveRosterAuthorization&) = default;
+};
+
+/**
+ * Immutable view of the accepted winner at one in-memory store revision.
+ *
+ * The revision is process-local and changes after every successful accepted
+ * record mutation, including an archive-only acceptance which leaves the best
+ * certificate unchanged. The shared certificate remains valid after a later
+ * mutation and lets callers opt into the large witness only when needed.
+ */
+struct AcceptedFinalChainLockView {
+    uint64_t state_revision{0};
+    FinalChainLockRecordMetadata metadata;
+    std::shared_ptr<const FinalChainLock> certificate;
+    PreparedChainLockContextPtr verification_context;
+};
+
+/**
+ * A fully verified certificate retained for archive validation or exact
+ * startup reconstruction without itself becoming this node's finality winner.
+ *
+ * This view is evidence, not authority by itself. A live/catch-up consumer may
+ * use an older view only after independently proving that the higher
+ * same-branch transition converges with the current durable authorization
+ * state. Only the finality store exposes it after the exact statement/roster
+ * context and all certificate signatures have crossed its verification
+ * boundary.
+ */
+struct VerifiedRosterAuthorizationBaseView {
+    uint64_t base_revision{0};
+    FinalChainLockRecordMetadata metadata;
+    std::shared_ptr<const FinalChainLock> certificate;
+    PreparedChainLockContextPtr verification_context;
+};
+
+/** Coherent lightweight observation, including the pre-first-winner state. */
+struct ChainLockFinalityStateObservation {
+    uint64_t state_revision{0};
+    std::optional<FinalChainLockRecordMetadata> best;
+
+    friend bool operator==(const ChainLockFinalityStateObservation&,
+                           const ChainLockFinalityStateObservation&) = default;
+};
+
+class ChainLockFinalityStore final {
+public:
+    ChainLockFinalityStore(uint256 genesis_hash,
+                           ChainLockFinalityStoreConfig config,
+                           const ChainLockFinalityContext& context,
+                           ChainLockDurableAccept durable_accept = {},
+                           ChainLockDurableArchive durable_archive = {},
+                           ChainLockDurableCatchup durable_catchup = {},
+                           ChainLockDurableReceiptArchive
+                               durable_receipt_archive = {},
+                           ChainLockDurableCoveringAccept
+                               durable_covering_accept = {},
+                           ChainLockDurableReset durable_reset = {},
+                           ChainLockDurableAuthorizationBase
+                               durable_authorization_base = {},
+                           ChainLockDurableHistoricalSyncAccept
+                               durable_historical_sync_accept = {});
+
+    ChainLockFinalityStore(const ChainLockFinalityStore&) = delete;
+    ChainLockFinalityStore& operator=(const ChainLockFinalityStore&) = delete;
+
+    /**
+     * Perform cheap/store/branch checks and reserve exact witness deduplication.
+     * No callback is invoked with the store mutex held.
+     */
+    [[nodiscard]] std::optional<PreparedFinalChainLockCandidate> PrepareCandidate(
+        const FinalChainLock& chainlock,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Prepare the single latest certificate loaded from this node's durable
+     * finality database. This is not a catch-up/network admission API: it is
+     * valid only while the in-memory store is empty. The caller must still
+     * fully verify the target branch, frozen rosters, and all signatures.
+     */
+    [[nodiscard]] std::optional<PreparedFinalChainLockCandidate>
+    PreparePersistedCandidate(
+        const FinalChainLock& chainlock,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Prepare a requested stale ADVANCE without rebasing the live winner. */
+    [[nodiscard]] std::optional<PreparedFinalChainLockCandidate>
+    PrepareReceiptArchiveCandidate(
+        const FinalChainLock& chainlock,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Prepare only the exact unsealed record reloaded from local persistence. */
+    [[nodiscard]] std::optional<PreparedFinalChainLockCandidate>
+    PrepareTrustedUnsealedCandidate(
+        const FinalChainLock& chainlock,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Prepare the exact receiptable certificate named by a durable marker. */
+    [[nodiscard]] std::optional<PreparedFinalChainLockCandidate>
+    PreparePresealReceiptCandidate(
+        const FinalChainLock& chainlock,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Best-work bootstrap across a missing exact-predecessor certificate gap. */
+    [[nodiscard]] std::optional<PreparedFinalChainLockCandidate>
+    PrepareCatchupCandidate(
+        const FinalChainLock& chainlock,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Commit a candidate only after the caller has completed every WOTS+ check.
+     * Passing false records the witness as rejected. A successful path repeats
+     * all mutable predecessor and branch checks before first-winner acceptance.
+     */
+    [[nodiscard]] bool AcceptVerified(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        ChainLockFinalityError* error = nullptr,
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Accept LIVE while atomically retiring an independently covered gap. */
+    [[nodiscard]] bool AcceptVerifiedCoveringReceiptArchive(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        const ReceiptArchiveRosterAuthorization& authorization,
+        ChainLockFinalityError* error = nullptr,
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Install a fully reverified token produced by PreparePersistedCandidate. */
+    [[nodiscard]] bool AcceptPersistedVerified(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        ChainLockFinalityError* error = nullptr,
+        PreparedChainLockContextPtr verification_context = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] bool AcceptReceiptArchiveVerified(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        const ReceiptArchiveRosterAuthorization& authorization,
+        ChainLockDurableAuthorization durable_authorization = {},
+        ChainLockFinalityError* error = nullptr,
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Import the exact locally fsynced unsealed record without rewriting it. */
+    [[nodiscard]] bool AcceptTrustedUnsealedVerified(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        ChainLockFinalityError* error = nullptr,
+        PreparedChainLockContextPtr verification_context = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] bool AcceptPresealReceiptVerified(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        ChainLockPreDurableCatchup pre_durable,
+        ChainLockDurableAuthorization durable_authorization,
+        ChainLockFinalityError* error = nullptr,
+        PreparedChainLockContextPtr verification_context = nullptr,
+        const ReceiptArchiveRosterAuthorization*
+            receipt_archive_authorization = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] bool AcceptCatchupVerified(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        ChainLockPreDurableCatchup pre_durable,
+        ChainLockDurableAuthorization durable_authorization,
+        ChainLockFinalityError* error = nullptr,
+        const ReceiptArchiveRosterAuthorization*
+            covering_authorization = nullptr,
+        PreparedChainLockContextPtr verification_context = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    void RejectPrepared(const PreparedFinalChainLockCandidate& prepared)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Cache a cryptographically rejected witness before contextual prepare. */
+    void RejectWitness(const FinalChainLock& chainlock)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Release a transient reservation without treating the witness as invalid. */
+    void AbandonPrepared(const PreparedFinalChainLockCandidate& prepared)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    [[nodiscard]] bool AlreadyHaveWitness(const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool HasChainLock(int32_t height, const uint256& block_hash) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool HasConflictingChainLock(int32_t height,
+                                               const uint256& block_hash,
+                                               bool unknown_is_conflict = true) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::shared_ptr<const FinalChainLock> GetBest() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetBestRecord() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Read durable state and its accepted winner without crossing publication.
+     * The read-only callback follows acceptance's store-to-persistence lock
+     * order; it must not reenter this store or acquire cs_main.
+     */
+    [[nodiscard]] std::optional<AcceptedFinalChainLockView>
+    GetBestRecordWithDurableSnapshot(
+        const std::function<void()>& read_durable_state) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetRecordByHeight(
+        int32_t height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Resolve one exact signed roster-authorization base capability. */
+    [[nodiscard]] std::optional<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterAuthorizationBase(
+        const RosterAuthorizationBaseIdentity& identity) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Resolve only a fully verified base capability by its network ID. */
+    [[nodiscard]] std::optional<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterAuthorizationBaseByLogicalId(
+        const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Find retained authorization certificates for one exact chain target. */
+    [[nodiscard]] std::vector<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterAuthorizationBasesForTarget(
+        int32_t height, const uint256& block_hash) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Bounded oldest-first reset candidates not yet applied as finality. */
+    [[nodiscard]] std::vector<VerifiedRosterAuthorizationBaseView>
+    GetVerifiedRosterResetAuthorizationBasesAbove(int32_t height) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Retain a fully signature-verified certificate as authorization only.
+     * This never changes finality, BTCC/payment state, or recent-winner order.
+     */
+    [[nodiscard]] bool AcceptVerifiedRosterAuthorizationBase(
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        PreparedChainLockContextPtr verification_context,
+        ChainLockFinalityError* error = nullptr,
+        RecoveryUniverseCapsulePtr recovery_universe = nullptr,
+        ChainLockDurableAuthorization durable_authorization = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Import one exact locally fsynced base after full startup revalidation. */
+    [[nodiscard]] bool AcceptPersistedRosterAuthorizationBase(
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        PreparedChainLockContextPtr verification_context,
+        ChainLockFinalityError* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] ChainLockFinalityStateObservation ObserveState() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::shared_ptr<const FinalChainLock> GetUnsealedBTCC() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::shared_ptr<const FinalChainLock> GetByWitness(
+        const uint256& witness_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::shared_ptr<const FinalChainLock> GetByHeight(
+        int32_t height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::shared_ptr<const FinalChainLock> GetByLogicalId(
+        const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Exact CLSIG inventory, including authorization-only retained records. */
+    [[nodiscard]] std::shared_ptr<const FinalChainLock>
+    GetServableByLogicalId(const uint256& logical_id) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::size_t RecentSizeForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::size_t SeenLogicalSizeForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::size_t SeenWitnessSizeForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] std::size_t AuthorizationBaseSizeForTesting() const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    class BoundedIdCache {
+    public:
+        explicit BoundedIdCache(std::size_t capacity) : m_capacity(capacity) {}
+
+        [[nodiscard]] bool Contains(const uint256& id) const;
+        void Insert(const uint256& id);
+        void Erase(const uint256& id);
+        [[nodiscard]] std::size_t Size() const noexcept { return m_ids.size(); }
+
+    private:
+        std::size_t m_capacity;
+        std::deque<uint256> m_order;
+        std::set<uint256> m_ids;
+    };
+
+    struct AcceptedRecord {
+        uint256 logical_id;
+        uint256 witness_id;
+        std::shared_ptr<const FinalChainLock> chainlock;
+        PreparedChainLockContextPtr verification_context;
+    };
+
+    // Non-rebasing admission cannot expire dependencies against a height the
+    // durable finality state has not reached.
+    enum class AuthorizationBaseRetentionClock {
+        DURABLE_BEST,
+        INCOMING_BEST,
+        UNORDERED_STARTUP,
+    };
+
+    [[nodiscard]] ChainLockPredecessor CurrentPredecessor() const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] std::optional<AcceptedFinalChainLockView> GetBestRecordLocked() const
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool IsPreparedPredecessorCurrent(
+        const ChainLockPredecessor& predecessor,
+        bool had_local_chainlock) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool CheckCurrentStoreState(
+        const FinalChainLock& chainlock,
+        const uint256& logical_id,
+        const uint256& witness_id,
+        ChainLockCandidateAdmission admission,
+        ChainLockFinalityError* error) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] std::optional<BTCCursor> FindDeclaredPredecessorCursor(
+        const ChainLockStatement& statement) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] static bool ValidateContext(
+        const ChainLockCandidateContext& context,
+        const ChainLockCandidateContextRequest& request,
+        ChainLockFinalityError* error);
+    [[nodiscard]] std::optional<PreparedFinalChainLockCandidate>
+    PrepareCandidateInternal(
+        const FinalChainLock& chainlock,
+        ChainLockCandidateAdmission admission,
+        ChainLockFinalityError* error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    [[nodiscard]] bool AcceptVerifiedInternal(
+        const PreparedFinalChainLockCandidate& prepared,
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        ChainLockCandidateAdmission admission,
+        bool persist,
+        const ChainLockPreDurableCatchup& pre_durable,
+        const ChainLockDurableAuthorization& durable_authorization,
+        const ReceiptArchiveRosterAuthorization*
+            receipt_archive_authorization,
+        const ReceiptArchiveRosterAuthorization*
+            covering_authorization,
+        const PreparedChainLockContextPtr& verification_context,
+        const RecoveryUniverseCapsulePtr& recovery_universe,
+        ChainLockFinalityError* error,
+        const VerifiedHistoricalSyncSuccessor*
+            historical_sync_successor = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void RememberAccepted(AcceptedRecord record) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void RememberAuthorizationBase(
+        AcceptedRecord record,
+        AuthorizationBaseRetentionClock retention_clock)
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    [[nodiscard]] bool AcceptRosterAuthorizationBaseInternal(
+        const FinalChainLock& chainlock,
+        bool signatures_valid,
+        PreparedChainLockContextPtr verification_context,
+        bool persisted_import,
+        RecoveryUniverseCapsulePtr recovery_universe,
+        ChainLockFinalityError* error,
+        ChainLockDurableAuthorization durable_authorization)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    const uint256 m_genesis_hash;
+    const ChainLockFinalityStoreConfig m_config;
+    const ChainLockFinalityContext& m_context;
+    const ChainLockDurableAccept m_durable_accept;
+    const ChainLockDurableArchive m_durable_archive;
+    const ChainLockDurableCatchup m_durable_catchup;
+    const ChainLockDurableReceiptArchive m_durable_receipt_archive;
+    const ChainLockDurableCoveringAccept m_durable_covering_accept;
+    const ChainLockDurableReset m_durable_reset;
+    const ChainLockDurableAuthorizationBase m_durable_authorization_base;
+    const ChainLockDurableHistoricalSyncAccept m_durable_historical_sync_accept;
+
+    mutable Mutex m_mutex;
+    uint64_t m_revision GUARDED_BY(m_mutex){0};
+    uint64_t m_authorization_base_revision GUARDED_BY(m_mutex){0};
+    std::optional<AcceptedRecord> m_best GUARDED_BY(m_mutex);
+    std::optional<AcceptedRecord> m_unsealed_btcc GUARDED_BY(m_mutex);
+    std::map<int32_t, AcceptedRecord> m_recent_by_height GUARDED_BY(m_mutex);
+    std::map<uint256, std::shared_ptr<const FinalChainLock>> m_recent_by_witness
+        GUARDED_BY(m_mutex);
+    std::deque<int32_t> m_recent_order GUARDED_BY(m_mutex);
+    std::map<uint256, AcceptedRecord> m_authorization_bases GUARDED_BY(m_mutex);
+    std::map<uint256, uint256> m_authorization_base_by_witness
+        GUARDED_BY(m_mutex);
+    BoundedIdCache m_seen_logical GUARDED_BY(m_mutex);
+    BoundedIdCache m_seen_witness GUARDED_BY(m_mutex);
+    BoundedIdCache m_rejected_witness GUARDED_BY(m_mutex);
+};
+
+} // namespace llmq::pq
+
+#endif // SYSCOIN_LLMQ_PQ_CHAINLOCK_STORE_H

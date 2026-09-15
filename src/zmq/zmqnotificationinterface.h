@@ -29,6 +29,7 @@ public:
     virtual ~CZMQNotificationInterface();
 
     std::list<const CZMQAbstractNotifier*> GetActiveNotifiers() const;
+    bool ResetNEVMConnection();
 
     static std::unique_ptr<CZMQNotificationInterface> Create(
         std::function<bool(CBlock&, const CBlockIndex&)> get_block_by_index);
@@ -44,19 +45,26 @@ protected:
     void BlockDisconnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexDisconnected) override;
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload) override;
     // SYSCOIN
-    void NotifyGovernanceVote(const uint256& vote) override;
-    void NotifyGovernanceObject(const uint256& object) override;
-    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff) override;
+    void NotifyGovernanceVoteAsync(const uint256& vote) override;
+    void NotifyGovernanceObjectAsync(const uint256& object) override;
+    void NotifyNEVMBlockConnect(const CNEVMHeader &evmBlock, const CBlock& block, std::string &state, const uint256& nBlockHash, NEVMDataVec &NEVMDataVecOut, const uint32_t& nHeight, bool bSkipValidation, const uint256& btcPrevHashForNEVM, const CDeterministicMNListNEVMAddressDiff &diff, std::optional<NEVMBlockReject>* rejection = nullptr) override;
+    void NotifyNEVMPayloadCheck(const CNEVMHeader& evmBlock, const CBlock& block, const uint256& syscoin_hash, bool& valid, std::string& error, std::optional<NEVMBlockReject>* rejection = nullptr) override;
     void NotifyNEVMBlockDisconnect(std::string &state, const uint256& nBlockHash, const CDeterministicMNListNEVMAddressDiff &diff) override;
-    void NotifyGetNEVMBlockInfo(uint64_t &nHeight, std::string& state) override;
+    // SYSCOIN: Count and paired hash are one branch-authentication response.
+    void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
+                                uint256& nSYSBlockHash,
+                                std::string& state) override;
     void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string& state) override;
-    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse) override;
+    void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 private:
+    friend class CZMQNotificationInterfaceTestAccess;
     CZMQNotificationInterface();
 
     void* pcontext{nullptr};
        // SYSCOIN
     void *pcontextsub{nullptr};
+    // Ownership is immutable after Initialize. Only the validation queue
+    // publishes/retires PUB notifiers; NEVM requests stay synchronous.
     std::list<std::unique_ptr<CZMQAbstractNotifier>> notifiers;
 };
 // SYSCOIN

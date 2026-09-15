@@ -26,6 +26,11 @@
 #include <fstream>
 #include <tuple>
 #include <string>
+// SYSCOIN BEGIN: Parse PQ dump records without copying secrets to ordinary strings.
+#include <support/allocators/zeroafterfree.h>
+#include <util/string.h>
+#include <string_view>
+// SYSCOIN END: Parse PQ dump records without copying secrets to ordinary strings.
 
 #include <univalue.h>
 
@@ -59,6 +64,47 @@ static std::string DecodeDumpString(const std::string &str) {
     }
     return ret.str();
 }
+
+// SYSCOIN BEGIN: Tagged independent PQ voting-key records in legacy wallet dumps.
+static constexpr std::string_view PQ_VOTING_DUMP_PREFIX{"pqvotingkey="};
+
+static bool ParseVotingKeyDumpRecord(std::string_view line, std::map<slhdsa::PublicKey, CKeyingMaterial>& keys)
+{
+    line = TrimStringView(line.substr(0, line.find('#')));
+    if (!line.starts_with("pqvotingkey")) return false;
+    if (!line.starts_with(PQ_VOTING_DUMP_PREFIX)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid PQ voting key record");
+    }
+    line.remove_prefix(PQ_VOTING_DUMP_PREFIX.size());
+    const auto separator{line.find_first_of(" \t\r\n")};
+    if (separator == std::string_view::npos) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid PQ voting key record");
+    }
+    const auto secret_hex{line.substr(0, separator)};
+    const auto public_hex{TrimStringView(line.substr(separator))};
+    if (secret_hex.size() != 2 * slhdsa::SECRET_KEY_SIZE || !IsHex(secret_hex) ||
+        public_hex.size() != 2 * slhdsa::PUBLIC_KEY_SIZE || !IsHex(public_hex)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid PQ voting key record");
+    }
+    CKeyingMaterial secret(slhdsa::SECRET_KEY_SIZE);
+    slhdsa::PublicKey public_key;
+    // Decode the private bytes directly into memory that is cleansed on release.
+    for (size_t i = 0; i < secret.size(); ++i) {
+        secret[i] = (HexDigit(secret_hex[2 * i]) << 4) | HexDigit(secret_hex[2 * i + 1]);
+    }
+    for (size_t i = 0; i < public_key.size(); ++i) {
+        public_key[i] = (HexDigit(public_hex[2 * i]) << 4) | HexDigit(public_hex[2 * i + 1]);
+    }
+    if (const auto it{keys.find(public_key)}; it != keys.end()) {
+        if (it->second != secret) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Conflicting PQ voting key records");
+        }
+    } else {
+        keys.emplace(public_key, std::move(secret));
+    }
+    return true;
+}
+// SYSCOIN END: Tagged independent PQ voting-key records in legacy wallet dumps.
 
 static bool GetWalletAddressesForKey(const LegacyScriptPubKeyMan* spk_man, const CWallet& wallet, const CKeyID& keyid, std::string& strAddr, std::string& strLabel) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
@@ -497,6 +543,9 @@ RPCHelpMan importwallet()
 {
     return RPCHelpMan{"importwallet",
                 "\nImports keys from a wallet dump file (see dumpwallet). Requires a new wallet backup to include imported keys.\n"
+                // SYSCOIN BEGIN: PQ voting-key dump/import support.
+                "Includes independent PQ voting keys exported by dumpwallet.\n"
+                // SYSCOIN END: PQ voting-key dump/import support.
                 "Note: Blockchain and Mempool will be rescanned after a successful import. Use \"getwalletinfo\" to query the scanning progress.\n"
                 "Note: This command is only compatible with legacy wallets.\n",
                 {
@@ -545,14 +594,28 @@ RPCHelpMan importwallet()
         pwallet->chain().showProgress(strprintf("%s " + _("Importing…").translated, pwallet->GetDisplayName()), 0, false); // show progress dialog in GUI
         std::vector<std::tuple<CKey, int64_t, bool, std::string>> keys;
         std::vector<std::pair<CScript, int64_t>> scripts;
+        // SYSCOIN BEGIN: Parse and validate PQ records before importing any keys.
+        std::map<slhdsa::PublicKey, CKeyingMaterial> voting_keys;
+        // SYSCOIN END: Parse and validate PQ records before importing any keys.
         while (file.good()) {
             pwallet->chain().showProgress("", std::max(1, std::min(50, (int)(((double)file.tellg() / (double)nFilesize) * 100))), false);
-            std::string line;
+            // SYSCOIN BEGIN: Cleanse PQ private text and recognize tags before legacy parsing.
+            // Legacy labels can exceed the locked allocator's maximum allocation.
+            std::basic_string<char, std::char_traits<char>, zero_after_free_allocator<char>> line;
             std::getline(file, line);
+            const std::string_view line_view{line.data(), line.size()};
+            try {
+                if (ParseVotingKeyDumpRecord(line_view, voting_keys)) continue;
+            } catch (...) {
+                pwallet->chain().showProgress("", 100, false);
+                throw;
+            }
+            // SYSCOIN END: Cleanse PQ private text and recognize tags before legacy parsing.
             if (line.empty() || line[0] == '#')
                 continue;
 
-            std::vector<std::string> vstr = SplitString(line, ' ');
+            // SYSCOIN: Legacy records retain their existing parser after PQ tag handling.
+            std::vector<std::string> vstr = SplitString(line_view, ' ');
             if (vstr.size() < 2)
                 continue;
             CKey key = DecodeSecret(vstr[0]);
@@ -582,6 +645,12 @@ RPCHelpMan importwallet()
                 scripts.emplace_back(script, birth_time);
             }
         }
+        // SYSCOIN BEGIN: Reject incomplete reads before persisting a partial dump.
+        if (file.bad()) {
+            pwallet->chain().showProgress("", 100, false);
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to read wallet dump file");
+        }
+        // SYSCOIN END: Reject incomplete reads before persisting a partial dump.
         file.close();
         EnsureBlockDataFromTime(*pwallet, nTimeBegin);
         // We now know whether we are importing private keys, so we can error if private keys are disabled
@@ -589,6 +658,13 @@ RPCHelpMan importwallet()
             pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
             throw JSONRPCError(RPC_WALLET_ERROR, "Importing wallets is disabled when private keys are disabled");
         }
+        // SYSCOIN BEGIN: Validate all PQ keys and atomically persist their mandatory flag.
+        std::string voting_error;
+        if (!pwallet->ImportVotingKeys(voting_keys, voting_error)) {
+            pwallet->chain().showProgress("", 100, false);
+            throw JSONRPCError(RPC_WALLET_ERROR, voting_error);
+        }
+        // SYSCOIN END: Validate all PQ keys and atomically persist their mandatory flag.
         double total = (double)(keys.size() + scripts.size());
         double progress = 0;
         for (const auto& key_tuple : keys) {
@@ -692,6 +768,10 @@ RPCHelpMan dumpwallet()
 {
     return RPCHelpMan{"dumpwallet",
                 "\nDumps all wallet keys in a human-readable format to a server-side file. This does not allow overwriting existing files.\n"
+                // SYSCOIN BEGIN: Explain PQ secrets in plaintext legacy dumps.
+                "Includes independent PQ voting private keys. The dumpfile is unencrypted; keep it private.\n"
+                "Restoring PQ voting keys requires importwallet from a version that supports PQ voting-key records.\n"
+                // SYSCOIN END: Explain PQ secrets in plaintext legacy dumps.
                 "Imported scripts are included in the dumpfile, but corresponding BIP173 addresses, etc. may not be added automatically by importwallet.\n"
                 "Note that if your wallet contains keys which are not derived from your HD seed (e.g. imported keys), these are not covered by\n"
                 "only backing up the seed itself, and must be backed up too (e.g. ensure you back up the whole dumpfile).\n"
@@ -737,6 +817,13 @@ RPCHelpMan dumpwallet()
         throw JSONRPCError(RPC_INVALID_PARAMETER, filepath.u8string() + " already exists. If you are sure this is what you want, move it out of the way first");
     }
 
+    // SYSCOIN BEGIN: Export every PQ secret before creating the dumpfile.
+    std::map<slhdsa::PublicKey, CKeyingMaterial> voting_keys;
+    std::string voting_error;
+    if (!wallet.ExportVotingKeys(voting_keys, voting_error)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, voting_error);
+    }
+    // SYSCOIN END: Export every PQ secret before creating the dumpfile.
     std::ofstream file;
     file.open(filepath);
     if (!file.is_open())
@@ -824,8 +911,28 @@ RPCHelpMan dumpwallet()
         }
     }
     file << "\n";
+    // SYSCOIN BEGIN: Explicit PQ tags cannot be confused with legacy keys or scripts.
+    if (!voting_keys.empty()) {
+        file << "# Independent PQ voting private keys; restore with PQ-capable importwallet.\n";
+        for (const auto& [public_key, secret] : voting_keys) {
+            static constexpr char HEX_DIGITS[]{"0123456789abcdef"};
+            SecureString encoded(secret.size() * 2, '\0');
+            for (size_t i = 0; i < secret.size(); ++i) {
+                encoded[2 * i] = HEX_DIGITS[secret[i] >> 4];
+                encoded[2 * i + 1] = HEX_DIGITS[secret[i] & 15];
+            }
+            file << PQ_VOTING_DUMP_PREFIX;
+            file.write(encoded.data(), encoded.size());
+            file << ' ' << HexStr(public_key) << '\n';
+        }
+        file << '\n';
+    }
+    // SYSCOIN END: Explicit PQ tags cannot be confused with legacy keys or scripts.
     file << "# End of dump\n";
     file.close();
+    // SYSCOIN BEGIN: A truncated dump must never report successful backup.
+    if (!file) throw JSONRPCError(RPC_WALLET_ERROR, "Unable to write wallet dump file");
+    // SYSCOIN END: A truncated dump must never report successful backup.
 
     UniValue reply(UniValue::VOBJ);
     reply.pushKV("filename", filepath.u8string());

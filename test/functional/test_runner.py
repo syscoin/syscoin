@@ -81,21 +81,28 @@ TEST_FRAMEWORK_MODULES = [
     "ripemd160",
     "script",
     "segwit_addr",
+    "test_dash_mining",
 ]
 
 EXTENDED_SCRIPTS = [
     # These tests are not run by default.
     # Longest test should go first, to favor running tests in parallel
     'feature_pruning.py',
+    # SYSCOIN: full-size certificate history must exceed authorization retention.
+    'feature_pq_chainlocks_pruned_sync.py --descriptors',
     'feature_dbcrash.py',
     'feature_index_prune.py',
     'wallet_pruning.py --legacy-wallet',
-    'feature_btcheader_policy_auxpow.py --descriptors',
 ]
 
 BASE_SCRIPTS = [
     # Scripts that are run by default.
     # Longest test should go first, to favor running tests in parallel
+    # SYSCOIN: start long chain-building fixtures before the shorter tests.
+    'feature_pq_chainlocks.py --descriptors',
+    'feature_nevm_data.py --descriptors',
+    'feature_governance_dynamic.py --descriptors',
+    'feature_governance.py --descriptors',
     # vv Tests less than 5m vv
     'feature_fee_estimation.py',
     'feature_taproot.py',
@@ -107,7 +114,6 @@ BASE_SCRIPTS = [
     'mempool_updatefromblock.py',
     'mempool_persist.py --descriptors',
     'wallet_miniscript.py --descriptors',
-    'feature_dip3_v19.py',
     # vv Tests less than 60s vv
     'rpc_psbt.py --legacy-wallet',
     'rpc_psbt.py --descriptors',
@@ -156,13 +162,10 @@ BASE_SCRIPTS = [
     'rpc_createmultisig.py',
     'p2p_timeouts.py',
     'wallet_dump.py --legacy-wallet',
-    'feature_llmqsigning.py',
-    'feature_llmqsigning.py --spork21',
-    'feature_llmqchainlocks.py --descriptors',
-    'feature_llmqconnections.py --descriptors',
-    'feature_llmqdkgerrors.py --descriptors',
     'feature_deterministicmns.py --descriptors',
-    'feature_nevm_data.py --descriptors',
+    # SYSCOIN: PQ operator registration and rotation lifecycle.
+    'feature_pq_operator_lifecycle.py --descriptors',
+    'feature_pq_voting_key.py --descriptors',
     'feature_nevm_connect_after_consensus.py --descriptors',
     'rpc_signer.py',
     'wallet_signer.py --descriptors',
@@ -179,8 +182,6 @@ BASE_SCRIPTS = [
     'wallet_labels.py --descriptors',
     'p2p_compactblocks.py',
     'p2p_compactblocks_blocksonly.py',
-    'feature_llmqsimplepose.py',
-    'feature_llmqsimplepose.py --disable-spork23',
     'wallet_hd.py --legacy-wallet',
     'wallet_hd.py --descriptors',
     'wallet_blank.py --legacy-wallet',
@@ -193,7 +194,6 @@ BASE_SCRIPTS = [
     'feature_assets.py',
     'rpc_invalid_address_message.py',
     'rpc_validateaddress.py',
-    'rpc_verifychainlock.py --descriptors',
     'interface_syscoin_cli.py --legacy-wallet',
     'interface_syscoin_cli.py --descriptors',
     'feature_bind_extra.py',
@@ -324,9 +324,6 @@ BASE_SCRIPTS = [
     'feature_dersig.py',
     'feature_cltv.py',
     'feature_governance_objects.py --descriptors',
-    'feature_governance.py --descriptors',
-    'feature_governance_cl.py --descriptors',
-    'feature_governance_dynamic.py --descriptors',
     'rpc_uptime.py',
     'feature_discover.py',
     'wallet_resendwallettransactions.py --legacy-wallet',
@@ -407,6 +404,12 @@ BASE_SCRIPTS = [
 
     # auxpow tests
     'auxpow_mining.py',
+    # SYSCOIN: Cover both the managed headers-only lifecycle and the hardened
+    # argv-based independent Bitcoin policy override used by BTCC roles.
+    'feature_btcheader_policy_auxpow.py --descriptors',
+    'feature_btcheader_external_policy.py',
+    'feature_btcheader_external_command.py',
+    'feature_btcheader_watchdog.py',
     'auxpow_mining.py --segwit',
     'auxpow_invalidpow.py',
     'auxpow_self_parent.py',
@@ -597,7 +600,7 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, enable_coverage=
     result = unittest.TextTestRunner(verbosity=1, failfast=True).run(test_framework_tests)
     if not result.wasSuccessful():
         logging.debug("Early exiting after failure in TestFramework unit tests")
-        sys.exit(False)
+        sys.exit(1)
 
     flags = ['--cachedir={}'.format(cache_dir)] + args
 

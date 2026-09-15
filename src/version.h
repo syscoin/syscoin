@@ -9,7 +9,9 @@
  * network protocol versioning
  */
 
-static const int PROTOCOL_VERSION = 70017;
+// SYSCOIN: Version 70018 gates the fixed-width PQ MNAUTH transcript and large
+// authenticated ChainLock inventory; older peers cannot safely decode either.
+static const int PROTOCOL_VERSION = 70018;
 
 //! Version when we switched to a size-based "headers" limit.
 static const int SIZE_HEADERS_LIMIT_VERSION = 70015;
@@ -20,12 +22,8 @@ static const int INIT_PROTO_VERSION = 209;
 //! disconnect from peers older than this proto version
 static const int MIN_PEER_PROTO_VERSION = 31800;
 
-// SYSCOIN
-//! minimum proto version of masternode to accept in DKGs
-static const int MIN_MASTERNODE_PROTO_VERSION = 70017;
-
-//! protocol version is included in MNAUTH starting with this version
-static const int MNAUTH_NODE_VER_VERSION = 70016;
+//! SYSCOIN: Fixed-width SLH-DSA MNAUTH and the authenticated VERSION transcript.
+static const int PQ_MNAUTH_PROTO_VERSION = 70018;
 
 //! BIP 0031, pong message, is enabled for all versions AFTER this one
 static const int BIP0031_VERSION = 60000;
@@ -45,8 +43,6 @@ static const int INVALID_CB_NO_BAN_VERSION = 70015;
 //! "wtxidrelay" command for wtxid-based relay starts with this version
 static const int WTXID_RELAY_VERSION = 70016;
 
-//! BLS scheme was introduced in this version
-static const int BLS_SCHEME_PROTO_VERSION = 70017;
 // Make sure that none of the values above collide with
 // `SERIALIZE_TRANSACTION_NO_WITNESS`.
 

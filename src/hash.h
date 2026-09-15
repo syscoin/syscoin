@@ -181,7 +181,11 @@ private:
     Source& m_source;
 
 public:
-    explicit HashVerifier(Source& source LIFETIMEBOUND) : m_source{source} {}
+    // SYSCOIN: Fork codecs may bind an explicit serialization domain.
+    explicit HashVerifier(Source& source LIFETIMEBOUND,
+                          int type = SER_GETHASH,
+                          int version = PROTOCOL_VERSION) :
+        HashWriter{type, version}, m_source{source} {}
 
     void read(Span<std::byte> dst)
     {
@@ -215,7 +219,11 @@ private:
     Source& m_source;
 
 public:
-    explicit HashedSourceWriter(Source& source LIFETIMEBOUND) : HashWriter{}, m_source{source} {}
+    // SYSCOIN: Fork codecs may bind an explicit serialization domain.
+    explicit HashedSourceWriter(Source& source LIFETIMEBOUND,
+                                int type = SER_GETHASH,
+                                int version = PROTOCOL_VERSION) :
+        HashWriter{type, version}, m_source{source} {}
 
     void write(Span<const std::byte> src)
     {

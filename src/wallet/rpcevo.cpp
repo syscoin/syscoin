@@ -3,14 +3,20 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/validation.h>
+// SYSCOIN: post-quantum operator/root lifecycle dependencies.
+#include <consensus/pq_migration_config.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <core_io.h>
+#include <hash.h>
 #include <init.h>
 #include <messagesigner.h>
 #include <rpc/server.h>
+#include <rpc/server_util.h>
 #include <util/moneystr.h>
 #include <validation.h>
 
 #include <wallet/coincontrol.h>
+#include <wallet/pq_key_schedule.h>
 #include <wallet/spend.h>
 #include <wallet/rpc/util.h>
 
@@ -19,10 +25,14 @@
 #include <evo/specialtx.h>
 #include <evo/providertx.h>
 #include <evo/deterministicmns.h>
+#include <evo/pq_providertx.h>
+#include <evo/pq_registry.h>
+#include <governance/governancevote.h>
 
-#include <bls/bls.h>
+#include <llmq/pq_global_auth.h>
 
 #include <masternode/masternodemeta.h>
+#include <masternode/pq_operatorkeys.h>
 #include <rpc/util.h>
 #include <rpc/blockchain.h>
 #include <util/message.h>
@@ -34,7 +44,77 @@
 #include <llmq/quorums_utils.h>
 #include <common/args.h>
 #include <index/txindex.h>
+#include <support/cleanse.h>
+#include <util/strencodings.h>
+#include <util/string.h>
+
+#include <algorithm>
+#include <functional>
+#include <limits>
+#include <optional>
+#include <span>
+#include <utility>
+#include <vector>
 using namespace wallet;
+
+// SYSCOIN: cleanse transient PQ operator and child-root secrets.
+namespace {
+
+class SensitiveBytesGuard final
+{
+public:
+    explicit SensitiveBytesGuard(std::vector<unsigned char>& bytes) noexcept
+        : m_bytes{bytes}
+    {
+    }
+
+    ~SensitiveBytesGuard()
+    {
+        memory_cleanse(m_bytes.data(), m_bytes.size());
+    }
+
+    SensitiveBytesGuard(const SensitiveBytesGuard&) = delete;
+    SensitiveBytesGuard& operator=(const SensitiveBytesGuard&) = delete;
+
+private:
+    std::vector<unsigned char>& m_bytes;
+};
+
+class SensitiveChainLockSeedGuard final
+{
+public:
+    explicit SensitiveChainLockSeedGuard(
+        llmq::pq::ChainLockMasterSeed& seed) noexcept
+        : m_seed{seed}
+    {
+    }
+    ~SensitiveChainLockSeedGuard()
+    {
+        memory_cleanse(m_seed.data(), m_seed.size());
+    }
+
+    SensitiveChainLockSeedGuard(const SensitiveChainLockSeedGuard&) = delete;
+    SensitiveChainLockSeedGuard& operator=(
+        const SensitiveChainLockSeedGuard&) = delete;
+
+private:
+    llmq::pq::ChainLockMasterSeed& m_seed;
+};
+
+// SYSCOIN: wallet RPCs carry WalletContext, so reach the owning node through
+// the wallet chain interface instead of interpreting the RPC context as one.
+static node::NodeContext& GetWalletNodeContext(const CWallet& wallet)
+{
+    node::NodeContext* const node{wallet.chain().context()};
+    if (node == nullptr || node->chainman == nullptr) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Wallet node context is unavailable");
+    }
+    return *node;
+}
+
+} // namespace
+
 static CKeyID ParsePubKeyIDFromAddress(const std::string& strAddress, const std::string& paramName)
 {
     CTxDestination dest = DecodeDestination(strAddress);
@@ -45,23 +125,379 @@ static CKeyID ParsePubKeyIDFromAddress(const std::string& strAddress, const std:
     return ToKeyID(*keyID);
 }
 
-static CBLSPublicKey ParseBLSPubKey(const std::string& hexKey, const std::string& paramName, bool specific_legacy_bls_scheme)
+// SYSCOIN: PQ operator/root parsing and fixed-depth commitment construction.
+static slhdsa::SecretKey ParseSLHSecretKey(const std::string& hex_key,
+                                           const std::string& param_name)
 {
-    CBLSPublicKey pubKey;
-    if (!pubKey.SetHexStr(hexKey, specific_legacy_bls_scheme)) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS public key, not %s", paramName, hexKey));
+    if (!IsHex(hex_key) || hex_key.size() != slhdsa::SECRET_KEY_SIZE * 2) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("%s must be an exactly %u-byte SLH-DSA-SHAKE-128s secret key",
+                      param_name, slhdsa::SECRET_KEY_SIZE));
     }
-    return pubKey;
+    auto bytes = ParseHex(hex_key);
+    const SensitiveBytesGuard cleanse_bytes{bytes};
+    auto key = slhdsa::ImportSecretKey(bytes);
+    if (!key) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           strprintf("%s is not a valid SLH-DSA secret key",
+                                     param_name));
+    }
+    return std::move(*key);
 }
 
-static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::string& paramName)
+static void ParseChainLockMasterSeed(
+    const std::string& hex_seed,
+    llmq::pq::ChainLockMasterSeed& output)
 {
-    CBLSSecretKey secKey;
-    // Actually, bool flag for bls::PrivateKey has other meaning (modOrder)
-    if (!secKey.SetHexStr(hexKey, false)) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
+    if (!IsHex(hex_seed) ||
+        hex_seed.size() != llmq::pq::CHAINLOCK_MASTER_SEED_SIZE * 2) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("chainlockSeed must be an exactly %u-byte independent ChainLock seed",
+                      llmq::pq::CHAINLOCK_MASTER_SEED_SIZE));
     }
-    return secKey;
+    auto bytes = ParseHex(hex_seed);
+    const bool valid = llmq::pq::ImportChainLockMasterSeed(bytes, output);
+    memory_cleanse(bytes.data(), bytes.size());
+    if (!valid) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "chainlockSeed must not be all zero");
+    }
+}
+
+static llmq::pq::ChildKeyTreeCommitment BuildChildKeyTreeCommitment(
+    const llmq::pq::ChainLockMasterSeed& chainlock_seed,
+    const uint256& pro_tx_hash,
+    uint32_t generation,
+    uint32_t first_epoch)
+{
+    if (!llmq::pq::IsValidChildKeyTreeGeneration(generation)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Child-key tree generation is outside the consensus range");
+    }
+    const auto tree_id{llmq::pq::GetChildKeyTreeId(
+        Params().GetConsensus().hashGenesisBlock, pro_tx_hash, generation,
+        first_epoch)};
+    if (!tree_id) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Unable to derive the child-key tree ID");
+    }
+    uint256 fixture_root;
+    const bool use_test_stub{
+        gArgs.GetBoolArg("-pqoperatorcommitmentteststub", false)};
+    const std::string fixture{
+        gArgs.GetArg("-pqoperatorcommitmenttestfixture", "")};
+    const bool verify_fixture{
+        gArgs.GetBoolArg("-pqoperatorcommitmenttestfixtureverify", false)};
+    if (fixture.empty() && verify_fixture) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "-pqoperatorcommitmenttestfixtureverify requires a fixture");
+    }
+    if (use_test_stub && (!fixture.empty() || verify_fixture ||
+                          Params().GetChainType() != ChainType::REGTEST ||
+                          !Params().MineBlocksOnDemand() ||
+                          !gArgs.GetBoolArg("-pqfinalitypreparation", false))) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "PQ operator commitment test stubs require preparation-only "
+            "mine-on-demand regtest and no exact fixture");
+    }
+    if (!fixture.empty()) {
+        // SYSCOIN: Low-core CI exercises the real registration signatures and
+        // state transition with a production-generated commitment. Only the
+        // 65,536-leaf expansion is substituted, and only on isolated regtest.
+        if (Params().GetChainType() != ChainType::REGTEST ||
+            !Params().MineBlocksOnDemand()) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "-pqoperatorcommitmenttestfixture is restricted to "
+                "mine-on-demand regtest");
+        }
+        const auto fields{SplitString(fixture, ':')};
+        if (fields.size() != 6 ||
+            !IsHex(fields[0]) || fields[0].size() != 64 ||
+            !IsHex(fields[1]) || fields[1].size() != 64 ||
+            !IsHex(fields[2]) || fields[2].size() != 64 ||
+            !IsHex(fields[5]) || fields[5].size() != 64) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "Malformed PQ operator commitment test fixture");
+        }
+        uint32_t fixture_generation;
+        uint32_t fixture_first_epoch;
+        if (!ParseUInt32(fields[3], &fixture_generation) ||
+            !ParseUInt32(fields[4], &fixture_first_epoch)) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "Malformed PQ operator commitment test fixture schedule");
+        }
+        if (uint256S(fields[1]) != Hash(chainlock_seed) ||
+            fixture_generation != generation ||
+            fixture_first_epoch != first_epoch ||
+            uint256S(fields[0]) != Params().GetConsensus().hashGenesisBlock) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "PQ operator commitment test fixture does not match the "
+                "requested seed or schedule");
+        }
+        fixture_root = uint256S(fields[5]);
+        if (uint256S(fields[2]) != *tree_id || fixture_root.IsNull()) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "PQ operator commitment test fixture has the wrong tree ID "
+                "or a null root");
+        }
+    }
+
+    const llmq::pq::ChildKeyTreeConfig config{
+        Params().GetConsensus().hashGenesisBlock,
+        *tree_id,
+        generation,
+        first_epoch,
+        llmq::pq::CHILD_KEY_TREE_DEPTH,
+    };
+    if (use_test_stub) {
+        // The broad governance/MN suite exercises global-key authorization and
+        // registry transitions, not child signing. A domain-separated fake
+        // root keeps those tests from multiplying the production 65,536-leaf
+        // build across every parallel test process.
+        CHashWriter writer{SER_GETHASH, 0};
+        writer << std::string{"SYS_PQ_OPERATOR_TEST_STUB_V1"}
+               << config.genesis_hash << config.tree_id << config.generation
+               << config.first_epoch << config.depth;
+        fixture_root = writer.GetHash();
+        if (fixture_root.IsNull()) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR,
+                               "Generated PQ operator test root is null");
+        }
+    }
+    std::optional<llmq::pq::ChildKeyTree> tree;
+    if (fixture_root.IsNull() || verify_fixture) {
+        tree = llmq::pq::ChildKeyTree::Build(
+            chainlock_seed, config,
+            llmq::pq::DefaultChildKeyTreeWorkerCount());
+        if (!tree) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                "Failed to build the fixed-depth scheduled-WOTS public-key tree");
+        }
+        if (verify_fixture && tree->GetRoot() != fixture_root) {
+            throw JSONRPCError(
+                RPC_INTERNAL_ERROR,
+                strprintf("PQ operator commitment test fixture root %s does "
+                          "not match production builder root %s",
+                          fixture_root.ToString(),
+                          tree->GetRoot().ToString()));
+        }
+    }
+
+    llmq::pq::ChildKeyTreeCommitment commitment;
+    commitment.generation = generation;
+    commitment.first_epoch = first_epoch;
+    commitment.tree_id = *tree_id;
+    commitment.root = fixture_root.IsNull() ? tree->GetRoot() : fixture_root;
+    if (!commitment.IsStructurallyValid()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Generated scheduled-WOTS child-key commitment is invalid");
+    }
+    return commitment;
+}
+
+// SYSCOIN: post-quantum operator/root lifecycle.
+static UniValue protx_generate_operator_keys()
+{
+    slhdsa::KeyGenerationSeed global_seed{};
+    llmq::pq::ChainLockMasterSeed chainlock_seed{};
+    GetStrongRandBytesChunked(global_seed);
+    GetStrongRandBytes(chainlock_seed);
+    auto global_key = slhdsa::GenerateSecretKey(global_seed);
+    memory_cleanse(global_seed.data(), global_seed.size());
+    if (!global_key) {
+        memory_cleanse(chainlock_seed.data(), chainlock_seed.size());
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failed to generate SLH-DSA operator key");
+    }
+    std::array<uint8_t, slhdsa::SECRET_KEY_SIZE> encoded_global{};
+    if (!global_key->Export(encoded_global)) {
+        memory_cleanse(encoded_global.data(), encoded_global.size());
+        memory_cleanse(chainlock_seed.data(), chainlock_seed.size());
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failed to export SLH-DSA operator key");
+    }
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("operatorKey", HexStr(encoded_global));
+    result.pushKV("chainlockSeed", HexStr(chainlock_seed));
+    memory_cleanse(encoded_global.data(), encoded_global.size());
+    memory_cleanse(chainlock_seed.data(), chainlock_seed.size());
+    return result;
+}
+
+// SYSCOIN: gate PQ-only provider RPCs at their consensus boundaries.
+static void EnsurePQProviderRPCActive(int current_height)
+{
+    const auto& consensus = Params().GetConsensus();
+    if (Consensus::CheckPQActivationConfiguration(consensus) !=
+            Consensus::PQActivationResult::VALID ||
+        current_height + 1 < consensus.nPQActivationHeight) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Post-quantum provider RPCs require PQ activation at the next block height");
+    }
+}
+
+// SYSCOIN: Provider registration follows the next block's consensus era.
+// Public pre-activation callers must still supply their legacy operator key;
+// preparation-only regtest may synthesize opaque bytes because no legacy BLS
+// operation is performed and the key exists only to build migration history.
+static void ConfigureProviderRegistrationForNextBlock(
+    CProRegTx& payload,
+    int current_height,
+    const std::string& legacy_operator_public_key)
+{
+    const auto replay{Consensus::CheckPQLegacyReplay(
+        Params().GetConsensus(), current_height + 1)};
+    if (replay == Consensus::PQLegacyReplayResult::INVALID_CONFIGURATION) {
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           "Invalid post-quantum activation configuration");
+    }
+    if (replay == Consensus::PQLegacyReplayResult::RETIRED) {
+        EnsurePQProviderRPCActive(current_height);
+        if (!legacy_operator_public_key.empty()) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "legacyOperatorPubKey must be empty after PQ activation");
+        }
+        payload.nVersion = CProRegTx::PQ_VERSION;
+        return;
+    }
+
+    payload.nVersion = CProRegTx::GetVersion(
+        llmq::CLLMQUtils::IsV19Active(current_height));
+    std::vector<unsigned char> encoded;
+    if (!legacy_operator_public_key.empty()) {
+        if (!IsHex(legacy_operator_public_key)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "legacyOperatorPubKey must be hexadecimal");
+        }
+        encoded = ParseHex(legacy_operator_public_key);
+    } else {
+        if (Params().GetChainType() != ChainType::REGTEST ||
+            !Params().MineBlocksOnDemand() ||
+            !gArgs.GetBoolArg("-pqfinalitypreparation", false)) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "legacyOperatorPubKey is required before PQ activation");
+        }
+        encoded.resize(CLegacyBLSPublicKey::SERIALIZED_SIZE);
+        GetStrongRandBytesChunked(encoded);
+        encoded.front() |= 1U;
+    }
+    if (!payload.pubKeyOperator.SetBytes(encoded) ||
+        !payload.pubKeyOperator.IsValid()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("legacyOperatorPubKey must encode exactly %u nonzero bytes",
+                      static_cast<unsigned>(
+                          CLegacyBLSPublicKey::SERIALIZED_SIZE)));
+    }
+}
+
+static llmq::pq::GlobalPublicKey ParseVotingPublicKey(const std::string& encoded,
+                                                     bool allow_revocation = false)
+{
+    llmq::pq::GlobalPublicKey public_key{};
+    if (encoded.size() != public_key.size() * 2 || !IsHex(encoded)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Voting key must be an exactly 32-byte SLH-DSA public key in hex");
+    }
+    const auto bytes{ParseHex(encoded)};
+    std::copy(bytes.begin(), bytes.end(), public_key.begin());
+    if (!allow_revocation && llmq::pq::IsNullVotingPublicKey(public_key)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Voting public key must not be zero");
+    }
+    return public_key;
+}
+
+static void ConfigureProviderVotingKey(CProRegTx& payload, const std::string& voting_key)
+{
+    payload.keyIDVoting = payload.keyIDOwner;
+    if (payload.nVersion == CProRegTx::PQ_VERSION) {
+        payload.pqVotingPublicKey = ParseVotingPublicKey(voting_key);
+    } else if (!voting_key.empty()) {
+        payload.keyIDVoting = ParsePubKeyIDFromAddress(voting_key, "voting address");
+    }
+}
+
+static void EnsurePQPreparationRPCActive(int current_height)
+{
+    llmq::pq::PQRegistryConfig config;
+    if (llmq::pq::GetPQRegistryConfig(Params().GetConsensus(), config) !=
+            llmq::pq::PQRegistryDeploymentResult::VALID ||
+        current_height + 1 < config.preparation_height) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "PQ operator-key registration is not active at the next block height");
+    }
+}
+
+static uint32_t NextPQFirstMutableEpoch(node::NodeContext& node)
+{
+    LOCK(cs_main);
+    const CBlockIndex* tip{node.chainman->ActiveTip()};
+    if (tip == nullptr) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Active chain tip is unavailable");
+    }
+    EnsurePQPreparationRPCActive(tip->nHeight);
+    llmq::pq::PQRegistryConfig config;
+    if (llmq::pq::GetPQRegistryConfig(Params().GetConsensus(), config) !=
+        llmq::pq::PQRegistryDeploymentResult::VALID) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "PQ registry configuration is invalid");
+    }
+    const auto view{llmq::pq::DeriveOperatorKeyScheduleView(
+        config.schedule, tip->nHeight + 1,
+        config.registration_cutoff_blocks, config.future_horizon_epochs)};
+    if (!view) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Unable to derive the next-block PQ key schedule");
+    }
+    return view->first_mutable_epoch;
+}
+
+static llmq::pq::ChildKeyTreeCommitment BuildCurrentChildKeyTreeCommitment(
+    node::NodeContext& node,
+    const llmq::pq::ChainLockMasterSeed& chainlock_seed,
+    const uint256& pro_tx_hash,
+    uint32_t generation)
+{
+    const auto commitment{BuildCurrentPQChildKeyCommitment(
+        [&]() { return NextPQFirstMutableEpoch(node); },
+        [&](uint32_t first_epoch) {
+            return BuildChildKeyTreeCommitment(
+                chainlock_seed, pro_tx_hash, generation, first_epoch);
+        })};
+    if (!commitment) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "PQ registration cutoff changed repeatedly during child-key tree "
+            "construction; retry the RPC");
+    }
+    return *commitment;
+}
+
+static void EnsureCurrentChildKeyCommitmentSchedule(
+    node::NodeContext& node,
+    const llmq::pq::ChildKeyTreeCommitment& commitment)
+{
+    if (commitment.first_epoch != NextPQFirstMutableEpoch(node)) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "PQ registration cutoff changed during transaction preparation; "
+            "retry the RPC");
+    }
 }
 
 template<typename SpecialTxPayload>
@@ -136,16 +572,100 @@ static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxP
     }
 }
 
-template <typename SpecialTxPayload>
-static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxPayload& payload,
-                                       const CBLSSecretKey& key, bool use_legacy)
+// SYSCOIN: canonical global-operator lookup and authorization helpers.
+static llmq::pq::OperatorKeyState GetActivePQOperator(
+    const CBlockIndex* tip,
+    const uint256& pro_tx_hash,
+    const llmq::pq::GlobalPublicKey& public_key)
 {
-    UpdateSpecialTxInputsHash(tx, payload);
-
-    uint256 hash = ::SerializeHash(payload);
-    payload.sig = key.Sign(hash, use_legacy);
+    llmq::pq::PQRegistryReadView snapshot;
+    std::string error;
+    if (tip == nullptr || !deterministicMNManager->GetPQRegistryReadView(
+                              tip, snapshot, error)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Unable to read active PQ operator registry: " + error);
+    }
+    const auto* state = snapshot.FindOperator(pro_tx_hash);
+    if (state == nullptr || !state->HasActiveGlobalKey() ||
+        public_key != state->global_key.public_key) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "The SLH-DSA operator key is not the active registered global key");
+    }
+    return *state;
 }
-static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true)
+
+static llmq::pq::OperatorKeyState GetActivePQOperator(
+    const CBlockIndex* tip,
+    const uint256& pro_tx_hash,
+    const slhdsa::SecretKey& key)
+{
+    llmq::pq::GlobalPublicKey public_key{};
+    if (!key.GetPublicKey(public_key)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Unable to derive the SLH-DSA public key");
+    }
+    return GetActivePQOperator(tip, pro_tx_hash, public_key);
+}
+
+static void SignInitialGlobalKeyPayload(
+    llmq::pq::GlobalKeyTxPayload& payload,
+    const CKey& owner_key,
+    const slhdsa::SecretKey& operator_key,
+    const llmq::pq::GlobalKeyRecord* previous_key = nullptr)
+{
+    const uint256 genesis_hash = Params().GetConsensus().hashGenesisBlock;
+    const auto owner_hash = llmq::pq::GetGlobalOwnerRegistrationAuthorizationHash(
+        genesis_hash, payload);
+    const auto operator_hash = previous_key == nullptr
+        ? llmq::pq::GetGlobalRegistrationAuthorizationHash(
+              genesis_hash, payload.pro_tx_hash, payload.candidate,
+              payload.transaction_inputs_hash)
+        : llmq::pq::GetGlobalRecoveryAuthorizationHash(
+              genesis_hash, payload.pro_tx_hash, *previous_key,
+              payload.candidate, payload.transaction_inputs_hash);
+    std::vector<unsigned char> owner_signature;
+    if (!owner_hash || !operator_hash ||
+        !CHashSigner::SignHash(*owner_hash, owner_key, owner_signature) ||
+        owner_signature.size() != payload.owner_authorization.size()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failed to sign PQ global-key owner authorization");
+    }
+    std::copy(owner_signature.begin(), owner_signature.end(),
+              payload.owner_authorization.begin());
+    if (!slhdsa::SignDeterministic(
+            operator_key,
+            std::span<const uint8_t>{operator_hash->begin(), operator_hash->size()},
+            llmq::pq::GetGlobalAuthContext(
+                llmq::pq::GlobalAuthPurpose::GLOBAL_REGISTRATION),
+            payload.authorization)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failed to sign PQ global-key proof of possession");
+    }
+}
+
+static void SignGlobalKeyRotationPayload(
+    llmq::pq::GlobalKeyTxPayload& payload,
+    const llmq::pq::GlobalKeyRecord& current,
+    const slhdsa::SecretKey& current_key)
+{
+    const auto authorization_hash = llmq::pq::GetGlobalRotationAuthorizationHash(
+        Params().GetConsensus().hashGenesisBlock, payload.pro_tx_hash,
+        current, payload.candidate, payload.transaction_inputs_hash);
+    if (!authorization_hash ||
+        !slhdsa::SignDeterministic(
+            current_key,
+            std::span<const uint8_t>{authorization_hash->begin(),
+                                     authorization_hash->size()},
+            llmq::pq::GetGlobalAuthContext(
+                llmq::pq::GlobalAuthPurpose::GLOBAL_ROTATION),
+            payload.authorization)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failed to sign PQ global-key rotation");
+    }
+}
+static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true,
+                                    const std::function<void()>& check_prepared = {})
 {
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     ds << tx;
@@ -156,6 +676,9 @@ static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const 
     signRequest.params.setArray();
     signRequest.params.push_back(HexStr(ds));
     UniValue signResult = signrawtransactionwithwallet().HandleRequest(signRequest);
+    // Funding and wallet signing can cross a cutoff after the expensive tree
+    // build. Check even the offline result before exposing stale signed hex.
+    if (check_prepared) check_prepared();
     if (!fSubmit) {
         return signResult["hex"].get_str();
     }
@@ -177,6 +700,7 @@ static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const 
 
 
 // handles register, register_prepare and register_fund
+// SYSCOIN: provider registration is serialized for the next block's era.
 static RPCHelpMan protx_register()
 {
     return RPCHelpMan{"protx_register",
@@ -191,11 +715,9 @@ static RPCHelpMan protx_register()
                     {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
                                         "The corresponding private key does not have to be known by your wallet.\n"
                                         "The address must be unused and must differ from the collateralAddress."},
-                    {"operatorPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS public key. The BLS private key does not have to be known.\n"
-                                        "It has to match the BLS private key which is later used when operating the masternode."},
-                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                        "It has to match the private key which is later used when voting on proposals.\n"
-                                        "If set to an empty string, ownerAddress will be used.\n"},
+                    {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. The global SLH-DSA key is registered separately."},
+                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
+                                        "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
                     {"operatorReward", RPCArg::Type::NUM, RPCArg::Optional::NO, "The fraction in %% to share with the operator. The value must be\n"
                                         "between 0.00 and 100.00."},
                     {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments."},
@@ -203,12 +725,11 @@ static RPCHelpMan protx_register()
                                         "If not specified, payoutAddress is the one that is going to be used.\n"
                                         "The private key belonging to this address must be known in your wallet."},
                     {"submit", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "If true, the resulting transaction is sent to the network."},
-                    {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
                 },
                 RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
                 RPCExamples{
-                    HelpExampleCli("protx_register", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 0 173.249.49.9:18369 tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r 5 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-                + HelpExampleRpc("protx_register", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", 0, \"173.249.49.9:18369\", \"tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", 5, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                    HelpExampleCli("protx_register", "<collateral-hash> 0 173.249.49.9:18369 <owner-address> \"\" <voting-address> 5 <payout-address>")
+                + HelpExampleRpc("protx_register", "\"<collateral-hash>\", 0, \"173.249.49.9:18369\", \"<owner-address>\", \"\", \"<voting-address>\", 5, \"<payout-address>\"")
                 },
         [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -226,19 +747,11 @@ static RPCHelpMan protx_register()
     tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
 
     CProRegTx ptx;
-    bool v19active;
+    int current_height;
     {
         LOCK(cs_main);
-        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+        current_height = *pwallet->chain().getHeight();
     }
-    bool specific_legacy_bls_scheme{!v19active};
-    if(request.params.size() >= 11) {
-        specific_legacy_bls_scheme = request.params[10].get_bool();
-    }
-    if (specific_legacy_bls_scheme)
-        ptx.nVersion = CProRegTx::LEGACY_BLS_VERSION;
-    else
-        ptx.nVersion = CProRegTx::GetVersion(v19active);
 
     uint256 collateralHash = ParseHashV(request.params[paramIdx], "collateralHash");
     int32_t collateralIndex = request.params[paramIdx + 1].getInt<int>();
@@ -264,11 +777,10 @@ static RPCHelpMan protx_register()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", specific_legacy_bls_scheme);
-        CKeyID keyIDVoting = ptx.keyIDOwner;
-        if (request.params[paramIdx + 3].get_str() != "") {
-            keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
-        }
+        ConfigureProviderRegistrationForNextBlock(
+            ptx, current_height,
+            request.params[paramIdx + 2].get_str());
+        ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
         int64_t operatorReward;
         if (!ParseFixedPoint(request.params[paramIdx + 4].getValStr(), 2, &operatorReward)) {
@@ -284,8 +796,6 @@ static RPCHelpMan protx_register()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
         }
 
-        ptx.pubKeyOperator.Set(pubKeyOperator, specific_legacy_bls_scheme);
-        ptx.keyIDVoting = keyIDVoting;
         ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
         // make sure fee calculation works
@@ -350,6 +860,7 @@ static RPCHelpMan protx_register()
     };
 }
     
+// SYSCOIN: funded provider registration is serialized for the next block's era.
 static RPCHelpMan protx_register_fund()
 {
         return RPCHelpMan{"protx_register_fund",
@@ -363,11 +874,9 @@ static RPCHelpMan protx_register_fund()
                     {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
                                         "The corresponding private key does not have to be known by your wallet.\n"
                                         "The address must be unused and must differ from the collateralAddress."},
-                    {"operatorPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS public key. The BLS private key does not have to be known.\n"
-                                        "It has to match the BLS private key which is later used when operating the masternode."},
-                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                        "It has to match the private key which is later used when voting on proposals.\n"
-                                        "If set to an empty string, ownerAddress will be used.\n"},
+                    {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
+                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
+                                        "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
                     {"operatorReward", RPCArg::Type::NUM, RPCArg::Optional::NO, "The fraction in %% to share with the operator. The value must be\n"
                                         "between 0.00 and 100.00."},
                     {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments."},
@@ -375,12 +884,11 @@ static RPCHelpMan protx_register_fund()
                                         "If not specified, payoutAddress is the one that is going to be used.\n"
                                         "The private key belonging to this address must be known in your wallet."},
                     {"submit", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "If true, the resulting transaction is sent to the network."},
-                    {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
                 },
                 RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
                 RPCExamples{
-                    HelpExampleCli("protx_register_fund", "\"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\" 173.249.49.9:18369 tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r 5 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-            + HelpExampleRpc("protx_register_fund", "\"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"173.249.49.9:18369\", \"tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", 5, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                    HelpExampleCli("protx_register_fund", "<collateral-address> 173.249.49.9:18369 <owner-address> \"\" <voting-address> 5 <payout-address>")
+            + HelpExampleRpc("protx_register_fund", "\"<collateral-address>\", \"173.249.49.9:18369\", \"<owner-address>\", \"\", \"<voting-address>\", 5, \"<payout-address>\"")
                 },
         [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -397,21 +905,12 @@ static RPCHelpMan protx_register_fund()
 
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-    bool v19active;
+    int current_height;
     {
         LOCK(cs_main);
-        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+        current_height = *pwallet->chain().getHeight();
     }
     CProRegTx ptx;
-    bool specific_legacy_bls_scheme{!v19active};
-    if(request.params.size() >= 10) {
-        specific_legacy_bls_scheme = request.params[9].get_bool();
-    }
-    if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProRegTx::LEGACY_BLS_VERSION;
-    } else {
-        ptx.nVersion = CProRegTx::GetVersion(v19active);
-    }
 
 
     CTxDestination collateralDest = DecodeDestination(request.params[paramIdx].get_str());
@@ -435,11 +934,10 @@ static RPCHelpMan protx_register_fund()
     }
 
     ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-    CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", specific_legacy_bls_scheme);
-    CKeyID keyIDVoting = ptx.keyIDOwner;
-    if (request.params[paramIdx + 3].get_str() != "") {
-        keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
-    }
+    ConfigureProviderRegistrationForNextBlock(
+        ptx, current_height,
+        request.params[paramIdx + 2].get_str());
+    ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
     int64_t operatorReward;
     if (!ParseFixedPoint(request.params[paramIdx + 4].getValStr(), 2, &operatorReward)) {
@@ -455,8 +953,6 @@ static RPCHelpMan protx_register_fund()
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
     }
 
-    ptx.pubKeyOperator.Set(pubKeyOperator, specific_legacy_bls_scheme);
-    ptx.keyIDVoting = keyIDVoting;
     ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
 
@@ -495,7 +991,8 @@ static RPCHelpMan protx_register_fund()
     return res;
 },
     };
-}  
+}
+// SYSCOIN: prepared provider registration is serialized for the next block's era.
 static RPCHelpMan protx_register_prepare()
 {
     return RPCHelpMan{"protx_register_prepare",
@@ -510,23 +1007,20 @@ static RPCHelpMan protx_register_prepare()
                 {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
                                     "The corresponding private key does not have to be known by your wallet.\n"
                                     "The address must be unused and must differ from the collateralAddress."},
-                {"operatorPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS public key. The BLS private key does not have to be known.\n"
-                                    "It has to match the BLS private key which is later used when operating the masternode."},
-                {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                    "It has to match the private key which is later used when voting on proposals.\n"
-                                    "If set to an empty string, ownerAddress will be used.\n"},
+                {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
+                {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
+                                    "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
                 {"operatorReward", RPCArg::Type::NUM, RPCArg::Optional::NO, "The fraction in %% to share with the operator. The value must be\n"
                                     "between 0.00 and 100.00."},
                 {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments."},
                 {"fundAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                     "If not specified, payoutAddress is the one that is going to be used.\n"
                                     "The private key belonging to this address must be known in your wallet."},
-                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
             },
             RPCResult{RPCResult::Type::ANY, "", "Unsigned ProTX transaction object"},
             RPCExamples{
-                HelpExampleCli("protx_register_prepare", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 0 173.249.49.9:18369 tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r 5 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-            + HelpExampleRpc("protx_register_prepare", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", 0, \"173.249.49.9:18369\", \"tsys1q2j57a4rtserh9022a63pvk3jqmg7un55stux0v\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", 5, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                HelpExampleCli("protx_register_prepare", "<collateral-hash> 0 173.249.49.9:18369 <owner-address> \"\" <voting-address> 5 <payout-address>")
+            + HelpExampleRpc("protx_register_prepare", "\"<collateral-hash>\", 0, \"173.249.49.9:18369\", \"<owner-address>\", \"\", \"<voting-address>\", 5, \"<payout-address>\"")
             },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -540,21 +1034,12 @@ static RPCHelpMan protx_register_prepare()
 
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
-    bool v19active;
+    int current_height;
     {
         LOCK(cs_main);
-        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+        current_height = *pwallet->chain().getHeight();
     }
     CProRegTx ptx;
-    bool specific_legacy_bls_scheme{!v19active};
-    if(request.params.size() >= 10) {
-        specific_legacy_bls_scheme = request.params[9].get_bool();
-    }
-    if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProRegTx::LEGACY_BLS_VERSION;
-    } else {
-        ptx.nVersion = CProRegTx::GetVersion(v19active);
-    }
 
     uint256 collateralHash = ParseHashV(request.params[paramIdx], "collateralHash");
     int32_t collateralIndex = request.params[paramIdx + 1].getInt<int>();
@@ -580,11 +1065,10 @@ static RPCHelpMan protx_register_prepare()
         }
 
         ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
-        CBLSPublicKey pubKeyOperator = ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", specific_legacy_bls_scheme);
-        CKeyID keyIDVoting = ptx.keyIDOwner;
-        if (request.params[paramIdx + 3].get_str() != "") {
-            keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
-        }
+        ConfigureProviderRegistrationForNextBlock(
+            ptx, current_height,
+            request.params[paramIdx + 2].get_str());
+        ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
         int64_t operatorReward;
         if (!ParseFixedPoint(request.params[paramIdx + 4].getValStr(), 2, &operatorReward)) {
@@ -600,8 +1084,6 @@ static RPCHelpMan protx_register_prepare()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[paramIdx + 5].get_str()));
         }
 
-        ptx.pubKeyOperator.Set(pubKeyOperator, specific_legacy_bls_scheme);
-        ptx.keyIDVoting = keyIDVoting;
         ptx.scriptPayout = GetScriptForDestination(payoutDest);
 
 
@@ -651,8 +1133,9 @@ static RPCHelpMan protx_register_prepare()
     return ret;
 },
     };
-}  
+}
 
+// SYSCOIN: submit only canonical PQ provider registrations.
 static RPCHelpMan protx_register_submit()
 {
    return RPCHelpMan{"protx_register_submit",
@@ -699,8 +1182,455 @@ static RPCHelpMan protx_register_submit()
     return SignAndSendSpecialTx(request, *pwallet, tx);
 },
     };
-} 
+}
 
+// SYSCOIN: one-time bootstrap/recovery of the global operator key and child root.
+static RPCHelpMan protx_register_operator_key()
+{
+    return RPCHelpMan{
+        "protx_register_operator_key",
+        "\nRegisters the initial global SLH-DSA operator key, or recovers a revoked key, using owner ECDSA authorization plus new-key proof of possession.\n",
+        {
+            {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The deterministic masternode ProRegTx hash."},
+            {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The exactly 64-byte SLH-DSA-SHAKE-128s secret key. Avoid exposing this argument through shell history."},
+            {"chainlockSeed", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The independent nonzero 32-byte ChainLock seed. It deterministically commits 65,536 epoch keys and is never placed on-chain."},
+            {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""},
+             "Wallet address used to fund the transaction; defaults to the masternode payout address."},
+            {"submit", RPCArg::Type::BOOL, RPCArg::Default{true},
+             "Broadcast when true; otherwise return the signed transaction hex."},
+        },
+        RPCResult{RPCResult::Type::STR_HEX, "", "Transaction hash or signed transaction hex"},
+        RPCExamples{HelpExampleCli(
+            "protx_register_operator_key",
+            "<proTxHash> <64-byte-secret-key> <32-byte-chainlock-seed>")},
+        [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto pwallet = GetWalletForJSONRPCRequest(request);
+            if (!pwallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*pwallet);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            node::NodeContext& node = GetWalletNodeContext(*pwallet);
+            const uint256 pro_tx_hash = ParseHashV(request.params[0], "proTxHash");
+            auto operator_key = ParseSLHSecretKey(request.params[1].get_str(),
+                                                  "operatorKey");
+            llmq::pq::ChainLockMasterSeed chainlock_seed{};
+            ParseChainLockMasterSeed(request.params[2].get_str(),
+                                     chainlock_seed);
+            const SensitiveChainLockSeedGuard chainlock_seed_guard{
+                chainlock_seed};
+
+            CDeterministicMNCPtr dmn;
+            uint32_t key_version{1};
+            uint32_t tree_generation{1};
+            std::optional<llmq::pq::GlobalKeyRecord> previous_key;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip = node.chainman->ActiveTip();
+                if (tip == nullptr) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR,
+                                       "Active chain tip is unavailable");
+                }
+                EnsurePQPreparationRPCActive(tip->nHeight);
+                dmn = deterministicMNManager->GetListForBlock(tip).GetMN(pro_tx_hash);
+                if (!dmn) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "Masternode not found at active tip");
+                }
+
+                llmq::pq::PQRegistryReadView snapshot;
+                std::string registry_error;
+                if (!deterministicMNManager->GetPQRegistryReadView(
+                        tip, snapshot, registry_error)) {
+                    throw JSONRPCError(
+                        RPC_INTERNAL_ERROR,
+                        "Unable to read PQ registry snapshot: " + registry_error);
+                }
+                if (const auto* state = snapshot.FindOperator(pro_tx_hash)) {
+                    if (state->HasActiveGlobalKey()) {
+                        throw JSONRPCError(
+                            RPC_INVALID_PARAMETER,
+                            "An active global key already exists; use the rotation transaction path");
+                    }
+                    if (state->has_global_key != 0) {
+                        if (state->global_key.key_version ==
+                            std::numeric_limits<uint32_t>::max()) {
+                            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                               "Global key version is exhausted");
+                        }
+                        key_version = state->global_key.key_version + 1;
+                        previous_key = state->global_key;
+                        // SYSCOIN: recovery advances to a fresh tree generation.
+                        if (!llmq::pq::CanAdvanceChildKeyTreeGeneration(
+                                state->global_key.child_key_commitment.generation)) {
+                            throw JSONRPCError(
+                                RPC_INVALID_PARAMETER,
+                                "Child-key tree generation is exhausted");
+                        }
+                        tree_generation =
+                            state->global_key.child_key_commitment.generation + 1;
+                    }
+                }
+            }
+
+            const auto child_commitment = BuildCurrentChildKeyTreeCommitment(
+                node, chainlock_seed, pro_tx_hash, tree_generation);
+
+            CKey owner_key;
+            if (!pwallet->GetKey(dmn->pdmnState->keyIDOwner, owner_key)) {
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                                   "The masternode owner key is not in this wallet");
+            }
+
+            llmq::pq::GlobalKeyTxPayload payload;
+            payload.operation = llmq::pq::GlobalKeyOperation::INITIAL;
+            payload.pro_tx_hash = pro_tx_hash;
+            payload.candidate.key_version = key_version;
+            if (!operator_key.GetPublicKey(payload.candidate.public_key)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Unable to derive the SLH-DSA public key");
+            }
+            payload.candidate.child_key_commitment = child_commitment;
+            payload.transaction_inputs_hash = uint256::ONEV;
+            SignInitialGlobalKeyPayload(
+                payload, owner_key, operator_key,
+                previous_key ? &*previous_key : nullptr);
+
+            CMutableTransaction tx;
+            tx.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
+            CTxDestination fee_source;
+            if (!request.params[3].isNull() &&
+                !request.params[3].get_str().empty()) {
+                fee_source = DecodeDestination(request.params[3].get_str());
+                if (!IsValidDestination(fee_source)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                                       "Invalid fee source address");
+                }
+            } else if (!ExtractDestination(dmn->pdmnState->scriptPayout,
+                                           fee_source)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Masternode payout script has no usable fee address");
+            }
+            FundSpecialTx(*pwallet, tx, payload, fee_source);
+            payload.transaction_inputs_hash = CalcTxInputsHash(CTransaction(tx));
+            SignInitialGlobalKeyPayload(
+                payload, owner_key, operator_key,
+                previous_key ? &*previous_key : nullptr);
+            SetTxPayload(tx, payload);
+
+            const bool submit = request.params[4].isNull() ||
+                                request.params[4].get_bool();
+            return SignAndSendSpecialTx(request, *pwallet, tx, submit, [&]() {
+                EnsureCurrentChildKeyCommitmentSchedule(node, child_commitment);
+            });
+        },
+    };
+}
+
+static RPCHelpMan protx_generate_voting_key()
+{
+    return RPCHelpMan{
+        "protx_generate_voting_key",
+        "\nGenerates an independent reusable SLH-DSA proposal-funding voting key in this wallet.\n"
+        "Only its public key is returned. Give it to the masternode owner for registration; the private key stays in the owner's or delegate's wallet.\n"
+        "Back up the full wallet with backupwallet after generation. Descriptor exports and earlier backups cannot recover this independent key.\n",
+        {},
+        RPCResult{RPCResult::Type::STR_HEX, "publicKey", "32-byte SLH-DSA-SHAKE-128s voting public key"},
+        RPCExamples{HelpExampleCli("protx_generate_voting_key", "")},
+        [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            slhdsa::PublicKey public_key;
+            std::string error;
+            if (!wallet->GenerateVotingKey(public_key, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            return HexStr(public_key);
+        }};
+}
+
+static RPCHelpMan protx_generate_operator_keypair()
+{
+    return RPCHelpMan{
+        "protx_generate_operator_keypair",
+        "\nGenerates independent local secrets for PQ masternode operation. Store both securely; this RPC does not persist them.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR_HEX, "operatorKey",
+             "Canonical 64-byte global SLH-DSA secret key"},
+            {RPCResult::Type::STR_HEX, "chainlockSeed",
+             "Independent 32-byte ChainLock child-key master seed"},
+        }},
+        RPCExamples{HelpExampleCli("protx_generate_operator_keypair", "")},
+        [&](const RPCHelpMan&, const node::JSONRPCRequest&) -> UniValue {
+            return protx_generate_operator_keys();
+        },
+    };
+}
+
+// SYSCOIN: current-PQ-authorized global operator rotation.
+static RPCHelpMan protx_rotate_operator_key()
+{
+    return RPCHelpMan{
+        "protx_rotate_operator_key",
+        "\nRotates an active global SLH-DSA operator key. The current key authorizes the exact replacement and transaction inputs.\n",
+        {
+            {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The deterministic masternode ProRegTx hash."},
+            {"currentOperatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The current 64-byte SLH-DSA secret key."},
+            {"newOperatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The replacement 64-byte SLH-DSA secret key."},
+            {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""},
+             "Wallet address used to fund the transaction; defaults to the masternode payout address."},
+            {"submit", RPCArg::Type::BOOL, RPCArg::Default{true},
+             "Broadcast when true; otherwise return the signed transaction hex."},
+            {"newChainlockSeed", RPCArg::Type::STR, RPCArg::Default{""},
+             "Optional independent nonzero 32-byte ChainLock seed for an exceptional child-root rotation. Empty preserves the existing 65,536-epoch commitment; consensus permits at most 15 replacements after generation 1."},
+        },
+        RPCResult{RPCResult::Type::STR_HEX, "", "Transaction hash or signed transaction hex"},
+        RPCExamples{HelpExampleCli(
+            "protx_rotate_operator_key", "<proTxHash> <current-key> <new-key>")},
+        [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto pwallet = GetWalletForJSONRPCRequest(request);
+            if (!pwallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*pwallet);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            node::NodeContext& node = GetWalletNodeContext(*pwallet);
+            const uint256 pro_tx_hash = ParseHashV(request.params[0], "proTxHash");
+            auto current_key = ParseSLHSecretKey(
+                request.params[1].get_str(), "currentOperatorKey");
+            auto new_key = ParseSLHSecretKey(
+                request.params[2].get_str(), "newOperatorKey");
+            llmq::pq::ChainLockMasterSeed replacement_chainlock_seed{};
+            const SensitiveChainLockSeedGuard replacement_seed_guard{
+                replacement_chainlock_seed};
+            const bool rotate_child_root{
+                !request.params[5].isNull() &&
+                !request.params[5].get_str().empty()};
+            if (rotate_child_root) {
+                ParseChainLockMasterSeed(request.params[5].get_str(),
+                                         replacement_chainlock_seed);
+            }
+
+            CDeterministicMNCPtr dmn;
+            llmq::pq::OperatorKeyState operator_state;
+            uint32_t replacement_tree_generation{0};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip = node.chainman->ActiveTip();
+                if (tip == nullptr) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR,
+                                       "Active chain tip is unavailable");
+                }
+                EnsurePQPreparationRPCActive(tip->nHeight);
+                dmn = deterministicMNManager->GetListForBlock(tip).GetMN(pro_tx_hash);
+                if (!dmn) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "Masternode not found at active tip");
+                }
+                operator_state = GetActivePQOperator(
+                    tip, pro_tx_hash, current_key);
+                if (rotate_child_root) {
+                    const auto& current_commitment{
+                        operator_state.global_key.child_key_commitment};
+                    if (!llmq::pq::CanAdvanceChildKeyTreeGeneration(
+                            current_commitment.generation)) {
+                        throw JSONRPCError(
+                            RPC_INVALID_PARAMETER,
+                            "Child-key tree generation is exhausted");
+                    }
+                    replacement_tree_generation =
+                        current_commitment.generation + 1;
+                }
+            }
+            if (operator_state.global_key.key_version ==
+                std::numeric_limits<uint32_t>::max()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Global key version is exhausted");
+            }
+
+            llmq::pq::GlobalKeyTxPayload payload;
+            payload.operation = llmq::pq::GlobalKeyOperation::ROTATE;
+            payload.pro_tx_hash = pro_tx_hash;
+            payload.candidate.key_version =
+                operator_state.global_key.key_version + 1;
+            if (!new_key.GetPublicKey(payload.candidate.public_key) ||
+                payload.candidate.public_key ==
+                    operator_state.global_key.public_key) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Replacement global key must be different");
+            }
+            payload.candidate.child_key_commitment =
+                operator_state.global_key.child_key_commitment;
+            if (rotate_child_root) {
+                payload.candidate.child_key_commitment =
+                    BuildCurrentChildKeyTreeCommitment(
+                        node,
+                        replacement_chainlock_seed,
+                        pro_tx_hash,
+                        replacement_tree_generation);
+                if (payload.candidate.child_key_commitment.root ==
+                    operator_state.global_key.child_key_commitment.root) {
+                    throw JSONRPCError(
+                        RPC_INTERNAL_ERROR,
+                        "Replacement child-key root unexpectedly matches the current root");
+                }
+            }
+            payload.transaction_inputs_hash = uint256::ONEV;
+            SignGlobalKeyRotationPayload(payload, operator_state.global_key,
+                                         current_key);
+
+            CMutableTransaction tx;
+            tx.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
+            CTxDestination fee_source;
+            if (!request.params[3].isNull() &&
+                !request.params[3].get_str().empty()) {
+                fee_source = DecodeDestination(request.params[3].get_str());
+                if (!IsValidDestination(fee_source)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                                       "Invalid fee source address");
+                }
+            } else if (!ExtractDestination(dmn->pdmnState->scriptPayout,
+                                           fee_source)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Masternode payout script has no usable fee address");
+            }
+            FundSpecialTx(*pwallet, tx, payload, fee_source);
+            payload.transaction_inputs_hash = CalcTxInputsHash(CTransaction(tx));
+            SignGlobalKeyRotationPayload(payload, operator_state.global_key,
+                                         current_key);
+            SetTxPayload(tx, payload);
+
+            const bool submit = request.params[4].isNull() ||
+                                request.params[4].get_bool();
+            return SignAndSendSpecialTx(request, *pwallet, tx, submit, [&]() {
+                if (rotate_child_root) {
+                    EnsureCurrentChildKeyCommitmentSchedule(
+                        node, payload.candidate.child_key_commitment);
+                }
+            });
+        },
+    };
+}
+
+static RPCHelpMan protx_recovery_ready()
+{
+    return RPCHelpMan{
+        "protx_recovery_ready",
+        "\nDeclares PQ recovery readiness for one four-epoch recovery group. The current operator key signs the fixed branch reference and transaction inputs; this does not rotate keys, revive PoSe, or change payments.\n",
+        {
+            {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The deterministic masternode ProRegTx hash."},
+            {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "The current 64-byte SLH-DSA operator secret key."},
+            {"group", RPCArg::Type::NUM, RPCArg::Optional::NO,
+             "Recovery group index q, covering epochs 4q through 4q+3."},
+            {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""},
+             "Wallet fee address; defaults to the masternode payout address."},
+            {"submit", RPCArg::Type::BOOL, RPCArg::Default{true},
+             "Broadcast when true; otherwise return signed transaction hex."},
+        },
+        RPCResult{RPCResult::Type::STR_HEX, "", "Transaction hash or signed transaction hex"},
+        RPCExamples{HelpExampleCli("protx_recovery_ready", "<proTxHash> <operator-key> <group>")},
+        [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto pwallet = GetWalletForJSONRPCRequest(request);
+            if (!pwallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*pwallet);
+            pwallet->BlockUntilSyncedToCurrentChain();
+            node::NodeContext& node = GetWalletNodeContext(*pwallet);
+            const uint256 pro_tx_hash{ParseHashV(request.params[0], "proTxHash")};
+            auto operator_key{ParseSLHSecretKey(request.params[1].get_str(), "operatorKey")};
+            const int64_t group{request.params[2].getInt<int64_t>()};
+            if (group < 0 || group > std::numeric_limits<uint32_t>::max() / 4) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Recovery group is out of range");
+            }
+
+            CDeterministicMNCPtr dmn;
+            llmq::pq::OperatorKeyState operator_state;
+            llmq::pq::RecoveryReadinessTxPayload payload;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip{node.chainman->ActiveTip()};
+                if (tip == nullptr) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR, "Active chain tip is unavailable");
+                }
+                EnsurePQProviderRPCActive(tip->nHeight);
+                llmq::pq::PQRegistryConfig config;
+                if (llmq::pq::GetPQRegistryConfig(Params().GetConsensus(), config) !=
+                    llmq::pq::PQRegistryDeploymentResult::VALID) {
+                    throw JSONRPCError(RPC_MISC_ERROR, "PQ registry is not configured");
+                }
+                const auto coordinates{llmq::pq::DeriveRecoveryRefreshCoordinates(
+                    config.schedule, config.btcc_schedule, config.recovery_refresh,
+                    static_cast<uint32_t>(group))};
+                if (!coordinates || tip->nHeight + 1 < config.recovery_refresh.activation_height ||
+                    tip->nHeight < coordinates->readiness_reference_height ||
+                    tip->nHeight >= coordinates->snapshot_height) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "The next block is outside this group's readiness window");
+                }
+                const CBlockIndex* reference{tip->GetAncestor(coordinates->readiness_reference_height)};
+                if (reference == nullptr) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR, "Readiness reference block is unavailable");
+                }
+                dmn = deterministicMNManager->GetListForBlock(tip).GetMN(pro_tx_hash);
+                if (!dmn) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Masternode not found at active tip");
+                }
+                operator_state = GetActivePQOperator(tip, pro_tx_hash, operator_key);
+                payload.readiness.pro_tx_hash = pro_tx_hash;
+                payload.readiness.global_key_version = operator_state.global_key.key_version;
+                payload.readiness.group = static_cast<uint32_t>(group);
+                payload.readiness.reference_height = coordinates->readiness_reference_height;
+                payload.readiness.reference_hash = reference->GetBlockHash();
+            }
+            payload.readiness.transaction_inputs_hash = uint256::ONEV;
+            payload.signature[0] = 1;
+            CMutableTransaction tx;
+            tx.nVersion = llmq::pq::PQ_RECOVERY_READINESS_TX_VERSION;
+            CTxDestination fee_source;
+            if (!request.params[3].isNull() && !request.params[3].get_str().empty()) {
+                fee_source = DecodeDestination(request.params[3].get_str());
+                if (!IsValidDestination(fee_source)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid fee source address");
+                }
+            } else if (!ExtractDestination(dmn->pdmnState->scriptPayout, fee_source)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Masternode payout script has no usable fee address");
+            }
+            FundSpecialTx(*pwallet, tx, payload, fee_source);
+            payload.readiness.transaction_inputs_hash = CalcTxInputsHash(CTransaction(tx));
+            const auto digest{llmq::pq::GetRecoveryReadinessAuthorizationHash(
+                Params().GetConsensus().hashGenesisBlock, operator_state.global_key,
+                payload.readiness)};
+            if (!digest || !slhdsa::SignDeterministic(
+                    operator_key, std::span<const uint8_t>{digest->begin(), digest->size()},
+                    llmq::pq::GetGlobalAuthContext(llmq::pq::GlobalAuthPurpose::RECOVERY_READINESS),
+                    payload.signature)) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Failed to sign PQ recovery readiness");
+            }
+            SetTxPayload(tx, payload);
+            const bool submit{request.params[4].isNull() || request.params[4].get_bool()};
+            return SignAndSendSpecialTx(request, *pwallet, tx, submit, [&]() {
+                LOCK(cs_main);
+                TxValidationState state;
+                if (!deterministicMNManager->CheckPQTransaction(
+                        CTransaction(tx), node.chainman->ActiveTip(), state,
+                        /*fJustCheck=*/false, /*check_sigs=*/true)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "Readiness declaration is no longer valid: " + state.ToString());
+                }
+            });
+        },
+    };
+}
+
+// SYSCOIN: provider service updates use the registered global SLH key.
 static RPCHelpMan protx_update_service()
 {
     return RPCHelpMan{"protx_update_service",
@@ -711,8 +1641,7 @@ static RPCHelpMan protx_update_service()
             {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
             {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO, "IP and port in the form \"IP:PORT\".\n"
                 "Must be unique on the network. Can be set to 0, which will require a ProUpServTx afterwards."},
-            {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS private key associated with the\n"
-                "registered operator public key."},
+            {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 64-byte SLH-DSA-SHAKE-128s global operator secret key."},
             {"nevmAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The NEVM address to associate with NEVM registry.\n"
                     "If set to an empty string, any existing NEVM registry entry will be removed."},
             {"operatorPayoutAddress", RPCArg::Type::STR, RPCArg::Default{""}, "The address used for operator reward payments.\n"
@@ -721,12 +1650,11 @@ static RPCHelpMan protx_update_service()
             {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified, the wallet will only use coins from this address to fund ProTx.\n"
                 "If not specified, payoutAddress is the one that is going to be used.\n"
                 "The private key belonging to this address must be known in your wallet."},
-            {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default)"},
         },
         RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
         RPCExamples{
-            HelpExampleCli("protx_update_service", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 173.249.49.9:18369 <NEVM address> 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-            + HelpExampleRpc("protx_update_service", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"173.249.49.9:18369\", \"<NEVM Address>\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\")")
+            HelpExampleCli("protx_update_service", "<proTxHash> 173.249.49.9:18369 <64-byte-slh-secret-hex> <nevm-address> <operator-payout-address>")
+            + HelpExampleRpc("protx_update_service", "\"<proTxHash>\", \"173.249.49.9:18369\", \"<64-byte-slh-secret-hex>\", \"<nevm-address>\", \"<operator-payout-address>\"")
         },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -737,21 +1665,15 @@ static RPCHelpMan protx_update_service()
 
     pwallet->BlockUntilSyncedToCurrentChain();
 
+    node::NodeContext& node = GetWalletNodeContext(*pwallet);
     CProUpServTx ptx;
-    bool v19active;
+    int current_height;
     {
         LOCK(cs_main);
-        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+        current_height = *pwallet->chain().getHeight();
     }
-    bool specific_legacy_bls_scheme{!v19active};
-    if(request.params.size() >= 7) {
-        specific_legacy_bls_scheme = request.params[6].get_bool();
-    }
-    if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
-    } else {
-        ptx.nVersion = CProUpServTx::GetVersion(v19active);
-    }
+    EnsurePQProviderRPCActive(current_height);
+    ptx.nVersion = CProUpServTx::PQ_VERSION;
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
     std::optional<CService> addr = Lookup(request.params[1].get_str().c_str(), Params().GetDefaultPort(), false);
     if (!addr.has_value()) {
@@ -759,15 +1681,19 @@ static RPCHelpMan protx_update_service()
     }
     ptx.addr = addr.value();
 
-    CBLSSecretKey keyOperator = ParseBLSSecretKey(request.params[2].get_str(), "operatorKey");
+    auto keyOperator = ParseSLHSecretKey(request.params[2].get_str(), "operatorKey");
     auto mnList = deterministicMNManager->GetListAtChainTip();
     auto dmn = mnList.GetMN(ptx.proTxHash);
     if (!dmn) {
         throw std::runtime_error(strprintf("Masternode with proTxHash %s not found", ptx.proTxHash.ToString()));
     }
-    if (keyOperator.GetPublicKey() != dmn->pdmnState->pubKeyOperator.Get()) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The operator key does not belong to the registered public key"));
+    llmq::pq::OperatorKeyState operator_state;
+    {
+        LOCK(cs_main);
+        operator_state = GetActivePQOperator(
+            node.chainman->ActiveTip(), ptx.proTxHash, keyOperator);
     }
+    ptx.globalKeyVersion = operator_state.global_key.key_version;
 
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
@@ -824,8 +1750,39 @@ static RPCHelpMan protx_update_service()
     }
 
     FundSpecialTx(*pwallet, tx, ptx, feeSource);
-
-    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, specific_legacy_bls_scheme);
+    UpdateSpecialTxInputsHash(tx, ptx);
+    const auto endpoint = llmq::pq::MakeNetworkEndpoint(ptx.addr);
+    if (!endpoint) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Service address cannot be encoded in the PQ authorization transcript");
+    }
+    llmq::pq::ProviderServiceAuthorization authorization;
+    authorization.payload_version = ptx.nVersion;
+    authorization.pro_tx_hash = ptx.proTxHash;
+    authorization.global_key_version = ptx.globalKeyVersion;
+    authorization.service = *endpoint;
+    authorization.operator_payout_script.assign(
+        ptx.scriptOperatorPayout.begin(), ptx.scriptOperatorPayout.end());
+    if (!ptx.vchNEVMAddress.empty()) {
+        authorization.nevm_address.emplace();
+        std::copy(ptx.vchNEVMAddress.begin(), ptx.vchNEVMAddress.end(),
+                  authorization.nevm_address->begin());
+    }
+    authorization.transaction_inputs_hash = ptx.inputsHash;
+    const auto authorization_hash = llmq::pq::GetProviderServiceAuthorizationHash(
+        Params().GetConsensus().hashGenesisBlock,
+        operator_state.global_key, authorization);
+    if (!authorization_hash ||
+        !slhdsa::SignDeterministic(
+            keyOperator,
+            std::span<const uint8_t>{authorization_hash->begin(),
+                                     authorization_hash->size()},
+            llmq::pq::GetGlobalAuthContext(
+                llmq::pq::GlobalAuthPurpose::PROVIDER_SERVICE),
+            ptx.pqSig)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failed to sign PQ provider service authorization");
+    }
     SetTxPayload(tx, ptx);
 
     return SignAndSendSpecialTx(request, *pwallet, tx);
@@ -833,6 +1790,7 @@ static RPCHelpMan protx_update_service()
     };
 }
 
+    // SYSCOIN: owner updates cannot replace the active PQ operator root.
     static RPCHelpMan protx_update_registrar()
     {
             return RPCHelpMan{"protx_update_registrar",
@@ -841,23 +1799,18 @@ static RPCHelpMan protx_update_service()
                 "The owner key of the masternode must be known to your wallet.\n",
                 {
                     {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
-                    {"operatorPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS public key. The BLS private key does not have to be known.\n"
-                                    "It has to match the BLS private key which is later used when operating the masternode.\n"
-                                    "If set to an empty string, the currently active operator BLS public key is reused."},                   
-                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The voting key address. The private key does not have to be known by your wallet.\n"
-                                    "It has to match the private key which is later used when voting on proposals.\n"
-                                    "If set to an empty string, the currently active voting key address is reused."}, 
+                    {"deprecatedOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Must be empty. Global SLH-DSA key rotation uses the separate PQ global-key transaction."},
+                    {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "A 32-byte SLH voting public key (64 hex characters). An empty string preserves the current key; 64 zeroes revoke it. This RPC requires PQ activation at the next block height."},
                     {"payoutAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for masternode reward payments.\n"
                                     "If set to an empty string, the currently active payout address is reused."}, 
                     {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                         "If not specified, payoutAddress is the one that is going to be used.\n"
                                         "The private key belonging to this address must be known in your wallet."},
-                    {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
                 },
                 RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
                 RPCExamples{
-                        HelpExampleCli("protx_update_registrar", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-                    + HelpExampleRpc("protx_update_registrar", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\", \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                        HelpExampleCli("protx_update_registrar", "<proTxHash> \"\" <voting-address> <payout-address>")
+                    + HelpExampleRpc("protx_update_registrar", "\"<proTxHash>\", \"\", \"<voting-address>\", \"<payout-address>\"")
                 },
         [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
     {
@@ -869,35 +1822,30 @@ static RPCHelpMan protx_update_service()
         pwallet->BlockUntilSyncedToCurrentChain();
         EnsureWalletIsUnlocked(*pwallet);
         CProUpRegTx ptx;
-        bool v19active;
+        int current_height;
         {
             LOCK(cs_main);
-            v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+            current_height = *pwallet->chain().getHeight();
         }
-        bool specific_legacy_bls_scheme{!v19active};
-        if(request.params.size() >= 6) {
-            specific_legacy_bls_scheme = request.params[5].get_bool();
-        }
-        if (specific_legacy_bls_scheme) {
-            ptx.nVersion = CProUpRegTx::LEGACY_BLS_VERSION;
-        } else {
-            ptx.nVersion = CProUpRegTx::GetVersion(v19active);
-        }
+        EnsurePQProviderRPCActive(current_height);
+        ptx.nVersion = CProUpRegTx::PQ_VERSION;
         ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
         auto mnList = deterministicMNManager->GetListAtChainTip();
         auto dmn = mnList.GetMN(ptx.proTxHash);
         if (!dmn) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
         }
-        ptx.pubKeyOperator = dmn->pdmnState->pubKeyOperator;
         ptx.keyIDVoting = dmn->pdmnState->keyIDVoting;
+        ptx.pqVotingPublicKey = dmn->pdmnState->pqVotingKey.public_key;
         ptx.scriptPayout = dmn->pdmnState->scriptPayout;
 
-        if (request.params[1].get_str() != "") {
-            ptx.pubKeyOperator.Set(ParseBLSPubKey(request.params[1].get_str(), "operator BLS address", specific_legacy_bls_scheme), specific_legacy_bls_scheme);
+        if (!request.params[1].get_str().empty()) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "deprecatedOperatorPubKey must be empty; use a PQ global-key transaction for key rotation");
         }
         if (request.params[2].get_str() != "") {
-            ptx.keyIDVoting = ParsePubKeyIDFromAddress(request.params[2].get_str(), "voting address");
+            ptx.pqVotingPublicKey = ParseVotingPublicKey(request.params[2].get_str(), /*allow_revocation=*/true);
         }
 
         CTxDestination payoutDest;
@@ -921,7 +1869,7 @@ static RPCHelpMan protx_update_service()
         if (!request.params[4].isNull()) {
             feeSourceDest = DecodeDestination(request.params[4].get_str());
             if (!IsValidDestination(feeSourceDest))
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Syscoin address: ") + request.params[5].get_str());
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Syscoin address: ") + request.params[4].get_str());
         }
         FundSpecialTx(*pwallet, tx, ptx, feeSourceDest);
         UpdateSpecialTxInputsHash(tx, ptx);
@@ -944,6 +1892,7 @@ static RPCHelpMan protx_update_service()
     }  
 
 
+// SYSCOIN: revocation is authorized by the registered global SLH key.
 static RPCHelpMan protx_revoke()
 {
         return RPCHelpMan{"protx_revoke",
@@ -953,18 +1902,16 @@ static RPCHelpMan protx_revoke()
             "to the masternode owner.\n",
             {
                 {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the initial ProRegTx."},
-                {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The operator BLS private key associated with the\n"
-                                    "registered operator public key."},                   
+                {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 64-byte SLH-DSA-SHAKE-128s global operator secret key."},
                 {"reason", RPCArg::Type::NUM, RPCArg::Default{0}, "The reason for masternode service revocation."},   
                 {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "If specified wallet will only use coins from this address to fund ProTx.\n"
                                     "If not specified, payoutAddress is the one that is going to be used.\n"
                                     "The private key belonging to this address must be known in your wallet."},
-                {"legacy", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Use Legacy BLS scheme (false by default"},
             },
             RPCResult{RPCResult::Type::STR_HEX, "", "The transaction hash in hex"},
             RPCExamples{
-                    HelpExampleCli("protx_revoke", "1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d 003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63 0 tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r")
-                + HelpExampleRpc("protx_revoke", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", \"003bc97fcd6023996f8703b4da34dedd1641bd45ed12ac7a4d74a529dd533ecb99d4fb8ddb04853bb110f0d747ee8e63\", 0, \"tsys1qxh8am0c9w0q9kv7h7f9q2c4jrfjg63yawrgm0r\"")
+                    HelpExampleCli("protx_revoke", "<proTxHash> <64-byte-slh-secret-hex> 0 <fee-source-address>")
+                + HelpExampleRpc("protx_revoke", "\"<proTxHash>\", \"<64-byte-slh-secret-hex>\", 0, \"<fee-source-address>\"")
             },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -976,24 +1923,18 @@ static RPCHelpMan protx_revoke()
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
     pwallet->BlockUntilSyncedToCurrentChain();
+    node::NodeContext& node = GetWalletNodeContext(*pwallet);
     CProUpRevTx ptx;
-    bool v19active;
+    int current_height;
     {
         LOCK(cs_main);
-        v19active = llmq::CLLMQUtils::IsV19Active(*pwallet->chain().getHeight());
+        current_height = *pwallet->chain().getHeight();
     }
-    bool specific_legacy_bls_scheme{!v19active};
-    if(request.params.size() >= 5) {
-        specific_legacy_bls_scheme = request.params[4].get_bool();
-    }
-    if (specific_legacy_bls_scheme) {
-        ptx.nVersion = CProUpRevTx::LEGACY_BLS_VERSION;
-    } else {
-        ptx.nVersion = CProUpRevTx::GetVersion(v19active);
-    }
+    EnsurePQProviderRPCActive(current_height);
+    ptx.nVersion = CProUpRevTx::PQ_VERSION;
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
 
-    CBLSSecretKey keyOperator = ParseBLSSecretKey(request.params[1].get_str(), "operatorKey");
+    auto keyOperator = ParseSLHSecretKey(request.params[1].get_str(), "operatorKey");
 
     if (!request.params[2].isNull()) {
         int32_t nReason = request.params[2].getInt<int>();
@@ -1008,9 +1949,13 @@ static RPCHelpMan protx_revoke()
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
     }
 
-    if (keyOperator.GetPublicKey() != dmn->pdmnState->pubKeyOperator.Get()) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the operator key does not belong to the registered public key"));
+    llmq::pq::OperatorKeyState operator_state;
+    {
+        LOCK(cs_main);
+        operator_state = GetActivePQOperator(
+            node.chainman->ActiveTip(), ptx.proTxHash, keyOperator);
     }
+    ptx.globalKeyVersion = operator_state.global_key.key_version;
 
     CMutableTransaction tx;
     tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
@@ -1034,7 +1979,27 @@ static RPCHelpMan protx_revoke()
         throw JSONRPCError(RPC_INTERNAL_ERROR, "No payout or fee source addresses found, can't revoke");
     }
 
-    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, specific_legacy_bls_scheme);
+    UpdateSpecialTxInputsHash(tx, ptx);
+    llmq::pq::ProviderRevokeAuthorization authorization;
+    authorization.payload_version = ptx.nVersion;
+    authorization.pro_tx_hash = ptx.proTxHash;
+    authorization.global_key_version = ptx.globalKeyVersion;
+    authorization.reason = ptx.nReason;
+    authorization.transaction_inputs_hash = ptx.inputsHash;
+    const auto authorization_hash = llmq::pq::GetProviderRevokeAuthorizationHash(
+        Params().GetConsensus().hashGenesisBlock,
+        operator_state.global_key, authorization);
+    if (!authorization_hash ||
+        !slhdsa::SignDeterministic(
+            keyOperator,
+            std::span<const uint8_t>{authorization_hash->begin(),
+                                     authorization_hash->size()},
+            llmq::pq::GetGlobalAuthContext(
+                llmq::pq::GlobalAuthPurpose::PROVIDER_REVOKE),
+            ptx.pqSig)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR,
+                           "Failed to sign PQ provider revocation authorization");
+    }
     SetTxPayload(tx, ptx);
 
     return SignAndSendSpecialTx(request, *pwallet, tx);
@@ -1058,7 +2023,15 @@ static bool CheckWalletOwnsScript(CWallet* pwallet, const CScript& script) {
     LOCK(pwallet->cs_wallet);
     return pwallet->IsMine(script) != ISMINE_NO;
 }
-UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int detailed)
+static bool WalletHasMasternodeVotingKey(CWallet* wallet, const CDeterministicMN& dmn, int height)
+{
+    if (!wallet) return false;
+    return IsPQGovernanceEnabledAtHeight(height)
+        ? dmn.pdmnState->pqVotingKey.HasActiveKey() && wallet->HasVotingKey(dmn.pdmnState->pqVotingKey.public_key)
+        : CheckWalletOwnsKey(wallet, dmn.pdmnState->keyIDVoting);
+}
+
+UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int detailed, int height)
 {
     if (!detailed) {
         return dmn.proTxHash.ToString();
@@ -1070,12 +2043,11 @@ UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int de
         o.pushKV("collateralIndex", (int)dmn.collateralOutpoint.n);
         o.pushKV("collateralHeight", dmn.pdmnState->nCollateralHeight);
         o.pushKV("votingAddress", EncodeDestination(voteDest));
+        o.pushKV("pqVotingPublicKey", HexStr(dmn.pdmnState->pqVotingKey.public_key));
+        o.pushKV("pqVotingKeyVersion", dmn.pdmnState->pqVotingKey.key_version);
+        o.pushKV("hasVotingKey", WalletHasMasternodeVotingKey(pwallet, dmn, height));
         if(pwallet) {
             LOCK(pwallet->cs_wallet);
-            CKey keyVoting;
-            if (pwallet->GetKey(dmn.pdmnState->keyIDVoting, keyVoting)) {
-                o.pushKV("votingKey", EncodeSecret(keyVoting));
-            }
             const auto* address_book_entry = pwallet->FindAddressBookEntry(voteDest);
             if (address_book_entry) {
                 o.pushKV("label", address_book_entry->GetLabel());
@@ -1096,7 +2068,7 @@ UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int de
         if (pwallet) {
             LOCK2(pwallet->cs_wallet, cs_main);
             bool hasOwnerKey = CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner);
-            bool hasVotingKey = CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDVoting);
+            bool hasVotingKey = WalletHasMasternodeVotingKey(pwallet, dmn, height);
 
             UniValue walletObj(UniValue::VOBJ);
             walletObj.pushKV("hasOwnerKey", hasOwnerKey);
@@ -1120,7 +2092,7 @@ static RPCHelpMan protx_list_wallet()
         "\nList only ProTx which are found in your wallet at the given chain height.\n"
         "This will also include ProTx which failed PoSe verification.\n",
         {
-            {"detailed", RPCArg::Type::NUM, RPCArg::Default{0}, "If 0, only the hashes of the ProTx will be returned. If 1 returns voting details for each DMN and keys and if 2 returns full details of each DMN"},
+            {"detailed", RPCArg::Type::NUM, RPCArg::Default{0}, "If 0, only the hashes of the ProTx are returned. If 1, returns public voting details and wallet key availability; if 2, returns full DMN details. No voting secrets are returned."},
             {"height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Height to look for ProTx transactions, if not specified defaults to current chain-tip"},                   
         },
         RPCResult{RPCResult::Type::ANY, "", ""},
@@ -1162,10 +2134,10 @@ static RPCHelpMan protx_list_wallet()
     mnList.ForEachMN(false, [&](const auto& dmn) {
         if (setOutpts.count(dmn.collateralOutpoint) ||
             CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner) ||
-            CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDVoting) ||
+            WalletHasMasternodeVotingKey(pwallet, dmn, mnList.GetHeight()) ||
             CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptPayout) ||
             CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptOperatorPayout)) {
-            ret.push_back(BuildDMNListEntry(pwallet, dmn, detailed));
+            ret.push_back(BuildDMNListEntry(pwallet, dmn, detailed, mnList.GetHeight()));
         }
     });
     return ret;
@@ -1197,7 +2169,7 @@ static RPCHelpMan protx_info_wallet()
     if (!dmn) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s not found", proTxHash.ToString()));
     }
-    return BuildDMNListEntry(pwallet, *dmn, 2);
+    return BuildDMNListEntry(pwallet, *dmn, 2, mnList.GetHeight());
 },
     };
 } 
@@ -1211,6 +2183,11 @@ Span<const CRPCCommand> wallet::GetEvoWalletRPCCommands()
         {"evowallet", &protx_register_fund},
         {"evowallet", &protx_register_prepare},
         {"evowallet", &protx_register_submit},
+        {"evowallet", &protx_generate_voting_key},
+        {"evowallet", &protx_generate_operator_keypair},
+        {"evowallet", &protx_register_operator_key},
+        {"evowallet", &protx_rotate_operator_key},
+        {"evowallet", &protx_recovery_ready},
         {"evowallet", &protx_update_service},
         {"evowallet", &protx_update_registrar},
         {"evowallet", &protx_revoke},

@@ -6,28 +6,177 @@
 #define SYSCOIN_MASTERNODE_ACTIVEMASTERNODE_H
 
 #include <chainparams.h>
+#include <masternode/pq_operatorkeys.h>
 #include <primitives/transaction.h>
 #include <validationinterface.h>
 #include <netaddress.h>
-class CBLSPublicKey;
-class CBLSSecretKey;
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
 class CConnman;
 class ChainstateManager;
+
+namespace llmq::pq {
+
+struct ActiveChildSigningMaterial {
+    std::shared_ptr<const scheduled_wots::SecretKey> secret_key;
+    ChildKeyProof key_proof;
+    std::shared_ptr<const LocalOperatorKeyManager> active_key_manager;
+    uint32_t active_global_key_version{0};
+    uint64_t active_identity_generation{0};
+};
+
+/**
+ * Asynchronous owner of validated outer child-key trees and the bounded set
+ * of active inner scheduled-WOTS signing caches.
+ *
+ * Request() only schedules cache work. GetSigningMaterial() never builds a
+ * tree, so consensus and P2P callers cannot be stalled by the expensive
+ * 2^16-leaf setup operation.
+ */
+class ActiveChildKeyCache final {
+public:
+    ActiveChildKeyCache(const LocalOperatorKeyManager& key_manager,
+                        fs::path cache_directory);
+    ~ActiveChildKeyCache();
+
+    ActiveChildKeyCache(const ActiveChildKeyCache&) = delete;
+    ActiveChildKeyCache& operator=(const ActiveChildKeyCache&) = delete;
+
+    void Request(const uint256& genesis_hash,
+                 const std::vector<ChildKeyTreeCommitment>& commitments);
+
+    /** Pin the bounded set needed by one crash-durable recovery attempt. */
+    void RequestRecovery(
+        const uint256& genesis_hash,
+        const std::vector<ChildKeyTreeCommitment>& commitments);
+
+    [[nodiscard]] std::optional<ActiveChildSigningMaterial>
+    GetSigningMaterial(const uint256& genesis_hash,
+                       const uint256& pro_tx_hash,
+                       const FrozenChildRootRecord& record) const;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+} // namespace llmq::pq
 
 struct CActiveMasternodeInfo;
 extern CActiveMasternodeInfo activeMasternodeInfo;
 extern RecursiveMutex activeMasternodeInfoCs;
 
 struct CActiveMasternodeInfo {
-    // Keys for the active Masternode
-    std::unique_ptr<CBLSPublicKey> blsPubKeyOperator;
-    std::unique_ptr<CBLSSecretKey> blsKeyOperator;
+    // The only live operator secret. Short-lived signing leases keep an
+    // in-progress operation memory-safe across identity rotation or teardown;
+    // the manager still exposes only purpose-specific operations.
+    std::shared_ptr<llmq::pq::LocalOperatorKeyManager> operatorKeyManager;
+    // Declared after the key manager so its worker is joined first.
+    std::unique_ptr<llmq::pq::ActiveChildKeyCache> childKeyCache;
 
     // Initialized while registering Masternode
     uint256 proTxHash;
+    uint32_t globalKeyVersion{0};
     COutPoint outpoint;
     CService service;
+    // Reject a signature if the active identity changed and then returned to
+    // the same visible values while the expensive operation was in flight.
+    uint64_t identityGeneration{0};
 };
+
+/** Return only the public, active-tip-bound local MNAUTH identity. */
+bool GetActiveMasternodeIdentity(uint256& pro_tx_hash,
+                                 uint32_t& global_key_version,
+                                 llmq::pq::GlobalPublicKey& global_public_key,
+                                 CService& service);
+
+/** Sign only if the caller's identity still matches the active local state. */
+bool SignActiveMasternodeMNAUTH(const uint256& pro_tx_hash,
+                                uint32_t global_key_version,
+                                const uint256& authorization_hash,
+                                llmq::pq::GlobalSignature& signature);
+
+bool SignActiveMasternodeGovernanceTrigger(
+    const uint256& pro_tx_hash,
+    uint32_t global_key_version,
+    const uint256& authorization_hash,
+    llmq::pq::GlobalSignature& signature);
+
+bool SignActiveMasternodeGovernanceVote(
+    const uint256& pro_tx_hash,
+    uint32_t global_key_version,
+    const uint256& authorization_hash,
+    llmq::pq::GlobalSignature& signature);
+
+bool SignActiveMasternodeGovernanceProposalVote(
+    const uint256& pro_tx_hash,
+    uint32_t global_key_version,
+    const uint256& authorization_hash,
+    llmq::pq::GlobalSignature& signature);
+
+/**
+ * Keep runnable MNAUTH signing demand ahead of governance signing.
+ *
+ * The async executor owns one move-only reservation for every accepted
+ * runnable queued or in-flight sign job. Queued reservations are suspended
+ * while the worker waits for completion acknowledgement, then restored before
+ * it is woken. Governance can use that idle slot without depending on the
+ * message thread, while runnable MNAUTH work retains priority.
+ */
+class ActiveMasternodeMNAUTHSigningDemand final {
+public:
+    ActiveMasternodeMNAUTHSigningDemand();
+    ~ActiveMasternodeMNAUTHSigningDemand();
+
+    ActiveMasternodeMNAUTHSigningDemand(
+        const ActiveMasternodeMNAUTHSigningDemand&) = delete;
+    ActiveMasternodeMNAUTHSigningDemand& operator=(
+        const ActiveMasternodeMNAUTHSigningDemand&) = delete;
+    ActiveMasternodeMNAUTHSigningDemand(
+        ActiveMasternodeMNAUTHSigningDemand&& other) noexcept;
+    ActiveMasternodeMNAUTHSigningDemand& operator=(
+        ActiveMasternodeMNAUTHSigningDemand&& other) noexcept;
+
+private:
+    void Release() noexcept;
+    bool m_active{true};
+};
+
+struct ActiveMasternodeGlobalSigningStats {
+    uint32_t active_operations{0};
+    uint32_t mnauth_waiters{0};
+    uint32_t governance_waiters{0};
+    uint32_t mnauth_demands{0};
+};
+
+/** Number of global-SLH operations currently inside the serialized signer. */
+uint32_t GetActiveMasternodeGlobalSigningCount() noexcept;
+
+/** Snapshot the cross-purpose signer gate without waiting for active crypto. */
+ActiveMasternodeGlobalSigningStats
+GetActiveMasternodeGlobalSigningStats() noexcept;
+
+/** Return a key and membership proof only from a ready, validated cache. */
+std::optional<llmq::pq::ActiveChildSigningMaterial>
+GetActiveMasternodeChildSigningMaterial(
+    const uint256& genesis_hash,
+    const uint256& pro_tx_hash,
+    const llmq::pq::FrozenChildRootRecord& record);
+
+/** Reject material spanning an active operator identity transition. */
+bool IsActiveMasternodeChildSigningMaterialCurrent(
+    const uint256& pro_tx_hash,
+    const llmq::pq::ActiveChildSigningMaterial& material);
+
+/** Replace the bounded local child-tree pins for one recovery attempt. */
+bool RequestActiveMasternodeRecoveryChildKeyTrees(
+    const uint256& genesis_hash,
+    const std::vector<llmq::pq::FrozenChildRootRecord>& records);
 
 
 class CActiveMasternodeManager : public CValidationInterface
@@ -47,11 +196,14 @@ private:
     masternode_state_t state{MASTERNODE_WAITING_FOR_PROTX};
     std::string strError;
     CConnman& connman;
+    ChainstateManager& m_chainman;
 
 public:
-    CActiveMasternodeManager(CConnman& _connman): connman(_connman) {}
+    CActiveMasternodeManager(CConnman& _connman, ChainstateManager& chainman)
+        : connman(_connman), m_chainman(chainman) {}
     virtual ~CActiveMasternodeManager() {}
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, ChainstateManager& chainman, bool fInitialDownload) override;
+    void BlockDisconnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* pindex) override;
 
     void Init(const CBlockIndex* pindex);
 
@@ -61,6 +213,7 @@ public:
     static bool IsValidNetAddr(CService addrIn);
 
 private:
+    void ReconcileActiveTip();
     bool GetLocalAddress(CService& addrRet);
 };
 extern std::unique_ptr<CActiveMasternodeManager> activeMasternodeManager;

@@ -15,6 +15,9 @@
 #include <nevm/sha3.h>
 #include <util/strencodings.h>
 #include <util/string.h>
+
+#include <optional>
+
 using namespace wallet;
 
 static RPCHelpMan syscoincreaterawnevmblob()
@@ -297,15 +300,17 @@ static RPCHelpMan getauxblock()
 {
     return RPCHelpMan{"getauxblock",
                 "\nCreates or submits a merge-mined block.\n"
-                "\nWithout arguments, creates a new block and returns information\n"
-                "required to merge-mine it.  With arguments, submits a solved\n"
-                "auxpow for a previously returned block.\n",
+                "\nWith zero arguments, creates a block and auto-selects BTCPREV from\n"
+                "-btcheadercmd when required and policy is enabled. With one argument,\n"
+                "creates a PQ BTCC candidate bound to that policy-checked Bitcoin\n"
+                "parent-prev hash. With two arguments, submits a solved auxpow for a\n"
+                "previously returned block.\n",
                 {
-                    {"hash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Hash of the block to submit"},
+                    {"hash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Bitcoin parent-prev hash in one-argument create mode, or Syscoin block hash in two-argument submit mode"},
                     {"auxpow", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Serialised auxpow found"},
                 },
                 {
-                    RPCResult{"without arguments",
+                    RPCResult{"with zero or one argument",
                         RPCResult::Type::OBJ, "", "",
                         {
                             {RPCResult::Type::STR_HEX, "hash", "hash of the created block"},
@@ -316,7 +321,7 @@ static RPCHelpMan getauxblock()
                             {RPCResult::Type::STR, "bits", "compressed target of the block"},
                             {RPCResult::Type::NUM, "height", "height of the block"},
                             {RPCResult::Type::STR_HEX, "_target", "target in reversed byte order, deprecated"},
-                            {RPCResult::Type::STR_HEX, "_btcprevhash", /*optional=*/true, "BTCPREV committed into the template when required for BTCC sign-offset blocks"},
+                            {RPCResult::Type::STR_HEX, "_btcprevhash", /*optional=*/true, "BTCPREV committed into the template at PQ BTCC candidate heights"},
                         },
                     },
                     RPCResult{"with arguments",
@@ -325,13 +330,14 @@ static RPCHelpMan getauxblock()
                 },
                 RPCExamples{
                     HelpExampleCli("getauxblock", "")
+                    + HelpExampleCli("getauxblock", "\"bitcoin parent-prev hash\"")
                     + HelpExampleCli("getauxblock", "\"hash\" \"serialised auxpow\"")
                     + HelpExampleRpc("getauxblock", "")
                 },
     [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
-    /* RPCHelpMan::Check is not applicable here since we have the
-       custom branching for create (0 args) and submit (2 args).  */
+    /* RPCHelpMan::Check is not applicable here since we have custom
+       create (0/1 args) and submit (2 args) modes. */
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
     if (!wallet) return NullUniValue;
     CWallet* const pwallet = wallet.get();
@@ -341,16 +347,25 @@ static RPCHelpMan getauxblock()
     LOCK(g_mining_keys.cs);
     const size_t param_count = request.params.size();
     /* Create a new block. */
-    if (param_count == 0) {
+    if (param_count <= 1) {
+        std::optional<uint256> btc_prev_hash;
+        if (param_count == 1) {
+            if (request.params[0].isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "getauxblock create mode requires a non-null btcprevhash");
+            }
+            btc_prev_hash = ParseHashV(request.params[0], "btcprevhash");
+        }
         const CScript coinbaseScript = g_mining_keys.GetCoinbaseScript(pwallet);
-        UniValue res = AuxpowMiner::get().createAuxBlock(request, coinbaseScript);
+        UniValue res = AuxpowMiner::get().createAuxBlock(
+            request, coinbaseScript, btc_prev_hash);
         g_mining_keys.AddBlockHash(pwallet, res["hash"].get_str ());
         return res;
     }
 
     /* Submit a block instead.  */
     if (param_count != 2) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "getauxblock expects 0 or 2 arguments");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "getauxblock expects 0, 1, or 2 arguments");
     }
     if (request.params[0].isNull() || request.params[1].isNull()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "getauxblock submit mode requires non-null hash and auxpow");

@@ -7,9 +7,9 @@
   <PropertyGroup Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
   </PropertyGroup>
+  <!-- SYSCOIN: The public consensus library no longer compiles legacy BLS. -->
   <ItemGroup>
     <ClCompile Include="..\..\src\arith_uint256.cpp" />
-    <ClCompile Include="..\..\src\bls\bls.cpp" />
     <ClCompile Include="..\..\src\consensus\merkle.cpp" />
     <ClCompile Include="..\..\src\consensus\tx_check.cpp" />
     <ClCompile Include="..\..\src\hash.cpp" />
