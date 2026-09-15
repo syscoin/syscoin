@@ -14,6 +14,8 @@
 #include <governance/governanceclasses.h>
 #include <key_io.h>
 #include <kernel/context.h>
+#include <masternode/activemasternode.h>
+#include <masternode/masternodesync.h>
 #include <net.h>
 #include <netbase.h>
 #include <net_processing.h>
@@ -907,6 +909,21 @@ public:
     static bool HasShareAdmission(const CChainLocksHandler& handler)
     {
         return handler.GetShareAdmissionGeneration() != 0;
+    }
+
+    static bool IsNEVMReadyForLocalSigning(const CChainLocksHandler& handler,
+                                          int32_t target_height,
+                                          const uint256& target_hash)
+        LOCKS_EXCLUDED(::cs_main)
+    {
+        AssertLockNotHeld(::cs_main);
+        return handler.IsNEVMReadyForLocalSigning(target_height, target_hash);
+    }
+
+    static void TrySignChainLock(CChainLocksHandler& handler)
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        handler.MaybeCreateAndSignChainLock();
     }
 
     static bool IsShareAdmissionCurrent(const CChainLocksHandler& handler, uint64_t generation)
@@ -2597,6 +2614,8 @@ struct ReplayMiningNEVMSubscriber final : CValidationInterface {
     bool lose_durable_ack{false};
     std::vector<std::string> replay_commands;
     std::size_t replay_connects{0};
+    std::string blockinfo_error;
+    std::function<void()> on_blockinfo;
 
     void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& error) override
     {
@@ -2625,7 +2644,8 @@ struct ReplayMiningNEVMSubscriber final : CValidationInterface {
         if (!applied_pair) return;
         replay_commands.push_back("blockinfo");
         std::tie(count, hash) = *applied_pair;
-        error.clear();
+        error = blockinfo_error;
+        if (auto callback{std::exchange(on_blockinfo, {})}) callback();
     }
 
     void NotifyNEVMComms(const std::string& command, bool& response,
@@ -4899,6 +4919,132 @@ BOOST_FIXTURE_TEST_CASE(payment_preseal_missing_base_graph_requires_exact_older_
                         LatePaymentAuditPresealSetup)
 {
     CheckMissingBaseRequestGraph();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_local_signing_requires_executed_target_on_current_branch,
+                        PresealMiningSetup)
+{
+    auto& chainman{*m_node.chainman};
+    auto& handler{*llmq::chainLocksHandler};
+    CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(tip);
+    const CBlockIndex* target{tip->GetAncestor(tip->nHeight - 5)};
+    BOOST_REQUIRE(target);
+    const auto pair_for = [&](const CBlockIndex* index) {
+        return std::make_pair(
+            static_cast<uint64_t>(index->nHeight -
+                chainman.GetConsensus().nNEVMStartBlock + 1),
+            index->GetBlockHash());
+    };
+    const auto ready = [&]() LOCKS_EXCLUDED(::cs_main) {
+        return Access::IsNEVMReadyForLocalSigning(
+            handler, target->nHeight, target->GetBlockHash());
+    };
+    BOOST_REQUIRE(!handler.HasNEVMReplayObligation());
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+
+    const auto* first_nevm{tip->GetAncestor(chainman.GetConsensus().nNEVMStartBlock)};
+    BOOST_REQUIRE(first_nevm && first_nevm->pprev);
+    fNEVMConnection = false;
+    BOOST_CHECK(Access::IsNEVMReadyForLocalSigning(
+        handler, first_nevm->pprev->nHeight, first_nevm->pprev->GetBlockHash()));
+    BOOST_CHECK(Access::IsNEVMReadyForLocalSigning(
+        handler, first_nevm->nHeight, first_nevm->GetBlockHash()));
+    fRegTest = false;
+    BOOST_CHECK(!Access::IsNEVMReadyForLocalSigning(
+        handler, first_nevm->nHeight, first_nevm->GetBlockHash()));
+    fRegTest = true;
+    fNEVMConnection = true;
+    nevm->applied_pair = pair_for(first_nevm);
+    BOOST_CHECK(Access::IsNEVMReadyForLocalSigning(
+        handler, first_nevm->nHeight, first_nevm->GetBlockHash()));
+    nevm->applied_pair.reset();
+
+    // Queued acknowledgments are not an execution endpoint, even without a
+    // replay marker. The target's own execution is required, not its parent.
+    BOOST_CHECK(!ready());
+    nevm->applied_pair = std::make_pair(uint64_t{0}, uint256{});
+    BOOST_CHECK(!ready());
+    nevm->applied_pair = pair_for(target->pprev);
+    BOOST_CHECK(!ready());
+    nevm->applied_pair = pair_for(target);
+    BOOST_CHECK(ready());
+    nevm->applied_pair = pair_for(tip);
+    BOOST_CHECK(ready());
+
+    // A count alone cannot authorize the target, and malformed status must
+    // fail closed before converting an execution count to a Core height.
+    nevm->applied_pair->second = NonNullHash(1'106'000);
+    BOOST_CHECK(!ready());
+    {
+        LOCK(::cs_main);
+        auto header{tip->GetBlockHeader()};
+        header.hashMerkleRoot = NonNullHash(1'106'002);
+        const auto* sibling{chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header)};
+        BOOST_REQUIRE(sibling);
+        BOOST_REQUIRE_EQUAL(sibling->nHeight, tip->nHeight);
+        BOOST_REQUIRE(!chainman.ActiveChain().Contains(sibling));
+        nevm->applied_pair = pair_for(sibling);
+    }
+    BOOST_CHECK(!ready());
+    nevm->applied_pair = pair_for(target);
+    ++nevm->applied_pair->first;
+    BOOST_CHECK(!ready());
+    nevm->applied_pair = std::make_pair(
+        std::numeric_limits<uint64_t>::max(), tip->GetBlockHash());
+    BOOST_CHECK(!ready());
+    nevm->applied_pair = pair_for(tip);
+    nevm->blockinfo_error = "execution status unavailable";
+    BOOST_CHECK(!ready());
+    nevm->blockinfo_error.clear();
+    BOOST_CHECK(ready());
+    fNEVMConnection = false;
+    BOOST_CHECK(ready());
+    fRegTest = false;
+    BOOST_CHECK(!ready());
+    fRegTest = true;
+    fNEVMConnection = true;
+    BOOST_CHECK(!Access::IsNEVMReadyForLocalSigning(
+        handler, target->nHeight, NonNullHash(1'106'001)));
+    BOOST_CHECK(!Access::IsNEVMReadyForLocalSigning(
+        handler, -1, target->GetBlockHash()));
+
+    // The response was current when requested, but a concurrent rewind must
+    // invalidate it before the local signer can consume a one-time slot.
+    nevm->on_blockinfo = [&] {
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().m_chain.SetTip(*target->pprev);
+    };
+    BOOST_CHECK(!ready());
+    {
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().m_chain.SetTip(*tip);
+    }
+    BOOST_CHECK(ready());
+    nevm->applied_pair = pair_for(target->pprev);
+    BOOST_CHECK(!ready());
+    nevm->applied_pair = pair_for(target);
+    BOOST_CHECK(ready());
+
+    const auto marker{BTCCMarker()};
+    nevm->on_blockinfo = [&] {
+        Access::SetReplayMarkers(handler, {marker, std::nullopt}, {});
+    };
+    BOOST_CHECK(!ready());
+    BOOST_REQUIRE(Access::ClearReplayMarker(handler, marker));
+    BOOST_CHECK(ready());
+
+    const auto unrelated{BTCCMarker(/*unrelated=*/true)};
+    Access::SetReplayMarkers(handler, {std::nullopt, unrelated}, {});
+    BOOST_CHECK(ready());
+    BOOST_REQUIRE(Access::ClearReplayMarker(handler, unrelated));
+
+    // Local readiness observes execution; it does not flush or alter replay.
+    BOOST_CHECK_EQUAL(nevm->template_requests, 0U);
+    BOOST_CHECK_EQUAL(nevm->replay_connects, 0U);
+    BOOST_CHECK(!nevm->durable_pair);
+    BOOST_CHECK(std::all_of(nevm->replay_commands.begin(), nevm->replay_commands.end(),
+        [](const std::string& command) { return command == "blockinfo"; }));
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_mining_active_btcc_preseal_blocks_before_template_request,
@@ -10039,6 +10185,155 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 BOOST_FIXTURE_TEST_CASE(
+    chainlock_local_signer_checks_execution_before_journal_reservation,
+    PQAuthorizationBasePathSetup)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+    constexpr int32_t TARGET_HEIGHT{2'305};
+    constexpr int32_t TIP_HEIGHT{TARGET_HEIGHT + PQ_CL_SIGN_LAG};
+    auto& chainman{*Assert(m_node.chainman)};
+    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+    const uint256 local_identity{NonNullHash(1'107'000)};
+    std::vector<CBlockIndex*> chain(TIP_HEIGHT + 1);
+    {
+        LOCK(::cs_main);
+        chain[0] = chainman.ActiveTip();
+        BOOST_REQUIRE(chain[0]);
+        for (int32_t height{1}; height <= TIP_HEIGHT; ++height) {
+            CBlockHeader header;
+            header.nVersion = 4;
+            header.hashPrevBlock = chain[height - 1]->GetBlockHash();
+            header.hashMerkleRoot = NonNullHash(1'108'000 + height);
+            header.nTime = static_cast<uint32_t>(GetTime<std::chrono::seconds>().count());
+            header.nBits = 0x207fffff;
+            header.nNonce = height;
+            chain[height] = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            BOOST_REQUIRE(chain[height]);
+            chain[height]->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                BLOCK_PQ_BTCC_INDEX_VALIDATED | BLOCK_PQ_RECEIPT_INDEX_VALIDATED |
+                BLOCK_GOVERNANCE_VALIDATED;
+            chain[height]->pqPaymentProbationStateHash = NonNullHash(30'000);
+        }
+        chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+    }
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    struct Restore {
+        Consensus::Params& consensus;
+        Consensus::Params original_consensus;
+        bool masternode{fMasternodeMode};
+        bool connection{fNEVMConnection};
+        int sync_mode{masternodeSync.GetAssetID()};
+        CActiveMasternodeInfo identity{};
+        std::shared_ptr<ReplayMiningNEVMSubscriber> subscriber{
+            std::make_shared<ReplayMiningNEVMSubscriber>()};
+        ~Restore()
+        {
+            UnregisterValidationInterface(subscriber.get());
+            SyncWithValidationInterfaceQueue();
+            {
+                LOCK(activeMasternodeInfoCs);
+                std::swap(activeMasternodeInfo, identity);
+            }
+            fMasternodeMode = masternode;
+            fNEVMConnection = connection;
+            masternodeSync.SetSyncMode(sync_mode);
+            consensus = original_consensus;
+        }
+    } restore{consensus, consensus};
+    {
+        LOCK(activeMasternodeInfoCs);
+        std::swap(activeMasternodeInfo, restore.identity);
+    }
+    const auto enabled{ValidConsensus()};
+    consensus.nPQActivationHeight = enabled.nPQActivationHeight;
+    consensus.nPQPreparationHeight = enabled.nPQPreparationHeight;
+    consensus.nPQChainLockEpochOrigin = enabled.nPQChainLockEpochOrigin;
+    consensus.nPQRegistrationCutoffBlocks = enabled.nPQRegistrationCutoffBlocks;
+    consensus.nPQFutureHorizonEpochs = enabled.nPQFutureHorizonEpochs;
+    consensus.nPQRosterSnapshotLag = enabled.nPQRosterSnapshotLag;
+    consensus.nPQBTCCCandidateOrigin = enabled.nPQBTCCCandidateOrigin;
+    consensus.nPQBTCCNEVMInjectionLag = enabled.nPQBTCCNEVMInjectionLag;
+    consensus.nPQBTCCReceiptAnchorHeight = 1'000;
+    consensus.hashPQBTCCReceiptAnchorBlock = chain[1'000]->GetBlockHash();
+    consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
+    consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    consensus.nDefaultAssumeValidHeight = -1;
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+    {
+        LOCK(::cs_main);
+        handler = std::make_unique<llmq::CChainLocksHandler>(
+            *m_node.connman, *m_node.peerman, chainman);
+    }
+    consensus = restore.original_consensus;
+    consensus.nNEVMStartBlock = 1;
+    const auto* config{Access::Config(*handler)};
+    const auto* quorum_config{Access::QuorumConfig(*handler)};
+    BOOST_REQUIRE(config && quorum_config);
+    const auto cache{FrozenQuorumRosterCache::Create(
+        genesis, *quorum_config, [](const CBlockIndex&) {
+            return std::optional<QuorumSnapshotState>{};
+        })};
+    BOOST_REQUIRE(cache);
+    handler->SetQuorumRosterCache(cache);
+    auto certificate{MakeCatchupChainLock(TARGET_HEIGHT, TARGET_HEIGHT - 1,
+        chain[TARGET_HEIGHT - 1]->GetBlockHash(), 42)};
+    certificate.statement.block_hash = chain[TARGET_HEIGHT]->GetBlockHash();
+    const auto context{ChainLockStoreTestContextFactory::Create(
+        genesis, config->chainlock_schedule, certificate.statement)};
+    auto published{Access::FinalizationRetryState(context)};
+    BOOST_REQUIRE(Access::PublishFinalizationRetry(*handler, published));
+
+    slhdsa::KeyGenerationSeed global_seed{};
+    global_seed[0] = 0x71;
+    auto global_key{slhdsa::GenerateSecretKey(global_seed)};
+    BOOST_REQUIRE(global_key);
+    ChainLockMasterSeed child_seed{};
+    child_seed[0] = 0x72;
+    {
+        LOCK(activeMasternodeInfoCs);
+        activeMasternodeInfo.operatorKeyManager = std::make_shared<LocalOperatorKeyManager>(
+            std::move(*global_key), std::move(child_seed));
+        activeMasternodeInfo.proTxHash = local_identity;
+        activeMasternodeInfo.globalKeyVersion = 1;
+    }
+    const auto journal_path{m_path_root / "local-signing-execution-journal"};
+    BOOST_REQUIRE(!Access::ExchangeSignerJournal(
+        *handler, std::make_unique<llmq::CPQSignerJournal>(journal_path)));
+    auto* journal{Access::SignerJournal(*handler)};
+    BOOST_REQUIRE(journal && journal->IsHealthy());
+    RegisterSharedValidationInterface(restore.subscriber);
+    fMasternodeMode = true;
+    fNEVMConnection = true;
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_FINISHED);
+
+    const auto run = [&]() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main) {
+        const auto before{restore.subscriber->replay_commands.size()};
+        Access::TrySignChainLock(*handler);
+        // Removing the production guard would skip this query and fail here.
+        BOOST_REQUIRE_EQUAL(restore.subscriber->replay_commands.size(), before + 1);
+        BOOST_CHECK_EQUAL(restore.subscriber->replay_commands.back(), "blockinfo");
+        BOOST_CHECK(journal->IsHealthy());
+        BOOST_CHECK(!journal->GetBranchLock(genesis, local_identity, TARGET_HEIGHT));
+    };
+    restore.subscriber->applied_pair = std::make_pair(
+        uint64_t{TARGET_HEIGHT}, chain[TARGET_HEIGHT]->GetBlockHash());
+    restore.subscriber->blockinfo_error = "execution status unavailable";
+    run();
+    restore.subscriber->blockinfo_error.clear();
+    restore.subscriber->applied_pair = std::make_pair(
+        uint64_t{TARGET_HEIGHT - 1}, chain[TARGET_HEIGHT - 1]->GetBlockHash());
+    run();
+    restore.subscriber->applied_pair = std::make_pair(
+        uint64_t{TARGET_HEIGHT}, chain[TARGET_HEIGHT]->GetBlockHash());
+    run();
+    // This seam fixture intentionally has no roster member or child-key cache:
+    // it exercises the real local handler gate, not a completed WOTS signature.
+}
+
+BOOST_FIXTURE_TEST_CASE(
     chainlock_finalization_retry_reuses_complete_proof_after_contention,
     PQAuthorizationBasePathSetup)
 {
@@ -11665,8 +11960,20 @@ void PQAuthorizationBasePathSetup::CheckHistoricalPrefix(bool reauthorize_after_
             fNEVMConnection = true;
             llmq::chainLocksHandler = handler.get();
         }
-        const auto check_blocked = [&] {
+        const auto* signing_target{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        BOOST_REQUIRE(signing_target);
+        restore.subscriber->applied_pair = std::make_pair(
+            static_cast<uint64_t>(signing_target->nHeight),
+            signing_target->GetBlockHash());
+        const auto signing_ready = [&]() LOCKS_EXCLUDED(::cs_main) {
+            return Access::IsNEVMReadyForLocalSigning(
+                *handler, signing_target->nHeight, signing_target->GetBlockHash());
+        };
+        const auto check_blocked = [&]() LOCKS_EXCLUDED(::cs_main) {
             BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+            // Authentication has completed, but neither local attestations
+            // nor mining may outrun either retained execution obligation.
+            BOOST_CHECK(!signing_ready());
             BOOST_CHECK_EXCEPTION(
                 (node::BlockAssembler{chainman.ActiveChainstate(), nullptr}
                      .CreateNewBlock(CScript{} << OP_TRUE)),
@@ -11684,6 +11991,14 @@ void PQAuthorizationBasePathSetup::CheckHistoricalPrefix(bool reauthorize_after_
         BOOST_REQUIRE(Access::ClearReplayMarker(*handler, *payment_markers.active));
         BOOST_REQUIRE(durable->LoadPaymentAuditPresealState().IsEmpty());
         BOOST_REQUIRE(!handler->HasNEVMReplayObligation());
+        restore.subscriber->applied_pair = std::make_pair(
+            static_cast<uint64_t>(signing_target->pprev->nHeight),
+            signing_target->pprev->GetBlockHash());
+        BOOST_CHECK(!signing_ready());
+        restore.subscriber->applied_pair = std::make_pair(
+            static_cast<uint64_t>(signing_target->nHeight),
+            signing_target->GetBlockHash());
+        BOOST_CHECK(signing_ready());
         // The callback sentinel stops before synthetic block bodies or coins
         // could affect the result, and proves clearing releases the same gate.
         BOOST_CHECK_EXCEPTION(

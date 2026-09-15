@@ -1968,6 +1968,9 @@ private:
         const pq::PreparedPaymentAuditContext& context,
         const uint256& local_pro_tx_hash)
         EXCLUSIVE_LOCKS_REQUIRED(m_share_signing_mutex);
+    [[nodiscard]] bool IsNEVMReadyForLocalSigning(
+        int32_t target_height, const uint256& target_hash) const
+        LOCKS_EXCLUDED(cs_main);
     void MaybeCreateAndSignChainLock()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !m_share_lifecycle_mutex,

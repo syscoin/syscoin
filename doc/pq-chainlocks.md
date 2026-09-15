@@ -1844,10 +1844,18 @@ Base Syscoin sync and enforcement of an already durable ChainLock continue
 while the prefix is uncovered, but new signing is paused and the paired Geth
 path skips all execution notifications from the earliest marker onward. It
 fails closed rather than substituting a zero checkpoint. Once the exact or
-covering certificate is fully verified and durably accepted, base finality and
-signing may resume even if Geth is absent. A verified PoW-history endpoint can
-also release the covered prefix's signing gate without a newer finality
-certificate; all suffix and local signer checks still apply. The NEVM replay obligation remains
+covering certificate is fully verified and durably accepted, base finality
+enforcement may resume even if Geth is absent. A verified PoW-history endpoint
+can also release the covered prefix's historical-authentication gate without a
+newer finality certificate; all suffix and local signer checks still apply.
+New local ChainLock and payment-audit signatures additionally wait for active
+execution recovery to finish and for a fresh Geth applied count/hash to cover
+the exact active-chain signing target (the seal for an audit), including that
+target's own NEVM block. An executed descendant on the same branch suffices;
+a buffered acknowledgment does not. The signer rechecks execution and local
+capability before consuming signing slots and before announcing its shares.
+Certificate acquisition, verification, import and enforcement remain available
+while this local signing gate is closed. The NEVM replay obligation remains
 until Geth is available: Syscoin replays exact carrier values from the earliest
 active boundary, proceeds beyond the authenticated terminal only through null
 or individually verified receipts, and clears the marker only after Geth

@@ -21145,6 +21145,54 @@ void CChainLocksHandler::RelayChainLockShare(
     });
 }
 
+// SYSCOIN: Authentication can finish before deferred or buffered execution.
+// Keep this gate local to signing; recovery still needs incoming certificates.
+bool CChainLocksHandler::IsNEVMReadyForLocalSigning(
+    int32_t target_height, const uint256& target_hash) const
+{
+    AssertLockNotHeld(cs_main);
+    const int64_t start{m_chainman.GetConsensus().nNEVMStartBlock};
+    if (target_height < 0 || target_hash.IsNull() || start < 0) return false;
+    const auto ready = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        const CBlockIndex* target{m_chainman.ActiveChain()[target_height]};
+        if (!target || target->GetBlockHash() != target_hash ||
+            m_chainman.HasPendingNEVMStartupPair()) return false;
+        // Match ConnectBlock's existing regtest-only NEVM-disabled profile.
+        if (target_height < start || (fRegTest && !fNEVMConnection)) return true;
+        // Reuse the active-branch replay, payload-repair and prefix-recovery
+        // gates. An authenticated marker is not a completed execution replay.
+        return fNEVMConnection && m_chainman.PrepareNEVMBlockProduction();
+    };
+    {
+        LOCK(cs_main);
+        if (!ready()) return false;
+        if (target_height < start || (fRegTest && !fNEVMConnection)) return true;
+    }
+
+    // Read the executed pair without flushing: existing recovery owns execution
+    // and reconciliation of rejected batches. A missing subscriber leaves zero.
+    // Do not retain this observation across signing attempts or engine restarts.
+    uint64_t count{0};
+    uint256 applied_hash;
+    std::string error;
+    GetMainSignals().NotifyGetNEVMBlockInfo(count, applied_hash, error);
+    if (!error.empty() || applied_hash.IsNull()) return false;
+
+    LOCK(cs_main);
+    if (!ready()) return false;
+    const CBlockIndex* tip{m_chainman.ActiveTip()};
+    // Bound the count before converting it to a Core height. Coverage includes
+    // the target itself; a later executed descendant on this branch also works.
+    if (!tip || count < static_cast<uint64_t>(target_height - start + 1) ||
+        count > static_cast<uint64_t>(int64_t{tip->nHeight} - start + 1)) {
+        return false;
+    }
+    const int32_t applied_height{
+        static_cast<int32_t>(start + static_cast<int64_t>(count) - 1)};
+    const CBlockIndex* applied{m_chainman.ActiveChain()[applied_height]};
+    return applied && applied->GetBlockHash() == applied_hash;
+}
+
 void CChainLocksHandler::MaybeCreateAndSignChainLock()
 {
     // SYSCOIN: Pause local production until Core reaches Geth's applied
@@ -21158,9 +21206,8 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
     }
     {
         LOCK(cs_main);
-        // A durable descendant CLSIG closes the consensus pre-seal
-        // immediately. Geth may remain offline with a separate replay marker
-        // without preventing the sentry from signing the next live target.
+        // Authentication closes the pre-seal. Local signing additionally waits
+        // for execution at the target-specific gate below.
         if (IsBTCCPresealActive() ||
             IsPaymentAuditPresealActive()) return;
     }
@@ -21274,11 +21321,18 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                local_preseals_clear() &&
                IsCurrentSigningSource(contexts->source);
     };
+    const auto execution_and_capability_are_current = [&]()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main) {
+        // The engine query can wait behind an import. Recheck local capability
+        // afterwards, without holding validation or collector locks over IPC.
+        return IsNEVMReadyForLocalSigning(statement.height, statement.block_hash) &&
+               exact_signing_capability_is_current();
+    };
 
     // Bitcoin policy checks deliberately run without cs_main and can span
     // several bounded RPC calls. A concurrent Syscoin reorg invalidates both
     // approval and fallback; never let either path reserve a stale key slot.
-    if (!exact_signing_capability_is_current()) return;
+    if (!execution_and_capability_are_current()) return;
     if (!ConsumeStartupChainLockSlots(
             *signing_context, contexts->source,
             local_pro_tx_hash)) {
@@ -21347,7 +21401,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             // verifier dependency. Recheck them after material derivation and
             // immediately before the one-time journal reservation.
             if (!CheckBTCHeaderSigningPolicy(statement)) return;
-            if (!exact_signing_capability_is_current() ||
+            if (!execution_and_capability_are_current() ||
                 !IsActiveMasternodeChildSigningMaterialCurrent(
                     local_pro_tx_hash, *signing_material)) {
                 return;
@@ -21376,7 +21430,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
 
             // The expensive signing operation may span a reorg. Burned slots
             // are never refunded, but stale signatures are never announced.
-            if (!exact_signing_capability_is_current() ||
+            if (!execution_and_capability_are_current() ||
                 !IsActiveMasternodeChildSigningMaterialCurrent(
                     local_pro_tx_hash, *signing_material)) {
                 return;
@@ -21395,7 +21449,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 // our own exact duplicate; remote duplicates never relay.
                 if (ShouldRetryLocalChainLockShareRelay(
                         signed_share.replayed, collection.result)) {
-                    if (!exact_signing_capability_is_current()) return;
+                    if (!execution_and_capability_are_current()) return;
                     RelayChainLockShare(
                         *signed_share.share, contexts,
                         current->variant_index,
@@ -21425,7 +21479,7 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
             MaybeCapturePaymentAuditResponse(
                 *signed_share.share, signing_context->RostersPtr(),
                 admission_generation);
-            if (!exact_signing_capability_is_current()) return;
+            if (!execution_and_capability_are_current()) return;
             RelayChainLockShare(
                 *signed_share.share, contexts,
                 current->variant_index, admission_generation);
@@ -21591,7 +21645,9 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                m_payment_audit_runtime->statement == statement &&
                !m_payment_audit_runtime->finalized;
     };
-    if (!IsShareAdmissionGenerationCurrent(admission_generation) ||
+    if (!IsNEVMReadyForLocalSigning(seal_statement.height, seal_statement.block_hash) ||
+        !IsCurrentPaymentAuditStatement(*statement) ||
+        !IsShareAdmissionGenerationCurrent(admission_generation) ||
         !has_exact_open_runtime() ||
         !ConsumeStartupPaymentAuditSlots(
             *signing_context, local_pro_tx_hash)) {
@@ -21631,7 +21687,9 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
 
             pq::ChainLockSigningError signing_error{
                 pq::ChainLockSigningError::NONE};
-            if (m_chainman.HasPendingNEVMStartupPair() ||
+            if (!IsNEVMReadyForLocalSigning(seal_statement.height, seal_statement.block_hash) ||
+                !IsCurrentPaymentAuditStatement(*statement) ||
+                m_chainman.HasPendingNEVMStartupPair() ||
                 !IsShareAdmissionGenerationCurrent(admission_generation) ||
                 !has_exact_open_runtime() ||
                 !IsActiveMasternodeChildSigningMaterialCurrent(
@@ -21658,7 +21716,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                 }
                 continue;
             }
-            if (m_chainman.HasPendingNEVMStartupPair() ||
+            if (!IsNEVMReadyForLocalSigning(seal_statement.height, seal_statement.block_hash) ||
+                m_chainman.HasPendingNEVMStartupPair() ||
                 !IsCurrentPaymentAuditStatement(*statement) ||
                 !IsActiveMasternodeChildSigningMaterialCurrent(
                     local_pro_tx_hash, *signing_material)) {
@@ -21677,7 +21736,8 @@ void CChainLocksHandler::MaybeCreateAndSignPaymentAudit()
                     collection.accepted_duplicate)) {
                 continue;
             }
-            if (m_chainman.HasPendingNEVMStartupPair() ||
+            if (!IsNEVMReadyForLocalSigning(seal_statement.height, seal_statement.block_hash) ||
+                m_chainman.HasPendingNEVMStartupPair() ||
                 !HasExactPaymentAuditRuntime(
                     runtime_generation, *statement, signing_context,
                     relay_plan) ||
