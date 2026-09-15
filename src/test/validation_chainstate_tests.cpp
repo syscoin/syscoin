@@ -5620,6 +5620,9 @@ BOOST_FIXTURE_TEST_CASE(
                               /*check_read_errors=*/false,
                               /*check_signing_read_errors=*/false,
                               /*check_mining_caches=*/true);
+    // The helper's longpoll cleanup must restore RPC before another fixture
+    // registers commands, including after an earlier node interruption.
+    BOOST_CHECK(!IsRPCRunning());
 }
 
 BOOST_FIXTURE_TEST_CASE(

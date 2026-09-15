@@ -407,7 +407,7 @@ class TestNode():
 
     # SYSCOIN: Public-profile warnings are selected at stop time because tests
     # may switch a node from regtest to a public chain before starting it.
-    def is_node_stopped(self, *, expected_stderr=None, expected_ret_code=0):
+    def is_node_stopped(self, *, expected_stderr=None, expected_ret_code=0, allow_repeated_stderr=False):
         """Checks whether the node has stopped.
 
         Returns True if the node has stopped. False otherwise.
@@ -432,7 +432,18 @@ class TestNode():
                 if self.version is None and self.chain in PUBLIC_PROFILE_CHAINS
                 else ''
             )
-        if stderr != expected_stderr:
+        # SYSCOIN: Corrupt block/undo streams may fail again during shutdown
+        # durability checks. Opt in only for identical repetitions of the
+        # expected line; unrelated diagnostics and missing output still fail.
+        repeated_match = (
+            allow_repeated_stderr
+            and bool(expected_stderr)
+            and '\n' not in expected_stderr
+            and bool(stderr)
+            and all(line == expected_stderr for line in stderr.splitlines())
+        )
+        # if stderr != expected_stderr:
+        if stderr != expected_stderr and not repeated_match:
             raise AssertionError("Unexpected stderr {} != {}".format(stderr, expected_stderr))
 
         self.stdout.close()

@@ -87,6 +87,35 @@ UniValue RPCTestingSetup::CallRPC(std::string args)
 
 BOOST_FIXTURE_TEST_SUITE(rpc_tests, RPCTestingSetup)
 
+// SYSCOIN: RPC interruption is idempotent across fresh test/server lifecycles.
+BOOST_AUTO_TEST_CASE(rpc_interrupt_stops_each_started_lifecycle)
+{
+    BOOST_REQUIRE(!IsRPCRunning());
+    struct InterruptOnExit {
+        ~InterruptOnExit() { InterruptRPC(); }
+    } cleanup;
+
+    // Earlier shutdown tests can consume the one-time interrupt path before
+    // a later fixture starts RPC for an actual longpoll.
+    InterruptRPC();
+    const auto interrupted = [](const UniValue& error) {
+        return error["code"].getInt<int>() == RPC_CLIENT_NOT_CONNECTED;
+    };
+    for (int lifecycle{0}; lifecycle < 2; ++lifecycle) {
+        StartRPC();
+        BOOST_REQUIRE(IsRPCRunning());
+        BOOST_CHECK_NO_THROW(RpcInterruptionPoint());
+        InterruptRPC();
+        BOOST_CHECK(!IsRPCRunning());
+        BOOST_CHECK_EXCEPTION(RpcInterruptionPoint(), UniValue, interrupted);
+        InterruptRPC();
+        BOOST_CHECK(!IsRPCRunning());
+    }
+    // New fixtures register RPC commands while stopped; exercise the exact
+    // guard that otherwise caused hundreds of cascading CI failures.
+    BOOST_CHECK_NO_THROW(CRPCTable{});
+}
+
 // SYSCOIN BEGIN: Decoding legacy and PQ provider payloads must satisfy RPC docs.
 BOOST_AUTO_TEST_CASE(rpc_provider_payload_documentation)
 {
