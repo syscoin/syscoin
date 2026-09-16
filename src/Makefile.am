@@ -411,6 +411,7 @@ SYSCOIN_CORE_H = \
   wallet/fees.h \
   wallet/load.h \
   wallet/pq_key_schedule.h \
+  wallet/pqkey.h \
   wallet/receive.h \
   wallet/rpc/util.h \
   wallet/rpc/wallet.h \
@@ -705,6 +706,7 @@ libsyscoin_wallet_a_SOURCES = \
   wallet/fees.cpp \
   wallet/interfaces.cpp \
   wallet/load.cpp \
+  wallet/pqkey.cpp \
   wallet/receive.cpp \
   wallet/rpc/addresses.cpp \
   wallet/rpc/backup.cpp \

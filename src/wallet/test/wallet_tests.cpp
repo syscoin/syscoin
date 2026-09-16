@@ -383,6 +383,11 @@ BOOST_AUTO_TEST_CASE(pq_owner_and_voting_import_is_atomic)
     BOOST_CHECK(!failed.HasVotingKey(voting));
     BOOST_CHECK(!failed.IsWalletFlagSet(WALLET_FLAG_PQ_OWNER_KEYS | WALLET_FLAG_PQ_VOTING_KEYS));
     BOOST_CHECK(GetMockableDatabase(failed).m_records.empty());
+    const PQKeyExport both_roles{owner, owners.at(owner),
+        static_cast<uint8_t>(static_cast<uint8_t>(PQKeyRole::VOTING) | static_cast<uint8_t>(PQKeyRole::OWNER))};
+    BOOST_CHECK(!failed.ImportPQKey(both_roles, error));
+    BOOST_CHECK(failed.ListPQKeys().empty());
+    BOOST_CHECK(GetMockableDatabase(failed).m_records.empty());
     slhdsa::PublicKey failed_generated;
     BOOST_CHECK(!failed.GenerateOwnerKey(failed_generated, error));
     BOOST_CHECK(failed_generated == slhdsa::PublicKey{});
@@ -398,6 +403,192 @@ BOOST_AUTO_TEST_CASE(pq_owner_and_voting_import_is_atomic)
     BOOST_CHECK(!imported.HasVotingKey(owner));
     BOOST_CHECK(!imported.ImportOwnerKeys(invalid, error));
     BOOST_CHECK(GetMockableDatabase(imported).m_records == records);
+}
+
+BOOST_AUTO_TEST_CASE(pq_key_management_listing_and_selective_export)
+{
+    constexpr uint8_t VOTING{static_cast<uint8_t>(PQKeyRole::VOTING)};
+    constexpr uint8_t OWNER{static_cast<uint8_t>(PQKeyRole::OWNER)};
+    slhdsa::PublicKey voting, owner;
+    std::string error;
+    BOOST_CHECK(m_wallet.ListPQKeys().empty());
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(voting, error));
+    BOOST_REQUIRE(m_wallet.GenerateOwnerKey(owner, error));
+    const auto listed_roles = [](const CWallet& wallet) {
+        std::map<slhdsa::PublicKey, uint8_t> result;
+        for (const auto& key : wallet.ListPQKeys()) BOOST_CHECK(result.emplace(key.public_key, key.roles).second);
+        return result;
+    };
+    // These keys have never been registered on-chain; enumeration is local.
+    const std::map<slhdsa::PublicKey, uint8_t> expected{{voting, VOTING}, {owner, OWNER}};
+    BOOST_CHECK(listed_roles(m_wallet) == expected);
+    PQKeyExport selected;
+    BOOST_REQUIRE(m_wallet.ExportPQKey(voting, selected, error));
+    BOOST_CHECK(selected.public_key == voting);
+    BOOST_CHECK_EQUAL(selected.roles, VOTING);
+    BOOST_REQUIRE_EQUAL(selected.secret.size(), slhdsa::SECRET_KEY_SIZE);
+    const auto voting_secret{selected.secret};
+    BOOST_REQUIRE(m_wallet.ExportPQKey(selected.public_key, selected, error));
+    BOOST_CHECK(selected.public_key == voting); // Input/output alias is safe.
+    BOOST_CHECK(!m_wallet.ExportPQKey({}, selected, error));
+    BOOST_CHECK(selected.public_key == slhdsa::PublicKey{});
+    BOOST_CHECK(selected.secret.empty());
+    BOOST_CHECK_EQUAL(selected.roles, 0);
+
+    // Explicitly adding a second role coalesces listing/export, without
+    // changing the existing secret or granting roles to unrelated keys.
+    BOOST_REQUIRE(m_wallet.ImportPQKey({voting, voting_secret, OWNER}, error));
+    const auto both{listed_roles(m_wallet)};
+    BOOST_REQUIRE_EQUAL(both.size(), 2U);
+    BOOST_CHECK_EQUAL(both.at(voting), VOTING | OWNER);
+    BOOST_CHECK_EQUAL(both.at(owner), OWNER);
+    BOOST_REQUIRE(m_wallet.ExportPQKey(voting, selected, error));
+    BOOST_CHECK_EQUAL(selected.roles, VOTING | OWNER);
+    BOOST_CHECK(selected.secret == voting_secret);
+    std::map<slhdsa::PublicKey, CKeyingMaterial> voters, owners;
+    BOOST_REQUIRE(m_wallet.ExportPQKeys(voters, owners, error));
+    BOOST_REQUIRE_EQUAL(voters.size(), 1U);
+    BOOST_REQUIRE_EQUAL(owners.size(), 2U);
+    BOOST_CHECK(voters.at(voting) == owners.at(voting));
+
+    BOOST_REQUIRE(m_wallet.EncryptWallet(SecureString{"pq-unified-test"}));
+    BOOST_CHECK(listed_roles(m_wallet) == both);
+    BOOST_CHECK(!m_wallet.ExportPQKey(voting, selected, error));
+    BOOST_CHECK(selected.secret.empty());
+    BOOST_CHECK_EQUAL(selected.roles, 0);
+    BOOST_CHECK(!m_wallet.ExportPQKeys(voters, owners, error));
+    BOOST_CHECK(voters.empty());
+    BOOST_CHECK(owners.empty());
+    BOOST_CHECK(!m_wallet.ImportPQKey({voting, voting_secret, OWNER}, error));
+    CWallet restored(m_node.chain.get(), "", DuplicateMockDatabase(m_wallet.GetDatabase()));
+    BOOST_REQUIRE_EQUAL(restored.LoadWallet(), DBErrors::LOAD_OK);
+    BOOST_CHECK(restored.IsLocked());
+    BOOST_CHECK(listed_roles(restored) == both);
+    BOOST_REQUIRE(restored.Unlock(SecureString{"pq-unified-test"}));
+    BOOST_REQUIRE(restored.ExportPQKey(voting, selected, error));
+    BOOST_CHECK_EQUAL(selected.roles, VOTING | OWNER);
+    BOOST_CHECK(selected.secret == voting_secret);
+}
+
+BOOST_AUTO_TEST_CASE(pq_key_management_import_conflicts_are_atomic)
+{
+    constexpr uint8_t VOTING{static_cast<uint8_t>(PQKeyRole::VOTING)};
+    constexpr uint8_t OWNER{static_cast<uint8_t>(PQKeyRole::OWNER)};
+    slhdsa::PublicKey public_key;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(public_key, error));
+    PQKeyExport original;
+    BOOST_REQUIRE(m_wallet.ExportPQKey(public_key, original, error));
+    CWallet imported(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    for (const uint8_t roles : {uint8_t{0}, uint8_t{4}, uint8_t{255}}) {
+        auto invalid{original};
+        invalid.roles = roles;
+        BOOST_CHECK(!imported.ImportPQKey(invalid, error));
+    }
+    auto malformed{original};
+    malformed.secret.pop_back();
+    BOOST_CHECK(!imported.ImportPQKey(malformed, error));
+    malformed = original;
+    malformed.public_key = {};
+    BOOST_CHECK(!imported.ImportPQKey(malformed, error));
+    BOOST_CHECK(imported.ListPQKeys().empty());
+    BOOST_CHECK(GetMockableDatabase(imported).m_records.empty());
+
+    // SLH permits a different private PRF seed for the same public key. Both
+    // secrets below are canonical, so merely comparing public keys is unsafe.
+    auto conflicting{original};
+    conflicting.secret[slhdsa::HEDGED_RANDOMIZER_SIZE] ^= 1;
+    auto key{slhdsa::ImportSecretKey(conflicting.secret)};
+    BOOST_REQUIRE(key.has_value());
+    slhdsa::PublicKey derived;
+    BOOST_REQUIRE(key->GetPublicKey(derived));
+    BOOST_CHECK(derived == public_key);
+    // Full legacy backup records retain both variants; selective export must
+    // reject the ambiguity instead of dropping or changing either secret.
+    BOOST_REQUIRE(imported.ImportPQKeys({{public_key, original.secret}}, {{public_key, conflicting.secret}}, error));
+    for (const bool encrypted : {false, true}) {
+        if (encrypted) BOOST_REQUIRE(imported.EncryptWallet(SecureString{"pq-legacy-variants"}));
+        CWallet reloaded(m_node.chain.get(), "", DuplicateMockDatabase(imported.GetDatabase()));
+        BOOST_REQUIRE_EQUAL(reloaded.LoadWallet(), DBErrors::LOAD_OK);
+        if (encrypted) BOOST_REQUIRE(reloaded.Unlock(SecureString{"pq-legacy-variants"}));
+        PQKeyExport ambiguous{original};
+        BOOST_CHECK(!reloaded.ExportPQKey(public_key, ambiguous, error));
+        BOOST_CHECK(ambiguous.secret.empty());
+        BOOST_CHECK_EQUAL(ambiguous.roles, 0);
+        std::map<slhdsa::PublicKey, CKeyingMaterial> voters, owners;
+        BOOST_REQUIRE(reloaded.ExportPQKeys(voters, owners, error));
+        BOOST_CHECK(voters.at(public_key) == original.secret);
+        BOOST_CHECK(owners.at(public_key) == conflicting.secret);
+        CWallet restored(m_node.chain.get(), "", CreateMockableWalletDatabase());
+        BOOST_REQUIRE(restored.ImportPQKeys(voters, owners, error));
+        BOOST_REQUIRE(restored.ExportPQKeys(voters, owners, error));
+        BOOST_CHECK(voters.at(public_key) == original.secret);
+        BOOST_CHECK(owners.at(public_key) == conflicting.secret);
+    }
+
+    for (const bool encrypted : {false, true}) {
+        CWallet target(m_node.chain.get(), "", CreateMockableWalletDatabase());
+        BOOST_REQUIRE(target.ImportPQKey(original, error));
+        if (encrypted) {
+            BOOST_REQUIRE(target.EncryptWallet(SecureString{"pq-conflict-test"}));
+            BOOST_REQUIRE(target.Unlock(SecureString{"pq-conflict-test"}));
+        }
+        const auto before{GetMockableDatabase(target).m_records};
+        conflicting.roles = VOTING;
+        BOOST_CHECK(!target.ImportPQKey(conflicting, error));
+        conflicting.roles = OWNER;
+        BOOST_CHECK(!target.ImportPQKey(conflicting, error));
+        BOOST_CHECK(!target.HasOwnerKey(public_key));
+        BOOST_CHECK(GetMockableDatabase(target).m_records == before);
+        BOOST_REQUIRE(target.ImportPQKey(original, error));
+        BOOST_CHECK(GetMockableDatabase(target).m_records == before);
+        auto both{original};
+        both.roles = VOTING | OWNER;
+        BOOST_REQUIRE(target.ImportPQKey(both, error));
+        PQKeyExport exported;
+        BOOST_REQUIRE(target.ExportPQKey(public_key, exported, error));
+        BOOST_CHECK_EQUAL(exported.roles, VOTING | OWNER);
+        BOOST_CHECK(exported.secret == original.secret);
+    }
+    for (const auto flag : {WALLET_FLAG_DISABLE_PRIVATE_KEYS, WALLET_FLAG_EXTERNAL_SIGNER}) {
+        CWallet disabled(m_node.chain.get(), "", CreateMockableWalletDatabase());
+        disabled.SetWalletFlag(flag);
+        const auto before{GetMockableDatabase(disabled).m_records};
+        BOOST_CHECK(!disabled.ImportPQKey(original, error));
+        BOOST_CHECK(disabled.ListPQKeys().empty());
+        BOOST_CHECK(GetMockableDatabase(disabled).m_records == before);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pq_key_management_legacy_and_descriptor_storage)
+{
+    slhdsa::PublicKey public_key;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateOwnerKey(public_key, error));
+    PQKeyExport original;
+    BOOST_REQUIRE(m_wallet.ExportPQKey(public_key, original, error));
+    for (const bool descriptors : {false, true}) {
+        CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+        if (descriptors) {
+            wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_BLANK_WALLET);
+        } else {
+            WITH_LOCK(wallet.cs_wallet, wallet.SetupLegacyScriptPubKeyMan());
+        }
+        BOOST_REQUIRE(wallet.ImportPQKey(original, error));
+        BOOST_CHECK(!wallet.HasVotingKey(public_key));
+        BOOST_CHECK(wallet.HasOwnerKey(public_key));
+        CWallet reloaded(m_node.chain.get(), "", DuplicateMockDatabase(wallet.GetDatabase()));
+        BOOST_REQUIRE_EQUAL(reloaded.LoadWallet(), DBErrors::LOAD_OK);
+        BOOST_CHECK_EQUAL(reloaded.IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS), descriptors);
+        const auto listed{reloaded.ListPQKeys()};
+        BOOST_REQUIRE_EQUAL(listed.size(), 1U);
+        BOOST_CHECK(listed[0].public_key == public_key);
+        BOOST_CHECK_EQUAL(listed[0].roles, original.roles);
+        PQKeyExport exported;
+        BOOST_REQUIRE(reloaded.ExportPQKey(public_key, exported, error));
+        BOOST_CHECK(exported.secret == original.secret);
+        BOOST_CHECK_EQUAL(exported.roles, original.roles);
+    }
 }
 
 static CMutableTransaction TestSimpleSpend(const CTransaction& from, uint32_t index, const CKey& key, const CScript& pubkey)
@@ -735,6 +926,12 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
     }
     BOOST_REQUIRE(source->GenerateVotingKey(first, error));
     BOOST_REQUIRE(source->GenerateOwnerKey(first_owner, error));
+    // Preserve preexisting role-specific PRF variants through the complete RPC
+    // dump/import workflow. A single portable record cannot represent both.
+    PQKeyExport legacy_variant;
+    BOOST_REQUIRE(source->ExportPQKey(first, legacy_variant, error));
+    legacy_variant.secret[slhdsa::HEDGED_RANDOMIZER_SIZE] ^= 1;
+    BOOST_REQUIRE(source->ImportOwnerKeys({{first, legacy_variant.secret}}, error));
     BOOST_REQUIRE(source->EncryptWallet(passphrase));
     BOOST_CHECK_THROW(call_rpc(source, wallet::dumpwallet(), backup_file), UniValue);
     BOOST_CHECK(!fs::exists(fs::PathFromString(backup_file)));
@@ -773,6 +970,13 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
         call_rpc(restored, wallet::importwallet(), backup_file);
         // Importing an existing key again must neither fail nor alter its secret.
         call_rpc(restored, wallet::importwallet(), backup_file);
+        std::map<slhdsa::PublicKey, CKeyingMaterial> restored_votes, restored_owners;
+        BOOST_REQUIRE(restored->ExportPQKeys(restored_votes, restored_owners, error));
+        BOOST_CHECK(restored_votes == exported_keys);
+        BOOST_CHECK(restored_owners == exported_owners);
+        PQKeyExport ambiguous;
+        BOOST_CHECK(!restored->ExportPQKey(first, ambiguous, error));
+        BOOST_CHECK(ambiguous.secret.empty());
         CKey restored_spending_key;
         BOOST_REQUIRE(restored->GetKey(coinbaseKey.GetPubKey().GetID(), restored_spending_key));
         std::vector<unsigned char> spending_signature;

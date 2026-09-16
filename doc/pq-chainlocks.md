@@ -235,6 +235,36 @@ separate `pqownerkey=` record, so importing a voting key does not create owner
 authority. Dumps contain unencrypted secrets and must be kept private. Older
 wallet backups and descriptor-only exports do not recover these new keys.
 
+The same wallet RPCs manage owner and voting keys in descriptor and legacy
+wallets:
+
+```text
+listpqkeys
+dumppqkey "publicKey"
+importpqkey "syspqkey1:..."
+```
+
+`listpqkeys` lists every locally stored PQ public key, its algorithm, and its
+`owner` or `voting` roles. It includes generated but unregistered keys and old
+rotated keys. `associations` describes only the current chain's masternode
+registrations using that key, with the role and key version. An empty
+association list does not mean the secret is missing. This public inventory
+works while the wallet is locked and does not reveal private material.
+
+`dumppqkey` exports exactly the selected key as a versioned, checksummed
+`syspqkey1:` record containing its private material and roles. Treat the entire
+record as a private key; it is unencrypted. `importpqkey` validates the complete
+record before changing the wallet and restores its encoded roles. Importing a
+voting-only record does not grant owner authority or import unrelated wallet
+keys. Both commands require an encrypted wallet to be unlocked, and importing
+private material is unavailable to wallets with private keys disabled or
+external signers.
+
+Selective import only changes local key storage. It does not broadcast a
+registration, migrate ownership, update a voting delegate, or restore ordinary
+coin keys. Use the relevant provider transaction to enroll a new public key on
+chain. Continue using a full wallet backup to preserve all wallet information.
+
 In the legacy protocol, `ProRegTx.pubKeyOperator` stored the BLS operator
 public key and an owner-signed `ProUpRegTx` could replace it. After the PQ
 preparation boundary, both PQ `ProRegTx` and `ProUpRegTx` require that legacy

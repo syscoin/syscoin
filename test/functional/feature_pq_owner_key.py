@@ -130,6 +130,12 @@ class PQOwnerKeyTest(PQOperatorLifecycleTest):
     def state(self, mn):
         return self.nodes[0].protx_info(mn["protx_hash"])["state"]
 
+    def assert_key_association(self, wallet, public_key, role, mn, key_version):
+        keys = {entry["public_key"]: entry for entry in wallet.listpqkeys()}
+        assert_equal(keys[public_key]["roles"], [role])
+        assert_equal(keys[public_key]["associations"], [{
+            "proTxHash": mn["protx_hash"], "role": role, "key_version": key_version}])
+
     def migrate(self, mn, *, enroll_voting=True):
         before = self.state(mn)
         new_owner = self.customer.protx_generate_owner_key()
@@ -147,8 +153,10 @@ class PQOwnerKeyTest(PQOperatorLifecycleTest):
         after = self.state(mn)
         assert_equal(after["pqOwnerPublicKey"], new_owner)
         assert_equal(after["pqOwnerKeyVersion"], 1)
+        self.assert_key_association(self.customer, new_owner, "owner", mn, 1)
         if enroll_voting:
             assert_equal(after["pqVotingPublicKey"], voting_only)
+            self.assert_key_association(self.customer, voting_only, "voting", mn, 1)
         preserved_fields = ["payoutAddress", "operatorPayoutAddress", "service"]
         if not enroll_voting:
             preserved_fields.extend(["pqVotingPublicKey", "pqVotingKeyVersion"])
@@ -181,6 +189,16 @@ class PQOwnerKeyTest(PQOperatorLifecycleTest):
         assert_raises_rpc_error(
             None, None, self.provider.protx_register_operator_submit,
             stale_request, stale_signature, False)
+
+        self.log.info("Importing a delegated voting key does not grant owner authority or alter registration")
+        migrated_state = self.state(pq_mn)
+        delegated_key = migrated_state["pqVotingPublicKey"]
+        self.provider.importpqkey(self.customer.dumppqkey(delegated_key))
+        self.assert_key_association(self.provider, delegated_key, "voting", pq_mn, 1)
+        request = self.prepare(pq_mn)
+        assert_raises_rpc_error(
+            None, None, self.provider.protx_register_operator_sign, request)
+        assert_equal(self.state(pq_mn), migrated_state)
 
         self.log.info("Preparation rollback restores the old owner and exact PQ version")
         expected = self.state(pq_mn)
@@ -231,6 +249,10 @@ class PQOwnerKeyTest(PQOperatorLifecycleTest):
         assert_equal(updated["pqVotingPublicKey"], voting_public)
         assert_equal(updated["payoutAddress"], payout_address)
         assert_equal(node.protx_operator_key_info(legacy_mn["protx_hash"]), operator_before)
+        self.assert_key_association(self.customer, voting_public, "voting", legacy_mn, 2)
+        old_voting = {entry["public_key"]: entry for entry in self.customer.listpqkeys()}[enrolled["pqVotingPublicKey"]]
+        assert_equal(old_voting["roles"], ["voting"])
+        assert_equal(old_voting["associations"], [])
 
         expected_operator = node.protx_operator_key_info(pq_mn["protx_hash"])
         self.check_restart_and_fresh_replay(

@@ -3,12 +3,15 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chain.h>
+#include <chainparams.h>
 #include <clientversion.h>
 #include <core_io.h>
+#include <evo/deterministicmns.h>
 #include <hash.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
 #include <merkleblock.h>
+#include <node/context.h>
 #include <rpc/util.h>
 #include <script/descriptor.h>
 #include <script/script.h>
@@ -19,9 +22,12 @@
 #include <util/fs.h>
 #include <util/time.h>
 #include <util/translation.h>
+#include <validation.h>
+#include <wallet/pqkey.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <tuple>
@@ -107,6 +113,138 @@ static bool ParsePQKeyDumpRecord(std::string_view line, std::string_view prefix,
     return true;
 }
 // SYSCOIN END: Tagged independent PQ voting-key records in legacy wallet dumps.
+
+static UniValue PQKeyRolesJSON(uint8_t roles)
+{
+    UniValue result{UniValue::VARR};
+    if (roles & static_cast<uint8_t>(PQKeyRole::OWNER)) result.push_back("owner");
+    if (roles & static_cast<uint8_t>(PQKeyRole::VOTING)) result.push_back("voting");
+    return result;
+}
+
+RPCHelpMan listpqkeys()
+{
+    return RPCHelpMan{"listpqkeys",
+        "\nLists this wallet's independent PQ public keys, local roles, and current masternode associations.\n"
+        "Includes unassigned keys and retained keys from past rotations. Works while locked and with legacy or descriptor wallets.\n"
+        "Local roles describe intended wallet use; on-chain owner and voting records determine authority. PQ public keys are not SYS payment addresses.\n",
+        {},
+        RPCResult{RPCResult::Type::ARR, "", "Public key inventory; never contains private keys", {
+            {RPCResult::Type::OBJ, "", "", {
+                {RPCResult::Type::STR_HEX, "public_key", "32-byte PQ public key"},
+                {RPCResult::Type::STR, "algorithm", "SLH-DSA-SHAKE-128s"},
+                {RPCResult::Type::ARR, "roles", "Local wallet roles", {{RPCResult::Type::STR, "", "owner or voting"}}},
+                {RPCResult::Type::BOOL, "has_private_key", "Whether this wallet stores the private key, including when encrypted and locked"},
+                {RPCResult::Type::ARR, "associations", "Current masternode owner/voting assignments at the active chain tip", {
+                    {RPCResult::Type::OBJ, "", "", {
+                        {RPCResult::Type::STR_HEX, "proTxHash", "Masternode registration hash"},
+                        {RPCResult::Type::STR, "role", "On-chain role: owner or voting"},
+                        {RPCResult::Type::NUM, "key_version", "Current on-chain key version"},
+                    }},
+                }},
+            }},
+        }},
+        RPCExamples{HelpExampleCli("listpqkeys", "")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            const auto inventory{wallet->ListPQKeys()};
+            auto* node{wallet->chain().context()};
+            if (!node || !node->chainman) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Wallet node context is unavailable");
+            }
+            CDeterministicMNList members;
+            {
+                LOCK(cs_main);
+                const auto* tip{node->chainman->ActiveTip()};
+                if (tip && deterministicMNManager && tip->nHeight >= Params().GetConsensus().DIP0003Height) {
+                    members = deterministicMNManager->GetListForBlock(tip);
+                }
+            }
+            std::map<slhdsa::PublicKey, UniValue> associations;
+            for (const auto& key : inventory) associations.emplace(key.public_key, UniValue{UniValue::VARR});
+            members.ForEachMN(false, [&](const CDeterministicMN& member) {
+                const auto append = [&](const auto& record, const char* role) {
+                    if (!record.HasActiveKey()) return;
+                    const auto it{associations.find(record.public_key)};
+                    if (it == associations.end()) return;
+                    UniValue assignment{UniValue::VOBJ};
+                    assignment.pushKV("proTxHash", member.proTxHash.GetHex());
+                    assignment.pushKV("role", role);
+                    assignment.pushKV("key_version", record.key_version);
+                    it->second.push_back(std::move(assignment));
+                };
+                append(member.pdmnState->pqOwnerKey, "owner");
+                append(member.pdmnState->pqVotingKey, "voting");
+            });
+            UniValue result{UniValue::VARR};
+            for (const auto& key : inventory) {
+                UniValue entry{UniValue::VOBJ};
+                entry.pushKV("public_key", HexStr(key.public_key));
+                entry.pushKV("algorithm", "SLH-DSA-SHAKE-128s");
+                entry.pushKV("roles", PQKeyRolesJSON(key.roles));
+                entry.pushKV("has_private_key", true);
+                entry.pushKV("associations", std::move(associations.at(key.public_key)));
+                result.push_back(std::move(entry));
+            }
+            return result;
+        }};
+}
+
+RPCHelpMan dumppqkey()
+{
+    return RPCHelpMan{"dumppqkey",
+        "\nExports one independent PQ private key and its local roles in a versioned, checksummed record.\n"
+        "Works with legacy and descriptor wallets. Requires an unlocked wallet. The result contains an unencrypted private key; keep it private.\n",
+        {{"public_key", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte public key from listpqkeys"}},
+        RPCResult{RPCResult::Type::STR, "", "Portable private-key record for importpqkey"},
+        RPCExamples{HelpExampleCli("dumppqkey", "\"public_key\"")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            const auto& encoded{request.params[0].get_str()};
+            if (encoded.size() != 2 * slhdsa::PUBLIC_KEY_SIZE || !IsHex(encoded)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PQ public key must be exactly 32 bytes in hex");
+            }
+            const auto bytes{ParseHex(encoded)};
+            slhdsa::PublicKey public_key{};
+            std::copy(bytes.begin(), bytes.end(), public_key.begin());
+            PQKeyExport key;
+            std::string error;
+            if (!wallet->ExportPQKey(public_key, key, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+            const auto result{EncodePQKey(key, error)};
+            if (!result) throw JSONRPCError(RPC_WALLET_ERROR, error);
+            return *result;
+        }};
+}
+
+RPCHelpMan importpqkey()
+{
+    return RPCHelpMan{"importpqkey",
+        "\nImports one record from dumppqkey, preserving its owner/voting role metadata.\n"
+        "Works with legacy and descriptor wallets. Requires an unlocked wallet with private-key support.\n"
+        "Does not enroll the key on-chain, restore an obsolete key version, or rescan spending transactions.\n",
+        {{"record", RPCArg::Type::STR, RPCArg::Optional::NO, "Versioned, checksummed private-key record from dumppqkey"}},
+        RPCResult{RPCResult::Type::OBJ, "", "Imported public identity and local roles", {
+            {RPCResult::Type::STR_HEX, "public_key", "32-byte PQ public key"},
+            {RPCResult::Type::ARR, "roles", "Roles carried by the imported record", {{RPCResult::Type::STR, "", "owner or voting"}}},
+        }},
+        RPCExamples{HelpExampleCli("importpqkey", "\"record\"")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            std::string error;
+            const auto key{DecodePQKey(request.params[0].get_str(), error)};
+            if (!key) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+            if (!wallet->ImportPQKey(*key, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("public_key", HexStr(key->public_key));
+            result.pushKV("roles", PQKeyRolesJSON(key->roles));
+            return result;
+        }};
+}
 
 static bool GetWalletAddressesForKey(const LegacyScriptPubKeyMan* spk_man, const CWallet& wallet, const CKeyID& keyid, std::string& strAddr, std::string& strLabel) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
@@ -823,8 +961,7 @@ RPCHelpMan dumpwallet()
     // SYSCOIN BEGIN: Export every PQ secret before creating the dumpfile.
     std::map<slhdsa::PublicKey, CKeyingMaterial> voting_keys, owner_keys;
     std::string voting_error;
-    if (!wallet.ExportVotingKeys(voting_keys, voting_error) ||
-        !wallet.ExportOwnerKeys(owner_keys, voting_error)) {
+    if (!wallet.ExportPQKeys(voting_keys, owner_keys, voting_error)) {
         throw JSONRPCError(RPC_WALLET_ERROR, voting_error);
     }
     // SYSCOIN END: Export every PQ secret before creating the dumpfile.

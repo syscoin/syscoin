@@ -162,6 +162,8 @@ BASE_SCRIPTS = [
     'rpc_createmultisig.py',
     'p2p_timeouts.py',
     'wallet_dump.py --legacy-wallet',
+    'wallet_pq_keys.py --legacy-wallet',
+    'wallet_pq_keys.py --descriptors',
     'feature_deterministicmns.py --descriptors',
     # SYSCOIN: PQ operator registration and rotation lifecycle.
     'feature_pq_operator_lifecycle.py --descriptors',

@@ -30,6 +30,7 @@
 #include <util/ui_change_type.h>
 #include <wallet/crypter.h>
 #include <wallet/db.h>
+#include <wallet/pqkey.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
@@ -314,12 +315,28 @@ private:
     std::map<slhdsa::PublicKey, CKeyingMaterial> m_voting_keys GUARDED_BY(cs_wallet);
     std::map<slhdsa::PublicKey, std::vector<unsigned char>> m_crypted_voting_keys GUARDED_BY(cs_wallet);
 
-    bool CheckVotingDecryptionKey(const CKeyingMaterial& master_key) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     // SYSCOIN END: Store and decrypt independent SLH-DSA voting keys.
     // SYSCOIN: Owner authority is separate from delegated proposal voting.
     std::map<slhdsa::PublicKey, CKeyingMaterial> m_owner_keys GUARDED_BY(cs_wallet);
     std::map<slhdsa::PublicKey, std::vector<unsigned char>> m_crypted_owner_keys GUARDED_BY(cs_wallet);
-    bool CheckOwnerDecryptionKey(const CKeyingMaterial& master_key) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    using PQPlainKeyMap = std::map<slhdsa::PublicKey, CKeyingMaterial>;
+    using PQCryptedKeyMap = std::map<slhdsa::PublicKey, std::vector<unsigned char>>;
+    PQPlainKeyMap& PQPlainKeys(PQKeyRole role) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    const PQPlainKeyMap& PQPlainKeys(PQKeyRole role) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    PQCryptedKeyMap& PQCryptedKeys(PQKeyRole role) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    const PQCryptedKeyMap& PQCryptedKeys(PQKeyRole role) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool HasPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key) const;
+    bool ReadPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key, CKeyingMaterial& secret,
+                   std::string& error) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool LoadPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key,
+                   const CKeyingMaterial& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool LoadCryptedPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key,
+                          const std::vector<unsigned char>& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool CheckPQDecryptionKey(const CKeyingMaterial& master_key) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool GeneratePQKey(PQKeyRole role, slhdsa::PublicKey& public_key, std::string& error);
+    bool SignPQAuthorization(PQKeyRole role, const slhdsa::PublicKey& public_key,
+                             const uint256& authorization_hash, std::span<const uint8_t> context,
+                             slhdsa::Signature& signature, std::string& error) const;
 
     bool Unlock(const CKeyingMaterial& vMasterKeyIn, bool accept_no_keys = false);
 
@@ -928,6 +945,15 @@ public:
     /** Import both roles atomically after validating the entire PQ dump. */
     bool ImportPQKeys(const std::map<slhdsa::PublicKey, CKeyingMaterial>& voting_keys,
                       const std::map<slhdsa::PublicKey, CKeyingMaterial>& owner_keys, std::string& error);
+    /** All locally stored public keys, including unregistered keys; safe while locked. */
+    std::vector<PQKeyInfo> ListPQKeys() const;
+    /** Export one key and its roles, or clear the output on failure. Requires unlock. */
+    bool ExportPQKey(const slhdsa::PublicKey& public_key, PQKeyExport& key, std::string& error) const;
+    /** Add explicitly tagged roles atomically; never overwrite conflicting secret material. */
+    bool ImportPQKey(const PQKeyExport& key, std::string& error);
+    /** Export both role maps from one wallet snapshot, publishing neither on failure. */
+    bool ExportPQKeys(std::map<slhdsa::PublicKey, CKeyingMaterial>& voting_keys,
+                      std::map<slhdsa::PublicKey, CKeyingMaterial>& owner_keys, std::string& error) const;
     /** Only the three consensus owner-signing contexts are accepted. */
     bool SignOwnerAuthorization(const slhdsa::PublicKey& public_key, const uint256& authorization_hash,
                                 std::string_view context, slhdsa::Signature& signature, std::string& error) const;
