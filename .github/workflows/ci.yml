@@ -185,13 +185,33 @@ jobs:
 
   win64-native:
     # SYSCOIN: The post-BLS Windows build no longer provisions Dash BLS.
-    name: 'Win64 native core, VS 2022'
+    # name: 'Win64 native core, VS 2022'
+    name: 'Win64 native core, VS 2022 (${{ matrix.shard }})'
     # Use latest image, but hardcode version to avoid silent upgrades (and breaks).
     # See: https://github.com/actions/runner-images#available-images.
     runs-on: windows-2022
 
     # No need to run on the read-only mirror, unless it is a PR.
     if: github.repository != 'syscoin-core/gui' || github.event_name == 'pull_request'
+
+    # SYSCOIN: The serial native suite exceeded six hours. Preserve every
+    # enabled case in disjoint shards; the two expensive groups each took
+    # about two hours of test execution each. Keep auxiliary coverage in
+    # remaining, including the original six-hour budget when master also
+    # runs the extended functional suite.
+    timeout-minutes: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && matrix.shard == 'remaining' && 360 || 240 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: chainlock-handler
+            # A positive suite selector enables disabled helpers too. The
+            # crash child remains invoked explicitly by its parent test.
+            unit_filter: 'pq_chainlock_handler_tests:!pq_chainlock_handler_tests/btcc_preseal_durability_crash_child'
+          - shard: registry-dmn
+            unit_filter: 'pq_registry_tests:evo_dmn_db_maintenance_tests'
+          - shard: remaining
+            unit_filter: '!pq_chainlock_handler_tests:!pq_registry_tests:!evo_dmn_db_maintenance_tests'
 
     env:
       CCACHE_MAXSIZE: '200M'
@@ -281,29 +301,37 @@ jobs:
 
       - name: Save Ccache cache
         uses: actions/cache/save@v6
-        if: github.event_name != 'pull_request' && steps.ccache-cache.outputs.cache-hit != 'true'
+        # SYSCOIN: All shards restore the same compiler cache; save it once.
+        # if: github.event_name != 'pull_request' && steps.ccache-cache.outputs.cache-hit != 'true'
+        if: matrix.shard == 'remaining' && github.event_name != 'pull_request' && steps.ccache-cache.outputs.cache-hit != 'true'
         with:
           path: ~/AppData/Local/ccache
           # https://github.com/actions/cache/blob/main/tips-and-workarounds.md#update-a-cache
           key: ${{ github.job }}-ccache-${{ github.run_id }}
 
       - name: Run unit tests
-        run: src\test_syscoin.exe -l test_suite
+        # SYSCOIN: Boost combines colon-separated selectors and exclusions.
+        # run: src\test_syscoin.exe -l test_suite
+        run: src\test_syscoin.exe -l test_suite --run_test="${{ matrix.unit_filter }}"
 
       - name: Smoke-test external Bitcoin header command
+        if: matrix.shard == 'remaining'
         timeout-minutes: 10
         run: py -3 test\functional\test_runner.py feature_btcheader_external_command.py --jobs=1 --ci --tmpdirprefix=$env:RUNNER_TEMP --combinedlogslen=99999999 --require-backend
 
       - name: Run benchmarks
+        if: matrix.shard == 'remaining'
         # SYSCOIN: Full-depth PQ trees are explicit performance workloads. Keep
         # the per-push smoke aligned with Makefile.test.include's bounded tier.
         timeout-minutes: 15
         run: src\bench_syscoin.exe -sanity-check -priority-level=high
 
       - name: Run util tests
+        if: matrix.shard == 'remaining'
         run: py -3 test\util\test_runner.py
 
       - name: Run rpcauth test
+        if: matrix.shard == 'remaining'
         run: py -3 test\util\rpcauth-test.py
 
       - name: Run functional tests
@@ -312,5 +340,7 @@ jobs:
         # actions as a child process stops making progress. The root cause has
         # not yet been determined.
         # Discussed in https://github.com/bitcoin/bitcoin/pull/28509
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        # SYSCOIN: Preserve the existing master-only functional coverage once.
+        # if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: matrix.shard == 'remaining' && github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: py -3 test\functional\test_runner.py --jobs $env:NUMBER_OF_PROCESSORS --ci --quiet --tmpdirprefix=$env:RUNNER_TEMP --combinedlogslen=99999999 --timeout-factor=$env:TEST_RUNNER_TIMEOUT_FACTOR --extended

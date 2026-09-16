@@ -36,12 +36,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: ASan + LSan + UBSan
+          # SYSCOIN: Build plus both test phases exceeded three hours while
+          # tests were still progressing. Run the complete native and
+          # functional coverage in separate jobs with the same instrumentation.
+          - name: ASan + LSan + UBSan (native)
             file_env: ./ci/test/00_setup_env_native_asan.sh
             timeout: 180
-          - name: TSan
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+          - name: ASan + LSan + UBSan (functional)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            # The cold build and long governance/NEVM fixtures need their own
+            # budget; this job no longer includes the native test phase.
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+          - name: TSan (native)
             file_env: ./ci/test/00_setup_env_native_tsan.sh
             timeout: 180
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+          - name: TSan (functional)
+            file_env: ./ci/test/00_setup_env_native_tsan.sh
+            timeout: 180
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
           - name: MSan
             file_env: ./ci/test/00_setup_env_native_msan.sh
             timeout: 300
@@ -51,6 +70,8 @@ jobs:
             timeout: 180
     env:
       FILE_ENV: ${{ matrix.file_env }}
+      RUN_UNIT_TESTS: ${{ matrix.run_unit_tests }}
+      RUN_FUNCTIONAL_TESTS: ${{ matrix.run_functional_tests }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
