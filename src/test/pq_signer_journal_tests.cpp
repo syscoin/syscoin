@@ -15,12 +15,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <tuple>
 
 namespace llmq::test {
 
 class PQSignerJournalTestAccess
 {
 public:
+    template <typename Key>
+    static void CorruptRow(CPQSignerJournal& journal, const Key& key)
+    {
+        LOCK(journal.m_mutex);
+        BOOST_REQUIRE(journal.m_db.Write(key, uint8_t{0xff}, /*fSync=*/true));
+    }
+
     static PQSignerJournalResult Reconcile(
         CPQSignerJournal& journal,
         const uint256& genesis_hash,
@@ -1100,10 +1108,109 @@ BOOST_AUTO_TEST_CASE(schema_less_nonempty_database_fails_closed)
         BOOST_REQUIRE(raw_db.Write(std::uint8_t{0x01}, std::uint32_t{7}, /*fSync=*/true));
     }
 
-    llmq::CPQSignerJournal journal{path};
+    std::vector<std::string> reports;
+    llmq::CPQSignerJournal journal{path, 1 << 20,
+        [&](const std::string& reason) { reports.push_back(reason); }};
     BOOST_CHECK(!journal.IsHealthy());
+    BOOST_REQUIRE_EQUAL(reports.size(), 1U);
+    BOOST_CHECK(reports.front().find("Initialize: corrupt or incompatible") != std::string::npos);
     CheckOutcome(ReserveSlot(journal, MakeKey(), uint256{51}),
                  llmq::PQSignerJournalOutcome::CORRUPT);
+    BOOST_CHECK_EQUAL(reports.size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(first_runtime_failure_reports_after_unlock_and_preserves_journal)
+{
+    using Access = llmq::test::PQSignerJournalTestAccess;
+    using Outcome = llmq::PQSignerJournalOutcome;
+    const auto base{MakeKey()};
+    const auto certificate{MakeCertificate(base.absolute_height, MakeHash(150'001), 1)};
+    const auto lock{CertificateLock(base.genesis_hash, certificate)};
+    const std::array<const char*, 7> operations{
+        "GetBranchLock", "GetAcceptedCertificate", "ReserveImpl",
+        "ReserveImpl", "ConsumeIfAbsent", "StoreSignature",
+        "ReconcileDurableAcceptedChainLock"};
+    for (std::size_t operation{0}; operation < operations.size(); ++operation) {
+        BOOST_TEST_CONTEXT("operation=" << operations[operation] << " variant=" << operation) {
+            const fs::path path{m_path_root / fs::u8path("journal_failure_" + std::to_string(operation))};
+            std::vector<std::string> reports;
+            llmq::CPQSignerJournal* observed{nullptr};
+            auto key{base};
+            if (operation == 3) {
+                key.purpose = llmq::PQSignerPurpose::PAYMENT_AUDIT;
+                key.leaf_index = llmq::pq::SCHEDULED_WOTS_PAYMENT_AUDIT_LEAF_BASE;
+            }
+            const auto slot_key{std::make_tuple(uint8_t{0x72},
+                llmq::CPQSignerJournal::DB_FORMAT_VERSION,
+                llmq::PQSignerJournalLeafKey{key})};
+            const HeightAuthorityDatabaseKey authority{
+                .prefix = operation == 0 ? uint8_t{0x73} : uint8_t{0x74},
+                .genesis_hash = key.genesis_hash, .pro_tx_hash = key.pro_tx_hash,
+                .height = key.absolute_height};
+            const bool slot_corruption{operation == 2 || operation == 4 || operation == 5};
+            {
+                llmq::CPQSignerJournal journal{path, 1 << 20, [&](const std::string& reason) {
+                    // Re-entering a journal method proves reporting released its mutex.
+                    BOOST_REQUIRE(observed);
+                    BOOST_CHECK(!observed->IsHealthy());
+                    reports.push_back(reason);
+                }};
+                observed = &journal;
+                BOOST_REQUIRE(journal.IsHealthy());
+                if (operation == 5) {
+                    CheckOutcome(journal.Reserve(key, uint256{41}, lock, std::nullopt), Outcome::RESERVED);
+                }
+                if (slot_corruption) Access::CorruptRow(journal, slot_key);
+                else Access::CorruptRow(journal, authority);
+                switch (operation) {
+                case 0: BOOST_CHECK(!journal.GetBranchLock(key.genesis_hash, key.pro_tx_hash, key.absolute_height)); break;
+                case 1: BOOST_CHECK(!journal.GetAcceptedCertificate(key.genesis_hash, key.pro_tx_hash, key.absolute_height)); break;
+                case 2: CheckOutcome(journal.Reserve(key, uint256{41}, lock, std::nullopt), Outcome::CORRUPT); break;
+                case 3: CheckOutcome(journal.ReservePaymentAudit(key, uint256{41}, lock), Outcome::CORRUPT); break;
+                case 4: BOOST_CHECK(!Access::ConsumeIfAbsent(journal, key)); break;
+                case 5: CheckOutcome(journal.StoreSignature(key, uint256{41}, MakeSignature(1)), Outcome::CORRUPT); break;
+                case 6: CheckOutcome(Access::Reconcile(journal, key.genesis_hash, key.pro_tx_hash, certificate), Outcome::CORRUPT); break;
+                }
+                BOOST_REQUIRE_EQUAL(reports.size(), 1U);
+                BOOST_CHECK(reports.front().find(operations[operation]) != std::string::npos);
+                BOOST_CHECK(reports.front().find("corrupt or incompatible") != std::string::npos);
+                const auto first{reports.front()};
+                BOOST_CHECK(!journal.GetBranchLock(key.genesis_hash, key.pro_tx_hash, key.absolute_height));
+                BOOST_CHECK(!Access::ConsumeIfAbsent(journal, key));
+                CheckOutcome(journal.StoreSignature(key, uint256{41}, MakeSignature(1)), Outcome::CORRUPT);
+                CheckOutcome(Access::Reconcile(journal, key.genesis_hash, key.pro_tx_hash, certificate), Outcome::CORRUPT);
+                BOOST_CHECK_EQUAL(reports.size(), 1U);
+                BOOST_CHECK_EQUAL(reports.front(), first);
+            }
+            // The failed row remains intact; reporting does not recreate the store.
+            CDBWrapper raw{DBParams{.path = path, .cache_bytes = 1 << 20, .obfuscate = false}};
+            uint8_t value{0};
+            BOOST_REQUIRE(slot_corruption ? raw.Read(slot_key, value) : raw.Read(authority, value));
+            BOOST_CHECK_EQUAL(value, 0xff);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(normal_signing_refusals_do_not_report_storage_failure)
+{
+    std::vector<std::string> reports;
+    llmq::CPQSignerJournal journal{m_path_root / "journal_normal_refusals", 1 << 20,
+        [&](const std::string& reason) { reports.push_back(reason); }};
+    const auto key{MakeKey()};
+    const auto lock{MakeBranchLock(key)};
+    using Outcome = llmq::PQSignerJournalOutcome;
+    CheckOutcome(journal.StoreSignature(key, uint256{51}, MakeSignature(1)), Outcome::NOT_RESERVED);
+    CheckOutcome(journal.Reserve(key, uint256{}, lock, std::nullopt), Outcome::INVALID_ARGUMENT);
+    CheckOutcome(journal.Reserve(key, uint256{51}, lock, std::nullopt), Outcome::RESERVED);
+    CheckOutcome(journal.Reserve(key, uint256{51}, lock, lock), Outcome::CONSUMED);
+    CheckOutcome(journal.Reserve(key, uint256{52}, lock, lock), Outcome::CONFLICT);
+    auto other{lock};
+    other.block_hash = uint256{53};
+    CheckOutcome(journal.Reserve(key, uint256{51}, other, lock), Outcome::BRANCH_CONFLICT);
+    CheckOutcome(journal.StoreSignature(key, uint256{51}, MakeSignature(1)), Outcome::STORED);
+    CheckOutcome(journal.Reserve(key, uint256{51}, lock, lock), Outcome::REPLAY);
+    BOOST_CHECK(journal.IsHealthy());
+    BOOST_CHECK(reports.empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

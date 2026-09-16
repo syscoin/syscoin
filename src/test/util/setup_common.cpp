@@ -224,6 +224,9 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, const std::vecto
         .check_block_index = true,
         .notifications = *m_node.notifications,
         .geth_commandline = m_node.args->GetArgs("-gethcommandline"),
+        // SYSCOIN: Startup recovery fixtures use the same timeout as initial attach.
+        .geth_startup_timeout = std::chrono::seconds{std::max<int64_t>(0,
+            m_node.args->GetIntArg("-gethstartuptimeout", DEFAULT_GETH_STARTUP_TIMEOUT))},
     };
     // SYSCOIN BEGIN: Honor explicit block-manager options in native fixtures.
     // const BlockManager::Options blockman_opts{

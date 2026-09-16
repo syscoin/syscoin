@@ -15,8 +15,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace llmq {
@@ -193,7 +195,13 @@ class CPQSignerJournal final
 public:
     static constexpr std::uint32_t DB_FORMAT_VERSION{1};
 
-    explicit CPQSignerJournal(const fs::path& path, std::size_t cache_bytes = 1 << 20);
+    using FailureCallback = std::function<void(const std::string&)>;
+
+    /** Report the first storage failure after releasing the journal mutex.
+     * The owner callback must not throw or destroy this journal.
+     */
+    explicit CPQSignerJournal(const fs::path& path, std::size_t cache_bytes = 1 << 20,
+                              FailureCallback on_failure = {});
 
     CPQSignerJournal(const CPQSignerJournal&) = delete;
     CPQSignerJournal& operator=(const CPQSignerJournal&) = delete;
@@ -265,15 +273,22 @@ private:
         uint256 witness_id;
     };
 
+    class FailureNotifier;
     CDBWrapper m_db;
+    const FailureCallback m_on_failure;
     mutable Mutex m_mutex;
     std::map<PQSignerJournalLeafKey, PendingReservation> m_pending GUARDED_BY(m_mutex);
     std::optional<PQSignerJournalOutcome> m_failure GUARDED_BY(m_mutex);
+    std::string m_failure_reason GUARDED_BY(m_mutex);
+    bool m_failure_reported GUARDED_BY(m_mutex){false};
     std::optional<ReconciliationMemo> m_last_successful_reconciliation
         GUARDED_BY(m_mutex);
     std::size_t m_reconciliation_memo_hits GUARDED_BY(m_mutex){0};
 
     void Initialize() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void Fail(PQSignerJournalOutcome outcome, const char* operation,
+              const std::string& detail = {}) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void NotifyFailure() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     [[nodiscard]] PQSignerJournalResult ReserveImpl(
         const PQSignerJournalKey& key,

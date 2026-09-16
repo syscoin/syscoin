@@ -1441,9 +1441,21 @@ There is no generic post-activation `quorum sign` RPC for child keys. The only
 signing entry points accept fully constructed, internally validated ChainLock
 or payment-audit candidates and their derived leaf.
 
-Journal corruption, an unauthorized leaf, or uncertain rollback status makes
-that member fail closed for the epoch. It can reduce ChainLock liveness but
-never invalidates base-chain blocks.
+For a configured signer, detected journal corruption or a database failure
+reports the journal path and failure reason through the fatal-error UI/log and
+requests node shutdown. An unhealthy journal cannot silently start the signer.
+Failures remain latched for the process; startup checks the schema, and record
+corruption is detected when that record is accessed. Ordinary consumed-leaf,
+branch-conflict, and unauthorized-leaf refusals remain nonfatal. None of these
+local failures invalidates base-chain blocks.
+
+Preserve `llmq/pq-signer-journal` while investigating. A transient storage
+failure can be retried after repairing storage and restarting with the intact
+journal. Deleting it or restoring an older copy loses one-time-key burn history;
+restart quarantine cannot prove safety after an arbitrary rollback or loss.
+If that history cannot be recovered reliably, retire the affected child keys
+and use a fresh seed with an authorized, committed child-root generation.
+Changing the local seed alone does not change frozen on-chain commitments.
 
 The local LevelDB implementation provides atomic synchronous writes and crash
 recovery, while the ordinary datadir lock prevents two node processes from
@@ -1829,7 +1841,10 @@ can open peer header acquisition. Public
 readiness, new local signatures, mining templates, and snapshot activation wait
 until Core reaches the pair and a fresh Geth status confirms it. A conflicting
 applied pair or an attempted connection outside that prefix remains a local
-recovery error, rather than marking its blocks consensus-invalid.
+recovery error, rather than marking its blocks consensus-invalid. Once Core
+reaches the prefix, unavailable status is bounded by `-gethstartuptimeout`
+(default 300 seconds, `0` means unlimited). Expiry stops startup and preserves
+the pairing obligation; time spent acquiring the prefix does not count.
 
 The separate `preseal_snapshot_window <= 1,728` deployment check remains
 intentional. Before the first durable missing-certificate marker exists, all
@@ -2526,7 +2541,7 @@ Expected failures are fail-closed:
 | Fewer than 300 valid roots after resolving a selected recovery roster | Recovery quorum unusable; no replacement, backfill, or lifetime extension |
 | Fewer than 267 shares | That quorum cannot contribute; with exactly 300 valid recovery roots only 33 may be offline |
 | Fewer than three usable active quorums | ChainLock finality and bridge pause; base chain continues |
-| Journal uncertainty/corruption | Affected signer stops for the child epoch |
+| Detected signer-journal corruption/database failure | Configured signer reports a fatal error and shuts down; preserve the journal |
 | Same physical leaf with changed logical metadata or message | Return the exact cached original only; otherwise refuse |
 | Unauthorized or mismapped child leaf | Refuse without reserving; never borrow a global or future child key |
 | Child-root generation 16 reached | Preserve the root for key-only rotation; reject another root rotation or recovery |

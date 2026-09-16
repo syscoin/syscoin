@@ -192,6 +192,22 @@ public:
 };
 class NEVMMiningTestAccess {
 public:
+    static std::optional<SteadyClock::time_point> StartupStatusWaitStarted(
+        const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return chainman.m_nevm_startup_pair
+            ? chainman.m_nevm_startup_pair->status_wait_started : std::nullopt;
+    }
+
+    static void AgeStartupStatusWait(ChainstateManager& chainman,
+                                    std::chrono::seconds elapsed)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        BOOST_REQUIRE(chainman.m_nevm_startup_pair);
+        BOOST_REQUIRE(chainman.m_nevm_startup_pair->status_wait_started);
+        chainman.m_nevm_startup_pair->status_wait_started = SteadyClock::now() - elapsed;
+    }
+
     // SYSCOIN: A pre-send failure and a fully published healthy connection
     // must leave no latent request for the scheduler to activate or cancel.
     static bool HasPendingRecoveryContext(const Chainstate& chainstate)
@@ -894,6 +910,11 @@ struct StartupNEVMRecoverySetup : DeferredNEVMReplaySetup {
         BOOST_CHECK(recovery_state.IsValid());
         CheckCompetingStartupPairCompleted(branches);
     }
+};
+
+struct UnlimitedNEVMStartupRecoverySetup : StartupNEVMRecoverySetup {
+    UnlimitedNEVMStartupRecoverySetup()
+        : StartupNEVMRecoverySetup{true, false, true, {"-gethstartuptimeout=0"}} {}
 };
 
 struct ManagedNEVMShutdownSetup : StartupNEVMRecoverySetup {
@@ -15967,6 +15988,88 @@ BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_requires_fresh_exact_completion,
     }
     BOOST_CHECK(!chainman.IsInitialBlockDownload());
     BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 3U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_status_timeout_retains_recovery_obligation,
+                        StartupNEVMRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto target{MineNEVMBlock()};
+    RewindCore(100);
+    std::string error;
+    using Access = node::test::NEVMMiningTestAccess;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(1, target->GetHash(), error));
+        // Header/block acquisition has no status deadline and performs no probe.
+        BOOST_REQUIRE(chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(!Access::StartupStatusWaitStarted(chainman));
+        BOOST_CHECK_EQUAL(nevm->block_info_queries, 0U);
+    }
+    BOOST_CHECK_EQUAL(chainman.m_options.geth_startup_timeout.count(), 300);
+    nevm->block_info_error = "startup-test-status-unavailable";
+    BlockValidationState pending_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(pending_state));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip()->GetBlockHash() == target->GetHash());
+        const auto first_attempt{Access::StartupStatusWaitStarted(chainman)};
+        BOOST_REQUIRE(first_attempt);
+        BOOST_REQUIRE(chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_REQUIRE(chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(Access::StartupStatusWaitStarted(chainman) == first_attempt);
+        Access::AgeStartupStatusWait(chainman,
+            chainman.m_options.geth_startup_timeout + std::chrono::seconds{1});
+    }
+    // Exercise the real import-worker retry path, not just the timer predicate.
+    BlockValidationState expired_state;
+    BOOST_CHECK(!chainman.RetryNEVMStartupPair(expired_state));
+    BOOST_CHECK(expired_state.IsError());
+    BOOST_CHECK(!expired_state.IsInvalid());
+    BOOST_CHECK(expired_state.ToString().find("Timed out waiting for Geth status") != std::string::npos);
+    BOOST_CHECK(expired_state.ToString().find(nevm->block_info_error) != std::string::npos);
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == target->GetHash());
+        BOOST_CHECK((chainman.ActiveTip()->nStatus & BLOCK_FAILED_MASK) == 0);
+        BOOST_CHECK(!chainman.PrepareNEVMBlockProduction());
+    }
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_zero_timeout_waits_for_exact_status,
+                        UnlimitedNEVMStartupRecoverySetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto target{MineNEVMBlock()};
+    RewindCore(100);
+    std::string error;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.InitializeNEVMStartupPair(1, target->GetHash(), error));
+    }
+    BOOST_CHECK_EQUAL(chainman.m_options.geth_startup_timeout.count(), 0);
+    nevm->block_info_error = "startup-test-status-unavailable";
+    BlockValidationState pending_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(pending_state));
+    {
+        LOCK(::cs_main);
+        node::test::NEVMMiningTestAccess::AgeStartupStatusWait(
+            chainman, std::chrono::hours{24});
+    }
+    BlockValidationState unlimited_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(unlimited_state));
+    BOOST_CHECK(unlimited_state.IsValid());
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    nevm->block_info_error.clear();
+    BlockValidationState recovered_state;
+    BOOST_REQUIRE(chainman.RetryNEVMStartupPair(recovered_state));
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(!chainman.IsInitialBlockDownload());
+    BOOST_CHECK_EQUAL(nevm->connected_blocks.size(), 1U);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_startup_pair_inside_known_suffix_resumes_delivery,

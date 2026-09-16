@@ -169,7 +169,6 @@ static constexpr bool DEFAULT_I2P_ACCEPT_INCOMING{true};
 // SYSCOIN
 extern unsigned int fRPCSerialVersion;
 static constexpr bool DEFAULT_STOPAFTERBLOCKIMPORT{false};
-static constexpr int64_t DEFAULT_GETH_STARTUP_TIMEOUT{300};
 static constexpr int64_t DEFAULT_GETH_BOOTSTRAP_STARTUP_TIMEOUT{7200};
 static constexpr int64_t DEFAULT_GETH_STARTUP_RETRY_INTERVAL_MS{2000};
 static constexpr int64_t DEFAULT_GETH_STARTUP_LOG_INTERVAL{30};
@@ -665,7 +664,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-txindex", strprintf("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)", DEFAULT_TXINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     // SYSCOIN
     argsman.AddArg("-gethcommandline=<port>", strprintf("Geth command line parameters (default: %s)", ""), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    argsman.AddArg("-gethstartuptimeout=<n>", strprintf("Maximum seconds to wait for sysgeth to become ready during startup before NEVM is marked offline (0 = wait indefinitely, default: %d)", DEFAULT_GETH_STARTUP_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-gethstartuptimeout=<n>", strprintf("Maximum seconds to wait for sysgeth readiness on initial attach or for its status after Core recovers a saved startup prefix. Initial attach failure marks NEVM offline; unresolved prefix recovery stops startup (0 = wait indefinitely, default: %d)", DEFAULT_GETH_STARTUP_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-gethbootstrapstartuptimeout=<n>", strprintf("Maximum seconds to wait for sysgeth to become ready while state bootstrap is active (0 = wait indefinitely, default: %d)", DEFAULT_GETH_BOOTSTRAP_STARTUP_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-sporkaddr=<hex>", strprintf("Override spork address. Only useful for regtest. Using this on mainnet or testnet will ban you."), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mnconf=<file>", strprintf("Specify masternode configuration file (default: %s)", "masternode.conf"), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -2628,8 +2627,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             UninterruptibleSleep(std::chrono::seconds{1});
             BlockValidationState state;
             if (!chainman.RetryNEVMStartupPair(state)) {
-                chainman.GetNotifications().fatalError(strprintf(
-                    "Failed to recover NEVM startup pair (%s)", state.ToString()));
+                const auto message{strprintf(
+                    "Failed to recover NEVM startup pair (%s)", state.ToString())};
+                chainman.GetNotifications().fatalError(message, Untranslated(message));
                 return;
             }
         }

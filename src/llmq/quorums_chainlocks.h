@@ -1948,6 +1948,7 @@ private:
     [[nodiscard]] bool IsChainLockVerificationAvailable() const
         EXCLUSIVE_LOCKS_REQUIRED(!m_persisted_mutex,
                                  !m_lookup_mutex);
+    void FailSignerJournal(const fs::path& path, const std::string& reason);
     [[nodiscard]] bool ReconcileSignerJournal(const uint256& pro_tx_hash)
         EXCLUSIVE_LOCKS_REQUIRED(!m_signer_reconcile_mutex);
     [[nodiscard]] bool ReconcileSignerJournal(
@@ -3028,6 +3029,7 @@ private:
     // m_signer_reconcile_mutex across presence, access and owner replacement;
     // Stop takes it only after joining, so reconciliation can finish first.
     std::unique_ptr<CPQSignerJournal> m_signer_journal;
+    std::atomic<bool> m_signer_journal_failed{false};
     Mutex m_signer_reconcile_mutex;
     Mutex m_share_signing_mutex;
     uint256 m_signer_startup_pro_tx_hash GUARDED_BY(m_share_signing_mutex);

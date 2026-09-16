@@ -974,6 +974,11 @@ public:
         return handler.m_lifecycle_mutex;
     }
 
+    static bool SignerJournalFailed(const CChainLocksHandler& handler)
+    {
+        return handler.m_signer_journal_failed.load();
+    }
+
     static CPQSignerJournal* SignerJournal(CChainLocksHandler& handler)
     {
         // Only inspect or use this pointer during quiescent test phases.
@@ -9713,6 +9718,163 @@ BOOST_FIXTURE_TEST_CASE(
                 chainman, candidate, wrong_anchor) ==
             llmq::BTCCCatchupRangeStatus::DEFINITIVE_INVALID);
     }
+}
+
+struct SignerJournalFailureSetup : TestingSetup {
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    enum class Fault { OPEN, SCHEMA, BRANCH_ROW, RECONCILE, NON_SIGNER };
+    const bool original_masternode{fMasternodeMode};
+    const int original_exit_status{m_node.exit_status.load()};
+    const bool original_shutdown_policy{m_node.notifications->m_shutdown_on_fatal_error};
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+
+    SignerJournalFailureSetup() : TestingSetup{ChainType::REGTEST} {}
+    ~SignerJournalFailureSetup()
+    {
+        if (handler) handler->Stop();
+        SyncWithValidationInterfaceQueue();
+        handler.reset();
+        fMasternodeMode = original_masternode;
+        m_node.exit_status.store(original_exit_status);
+        m_node.notifications->m_shutdown_on_fatal_error = original_shutdown_policy;
+        AbortShutdown();
+    }
+
+    void Check(Fault fault)
+    {
+        auto& chainman{*m_node.chainman};
+        const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+        const uint256 identity{NonNullHash(1'209'001)};
+        const auto path{gArgs.GetDataDirNet() / "llmq/pq-signer-journal"};
+        {
+            auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+            struct RestoreConsensus {
+                Consensus::Params& target;
+                Consensus::Params original;
+                ~RestoreConsensus() { target = original; }
+            } restore{consensus, consensus};
+            consensus = ValidConsensus();
+            consensus.hashGenesisBlock = genesis;
+            LOCK(::cs_main);
+            handler = std::make_unique<llmq::CChainLocksHandler>(
+                *m_node.connman, *m_node.peerman, chainman);
+        }
+        BOOST_REQUIRE(Access::Config(*handler));
+        BOOST_REQUIRE(Access::QuorumConfig(*handler));
+        const auto vote_key{std::make_tuple(uint8_t{0x73},
+            llmq::CPQSignerJournal::DB_FORMAT_VERSION, genesis, identity, int32_t{100})};
+        if (fault == Fault::OPEN) {
+            fs::create_directories(path.parent_path());
+            std::ofstream file{path};
+            file << "preserve journal obstruction";
+            file.close();
+            BOOST_REQUIRE(file.good());
+        } else {
+            if (fault == Fault::BRANCH_ROW || fault == Fault::RECONCILE) {
+                llmq::CPQSignerJournal healthy{path};
+                BOOST_REQUIRE(healthy.IsHealthy());
+            }
+            CDBWrapper raw{DBParams{.path = path, .cache_bytes = 1 << 20, .obfuscate = false}};
+            BOOST_REQUIRE(raw.Write(uint8_t{0x01}, uint32_t{7}, /*fSync=*/true));
+            if (fault == Fault::SCHEMA || fault == Fault::NON_SIGNER) {
+                BOOST_REQUIRE(raw.Write(uint8_t{0x70}, uint32_t{999}, /*fSync=*/true));
+            } else if (fault == Fault::BRANCH_ROW) {
+                BOOST_REQUIRE(raw.Write(vote_key, uint8_t{0xff}, /*fSync=*/true));
+            }
+        }
+        fMasternodeMode = fault != Fault::NON_SIGNER;
+        m_node.notifications->m_shutdown_on_fatal_error = true;
+        std::atomic_size_t fatal_reports{0};
+        DebugLogHelper log{"*** PQ signer journal failure at ", [&](const std::string* line) {
+            if (line) {
+                ++fatal_reports;
+                BOOST_CHECK(line->find(fs::PathToString(path)) != std::string::npos);
+                BOOST_CHECK(line->find(fault == Fault::OPEN ? "open failed:" :
+                    fault == Fault::SCHEMA ? "Initialize:" :
+                    fault == Fault::BRANCH_ROW ? "GetBranchLock:" :
+                    "ReconcileDurableAcceptedChainLock:") != std::string::npos);
+            }
+            return false;
+        }};
+        handler->Start();
+        if (fault == Fault::NON_SIGNER) {
+            BOOST_CHECK(!Access::SignerJournal(*handler));
+            BOOST_CHECK(!Access::SignerJournalFailed(*handler));
+            BOOST_CHECK(!ShutdownRequested());
+            BOOST_CHECK_EQUAL(m_node.exit_status.load(), original_exit_status);
+        } else {
+            if (fault == Fault::BRANCH_ROW || fault == Fault::RECONCILE) {
+                auto* journal{Access::SignerJournal(*handler)};
+                BOOST_REQUIRE(journal && journal->IsHealthy());
+                BOOST_CHECK(!ShutdownRequested());
+                if (fault == Fault::BRANCH_ROW) {
+                    // No startup scan: the existing bad row fails at its actual read.
+                    BOOST_CHECK(!journal->GetBranchLock(genesis, identity, 100));
+                    BOOST_CHECK(!journal->IsHealthy());
+                    BOOST_CHECK(!journal->GetBranchLock(genesis, identity, 100));
+                } else {
+                    const auto first{MakeCatchupChainLock(865, 864, NonNullHash(864), 1'209'010)};
+                    const llmq::pq::FinalChainLockRecordMetadata metadata{
+                        first.GetLogicalId(genesis), first.GetWitnessId(genesis), first.statement};
+                    BOOST_REQUIRE(Access::ReconcileSignerJournal(*handler, identity, metadata));
+                    auto conflicting{metadata};
+                    conflicting.witness_id = NonNullHash(1'209'011);
+                    BOOST_CHECK(!Access::ReconcileSignerJournal(*handler, identity, conflicting));
+                    BOOST_CHECK(!Access::ReconcileSignerJournal(*handler, identity, conflicting));
+                }
+            }
+            BOOST_CHECK(Access::SignerJournalFailed(*handler));
+            BOOST_CHECK(!Access::HasShareAdmission(*handler));
+            BOOST_CHECK(ShutdownRequested());
+            BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
+            handler->Start();
+            BOOST_CHECK_EQUAL(fatal_reports.load(), 1U);
+        }
+        handler->Stop();
+        handler.reset();
+        if (fault == Fault::OPEN) {
+            std::ifstream file{path};
+            std::string contents;
+            std::getline(file, contents);
+            BOOST_CHECK_EQUAL(contents, "preserve journal obstruction");
+        } else {
+            CDBWrapper raw{DBParams{.path = path, .cache_bytes = 1 << 20, .obfuscate = false}};
+            uint32_t sentinel{0};
+            BOOST_REQUIRE(raw.Read(uint8_t{0x01}, sentinel));
+            BOOST_CHECK_EQUAL(sentinel, 7U);
+            if (fault == Fault::BRANCH_ROW) {
+                uint8_t malformed{0};
+                BOOST_REQUIRE(raw.Read(vote_key, malformed));
+                BOOST_CHECK_EQUAL(malformed, 0xff);
+            }
+        }
+        BOOST_CHECK_EQUAL(fatal_reports.load(), fault == Fault::NON_SIGNER ? 0U : 1U);
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(signer_journal_open_failure_requests_shutdown, SignerJournalFailureSetup)
+{
+    Check(Fault::OPEN);
+}
+
+BOOST_FIXTURE_TEST_CASE(signer_journal_schema_failure_requests_shutdown, SignerJournalFailureSetup)
+{
+    Check(Fault::SCHEMA);
+}
+
+BOOST_FIXTURE_TEST_CASE(signer_journal_runtime_read_failure_requests_shutdown, SignerJournalFailureSetup)
+{
+    Check(Fault::BRANCH_ROW);
+}
+
+BOOST_FIXTURE_TEST_CASE(signer_journal_runtime_reconciliation_failure_requests_shutdown, SignerJournalFailureSetup)
+{
+    Check(Fault::RECONCILE);
+}
+
+BOOST_FIXTURE_TEST_CASE(non_signing_node_does_not_open_signer_journal, SignerJournalFailureSetup)
+{
+    Check(Fault::NON_SIGNER);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

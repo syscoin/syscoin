@@ -1324,6 +1324,7 @@ private:
         bool bForBlock = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     friend Chainstate;
     friend class llmq::test::PQHistoryReauthenticationTestAccess;
+    friend class node::test::NEVMMiningTestAccess;
 
     /** Most recent headers presync progress update, for rate-limiting. */
     std::chrono::time_point<std::chrono::steady_clock> m_last_presync_update GUARDED_BY(::cs_main) {};
@@ -1346,6 +1347,8 @@ private:
     struct NEVMStartupPair {
         int32_t height;
         uint256 block_hash;
+        // Header/block acquisition does not consume the status timeout.
+        std::optional<SteadyClock::time_point> status_wait_started{};
     };
     std::optional<NEVMStartupPair> m_nevm_startup_pair GUARDED_BY(::cs_main);
     std::atomic<bool> m_nevm_startup_pair_pending{false};
@@ -1733,7 +1736,7 @@ public:
     [[nodiscard]] bool CheckNEVMStartupConnect(
         const CBlockIndex& index, std::string& error) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    /** Re-read Geth after local recovery; unavailable status leaves the pair pending. */
+    /** Re-read Geth after local recovery; unavailable status waits up to the configured timeout. */
     [[nodiscard]] bool MaybeCompleteNEVMStartupPair(std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Retry activation and publish readiness even if no new block arrives. */

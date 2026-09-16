@@ -34,6 +34,7 @@
 #include <util/signalinterrupt.h>
 #include <util/thread.h>
 #include <util/time.h>
+#include <util/translation.h>
 #include <validation.h>
 #include <version.h>
 
@@ -3353,7 +3354,7 @@ void CChainLocksHandler::Start()
 {
     {
         LOCK(m_lifecycle_mutex);
-        if (m_started) return;
+        if (m_started || m_signer_journal_failed.load()) return;
         m_share_admission_gate.SetReady(false);
         (void)m_auxiliary_history_gc_auth_gate.Start([this] {
             return RevokeAuxiliaryHistoryGCAuthorization();
@@ -3365,15 +3366,18 @@ void CChainLocksHandler::Start()
         }
         if (fMasternodeMode && m_config && m_quorum_build_config) {
             LOCK(m_signer_reconcile_mutex);
+            const fs::path path{gArgs.GetDataDirNet() / "llmq/pq-signer-journal"};
             try {
                 m_signer_journal = std::make_unique<CPQSignerJournal>(
-                    gArgs.GetDataDirNet() / "llmq/pq-signer-journal");
+                    path, 1 << 20, [this, path](const std::string& reason) {
+                        FailSignerJournal(path, reason);
+                    });
             } catch (const std::exception& exception) {
-                LogPrintf("CChainLocksHandler::%s -- unable to open the "
-                          "burn-before-sign journal: %s\n",
-                          __func__, exception.what());
+                FailSignerJournal(path, std::string{"open failed: "} + exception.what());
                 m_signer_journal.reset();
+                return;
             }
+            if (!m_signer_journal->IsHealthy()) return;
         }
         m_started = true;
         CheckActiveState();
@@ -3703,6 +3707,20 @@ bool CChainLocksHandler::IsChainLockVerificationAvailable() const
     return ShouldVerifyChainLockCertificate(
         configured_and_healthy, IsPersistedChainLockPending(),
         m_persistence_failed.load());
+}
+
+void CChainLocksHandler::FailSignerJournal(const fs::path& path, const std::string& reason)
+{
+    // The journal invokes this outside its own mutex, but callers can still
+    // hold lifecycle/signing locks. Request shutdown without joining workers
+    // or acquiring another handler lock. Never erase or recreate this state.
+    if (m_signer_journal_failed.exchange(true)) return;
+    m_share_admission_gate.Fail();
+    const std::string message{strprintf(
+        "PQ signer journal failure at %s: %s. Signing has stopped and the node "
+        "must shut down. Preserve this journal; do not delete or restore it "
+        "behind its signing history.", fs::PathToString(path), reason)};
+    m_chainman.GetNotifications().fatalError(message, Untranslated(message));
 }
 
 bool CChainLocksHandler::ReconcileSignerJournal(const uint256& pro_tx_hash)

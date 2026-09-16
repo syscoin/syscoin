@@ -139,6 +139,19 @@ the guard armed. The recovery scheduler verifies the resulting active prefix
 before a later mining request can proceed. Successful block extensions do not
 add a preflight or recovery probe.
 
+## Startup status timeout
+
+Ordinary nodes can continue with NEVM offline when managed Geth fails to start
+or misses its initial attach timeout; masternodes require an NEVM connection.
+An already accepted Geth startup pair ahead of Core is different: Core must
+recover that exact prefix and obtain a fresh matching engine status before
+publishing readiness. Missing headers or blocks do not consume a timeout.
+Once Core reaches the prefix, unavailable engine status is bounded by
+`-gethstartuptimeout` (default 300 seconds; `0` explicitly waits indefinitely).
+Expiry reports a fatal startup error and retains the recovery obligation;
+it never marks the prefix invalid or silently switches it to offline mode.
+Restore Geth availability and restart to retry recovery.
+
 ## Delayed buffered rejection
 
 A consensus `invalid` rejection received during live connect, predecessor replay or deferred BTCC

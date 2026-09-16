@@ -12,6 +12,7 @@
 #include <exception>
 #include <string_view>
 #include <tuple>
+#include <utility>
 
 namespace llmq {
 namespace {
@@ -266,40 +267,76 @@ bool PQSignerJournalLeafKey::operator<(
                     other.child_key_hash, other.leaf_index);
 }
 
-CPQSignerJournal::CPQSignerJournal(const fs::path& path, std::size_t cache_bytes) :
+// Constructed before each operation's lock, so the owner can request shutdown
+// without holding the journal mutex or refunding any uncertain reservation.
+class CPQSignerJournal::FailureNotifier {
+    CPQSignerJournal& m_journal;
+public:
+    explicit FailureNotifier(CPQSignerJournal& journal) : m_journal{journal} {}
+    ~FailureNotifier() { m_journal.NotifyFailure(); }
+};
+
+void CPQSignerJournal::Fail(PQSignerJournalOutcome outcome, const char* operation,
+                           const std::string& detail)
+{
+    AssertLockHeld(m_mutex);
+    if (m_failure) return;
+    m_failure = outcome;
+    m_failure_reason = std::string{operation} + ": " +
+        (outcome == PQSignerJournalOutcome::CORRUPT
+            ? "corrupt or incompatible journal state" : "database operation failed");
+    if (!detail.empty()) m_failure_reason += ": " + detail;
+}
+
+void CPQSignerJournal::NotifyFailure()
+{
+    std::string reason;
+    {
+        LOCK(m_mutex);
+        if (!m_failure || m_failure_reported || !m_on_failure) return;
+        m_failure_reported = true;
+        reason = m_failure_reason;
+    }
+    m_on_failure(reason);
+}
+
+CPQSignerJournal::CPQSignerJournal(const fs::path& path, std::size_t cache_bytes,
+                                 FailureCallback on_failure) :
     m_db{DBParams{
         .path = path,
         .cache_bytes = cache_bytes,
         .memory_only = false,
         .wipe_data = false,
-        .obfuscate = false}}
+        .obfuscate = false}},
+    m_on_failure{std::move(on_failure)}
 {
     Initialize();
 }
 
 void CPQSignerJournal::Initialize()
 {
+    FailureNotifier notify{*this};
     LOCK(m_mutex);
     try {
         if (!m_db.Exists(DB_SCHEMA_KEY)) {
             // A schema-less nonempty store is corrupt or partially restored.
             // Adopting it as empty would refund unknown signatures.
             if (!m_db.IsEmpty()) {
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 return;
             }
             if (!m_db.Write(DB_SCHEMA_KEY, SchemaValue{}, /*fSync=*/true)) {
-                m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+                Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__);
             }
             return;
         }
 
         SchemaValue schema;
         if (!m_db.Read(DB_SCHEMA_KEY, schema) || schema != SchemaValue{}) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
+            Fail(PQSignerJournalOutcome::CORRUPT, __func__);
         }
-    } catch (const std::exception&) {
-        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+    } catch (const std::exception& exception) {
+        Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__, exception.what());
     }
 }
 
@@ -329,6 +366,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
     const std::optional<PQSignerBranchLock>& expected_vote,
     bool require_accepted_certificate)
 {
+    FailureNotifier notify{*this};
     LOCK(m_mutex);
     if (m_failure) return Result(*m_failure);
     if (!IsValidKey(key) || message_hash.IsNull() ||
@@ -350,7 +388,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
         if (slot_exists) {
             if (!m_db.Read(slot_key, slot) || !IsValidSlot(slot) ||
                 PQSignerJournalLeafKey{slot.logical_key} != leaf_key) {
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 m_pending.clear();
                 return Result(*m_failure);
             }
@@ -376,7 +414,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
                 if (slot_exists) {
                     // A normal audit slot could only have been reserved after
                     // this row existed. Missing authority is durable damage.
-                    m_failure = PQSignerJournalOutcome::CORRUPT;
+                    Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                     m_pending.clear();
                     return Result(*m_failure);
                 }
@@ -385,7 +423,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
             if (!m_db.Read(certificate_key, durable_certificate) ||
                 !IsValidAcceptedCertificate(durable_certificate) ||
                 durable_certificate.lock.height != key.absolute_height) {
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 m_pending.clear();
                 return Result(*m_failure);
             }
@@ -397,7 +435,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
             if (!vote_exists && slot_exists) {
                 // The first normal ChainLock slot and vote share one atomic
                 // batch. Only the startup tombstone handled above may lack it.
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 m_pending.clear();
                 return Result(*m_failure);
             }
@@ -405,7 +443,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
                 (!m_db.Read(vote_key, durable_branch) ||
                  !IsValidBranchLock(durable_branch) ||
                  durable_branch.lock.height != key.absolute_height)) {
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 m_pending.clear();
                 return Result(*m_failure);
             }
@@ -421,7 +459,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
                             durable_certificate) ||
                         durable_certificate.lock.height !=
                             key.absolute_height) {
-                        m_failure = PQSignerJournalOutcome::CORRUPT;
+                        Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                         m_pending.clear();
                         return Result(*m_failure);
                     }
@@ -453,7 +491,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
         }
 
         if (m_pending.find(leaf_key) != m_pending.end()) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
+            Fail(PQSignerJournalOutcome::CORRUPT, __func__);
             m_pending.clear();
             return Result(*m_failure);
         }
@@ -471,17 +509,17 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
             batch.Write(vote_key, BranchLockValue{.lock = statement_lock});
         }
         if (!m_db.WriteBatch(batch, /*fSync=*/true)) {
-            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__);
             m_pending.clear();
             return Result(*m_failure);
         }
 
         m_pending.emplace(leaf_key, PendingReservation{message_hash});
         return Result(PQSignerJournalOutcome::RESERVED);
-    } catch (const std::exception&) {
+    } catch (const std::exception& exception) {
         // A failed synchronous write has uncertain durability. Clearing the
         // live ownership prevents this process from attempting the signer.
-        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+        Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__, exception.what());
         m_pending.clear();
         return Result(*m_failure);
     }
@@ -490,6 +528,7 @@ PQSignerJournalResult CPQSignerJournal::ReserveImpl(
 bool CPQSignerJournal::ConsumeIfAbsent(
     const std::vector<PQSignerJournalKey>& keys)
 {
+    FailureNotifier notify{*this};
     LOCK(m_mutex);
     if (m_failure) return false;
 
@@ -510,14 +549,14 @@ bool CPQSignerJournal::ConsumeIfAbsent(
                 SlotValue slot;
                 if (!m_db.Read(slot_key, slot) || !IsValidSlot(slot) ||
                     PQSignerJournalLeafKey{slot.logical_key} != leaf_key) {
-                    m_failure = PQSignerJournalOutcome::CORRUPT;
+                    Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                     m_pending.clear();
                     return false;
                 }
                 continue;
             }
             if (m_pending.find(leaf_key) != m_pending.end()) {
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 m_pending.clear();
                 return false;
             }
@@ -529,13 +568,13 @@ bool CPQSignerJournal::ConsumeIfAbsent(
             has_writes = true;
         }
         if (has_writes && !m_db.WriteBatch(batch, /*fSync=*/true)) {
-            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__);
             m_pending.clear();
             return false;
         }
         return true;
-    } catch (const std::exception&) {
-        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+    } catch (const std::exception& exception) {
+        Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__, exception.what());
         m_pending.clear();
         return false;
     }
@@ -546,6 +585,7 @@ std::optional<PQSignerBranchLock> CPQSignerJournal::GetBranchLock(
     const uint256& pro_tx_hash,
     std::int32_t height)
 {
+    FailureNotifier notify{*this};
     LOCK(m_mutex);
     if (m_failure ||
         !IsValidBranchIdentity(genesis_hash, pro_tx_hash, height)) {
@@ -557,13 +597,13 @@ std::optional<PQSignerBranchLock> CPQSignerJournal::GetBranchLock(
         BranchLockValue value;
         if (!m_db.Read(key, value) || !IsValidBranchLock(value) ||
             value.lock.height != height) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
+            Fail(PQSignerJournalOutcome::CORRUPT, __func__);
             m_pending.clear();
             return std::nullopt;
         }
         return value.lock;
-    } catch (const std::exception&) {
-        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+    } catch (const std::exception& exception) {
+        Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__, exception.what());
         m_pending.clear();
         return std::nullopt;
     }
@@ -574,6 +614,7 @@ std::optional<PQSignerBranchLock> CPQSignerJournal::GetAcceptedCertificate(
     const uint256& pro_tx_hash,
     std::int32_t height)
 {
+    FailureNotifier notify{*this};
     LOCK(m_mutex);
     if (m_failure ||
         !IsValidBranchIdentity(genesis_hash, pro_tx_hash, height)) {
@@ -586,13 +627,13 @@ std::optional<PQSignerBranchLock> CPQSignerJournal::GetAcceptedCertificate(
         AcceptedCertificateValue value;
         if (!m_db.Read(key, value) || !IsValidAcceptedCertificate(value) ||
             value.lock.height != height) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
+            Fail(PQSignerJournalOutcome::CORRUPT, __func__);
             m_pending.clear();
             return std::nullopt;
         }
         return value.lock;
-    } catch (const std::exception&) {
-        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+    } catch (const std::exception& exception) {
+        Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__, exception.what());
         m_pending.clear();
         return std::nullopt;
     }
@@ -603,6 +644,7 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
     const uint256& pro_tx_hash,
     const pq::FinalChainLockRecordMetadata& chainlock)
 {
+    FailureNotifier notify{*this};
     LOCK(m_mutex);
     if (m_failure) return Result(*m_failure);
     if (!IsValidBranchIdentity(genesis_hash, pro_tx_hash,
@@ -643,7 +685,7 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
         if (certificate_exists &&
             (!m_db.Read(certificate_key, durable_certificate) ||
              !IsValidAcceptedCertificate(durable_certificate))) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
+            Fail(PQSignerJournalOutcome::CORRUPT, __func__);
             m_pending.clear();
             return Result(*m_failure);
         }
@@ -653,7 +695,7 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
                 // One height has one durable winner. A conflicting restored
                 // record is not authority to change either that winner or an
                 // independent local vote at the same height.
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 m_pending.clear();
                 return Result(*m_failure);
             }
@@ -664,7 +706,7 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
         }
 
         if (!m_db.Write(certificate_key, accepted, /*fSync=*/true)) {
-            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__);
             m_pending.clear();
             return Result(*m_failure);
         }
@@ -672,8 +714,8 @@ PQSignerJournalResult CPQSignerJournal::ReconcileDurableAcceptedChainLock(
             genesis_hash, pro_tx_hash, accepted.lock,
             accepted.logical_id, accepted.witness_id};
         return Result(PQSignerJournalOutcome::CERTIFICATE_RECORDED);
-    } catch (const std::exception&) {
-        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+    } catch (const std::exception& exception) {
+        Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__, exception.what());
         m_pending.clear();
         return Result(*m_failure);
     }
@@ -684,6 +726,7 @@ PQSignerJournalResult CPQSignerJournal::StoreSignature(
     const uint256& message_hash,
     const PQChildSignature& signature)
 {
+    FailureNotifier notify{*this};
     LOCK(m_mutex);
     if (m_failure) return Result(*m_failure);
     if (!IsValidKey(key) || message_hash.IsNull()) {
@@ -697,7 +740,7 @@ PQSignerJournalResult CPQSignerJournal::StoreSignature(
         const bool slot_exists = m_db.Exists(slot_key);
         if (!slot_exists) {
             if (m_pending.find(leaf_key) != m_pending.end()) {
-                m_failure = PQSignerJournalOutcome::CORRUPT;
+                Fail(PQSignerJournalOutcome::CORRUPT, __func__);
                 m_pending.clear();
                 return Result(*m_failure);
             }
@@ -705,7 +748,7 @@ PQSignerJournalResult CPQSignerJournal::StoreSignature(
         }
         if (!m_db.Read(slot_key, slot) || !IsValidSlot(slot) ||
             PQSignerJournalLeafKey{slot.logical_key} != leaf_key) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
+            Fail(PQSignerJournalOutcome::CORRUPT, __func__);
             m_pending.clear();
             return Result(*m_failure);
         }
@@ -726,7 +769,7 @@ PQSignerJournalResult CPQSignerJournal::StoreSignature(
             return Result(PQSignerJournalOutcome::CONSUMED);
         }
         if (pending->second.message_hash != message_hash) {
-            m_failure = PQSignerJournalOutcome::CORRUPT;
+            Fail(PQSignerJournalOutcome::CORRUPT, __func__);
             m_pending.clear();
             return Result(*m_failure);
         }
@@ -734,15 +777,15 @@ PQSignerJournalResult CPQSignerJournal::StoreSignature(
         slot.state = SLOT_SIGNED;
         slot.signature = signature;
         if (!m_db.Write(slot_key, slot, /*fSync=*/true)) {
-            m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+            Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__);
             m_pending.clear();
             return Result(*m_failure);
         }
 
         m_pending.erase(pending);
         return Result(PQSignerJournalOutcome::STORED);
-    } catch (const std::exception&) {
-        m_failure = PQSignerJournalOutcome::DATABASE_ERROR;
+    } catch (const std::exception& exception) {
+        Fail(PQSignerJournalOutcome::DATABASE_ERROR, __func__, exception.what());
         m_pending.clear();
         return Result(*m_failure);
     }

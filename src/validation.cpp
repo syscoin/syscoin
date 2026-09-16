@@ -3609,9 +3609,12 @@ bool ChainstateManager::MaybeCompleteNEVMStartupPair(std::string& error)
     AssertLockHeld(cs_main);
     error.clear();
     if (!m_nevm_startup_pair) return true;
-    const auto& pair{*m_nevm_startup_pair};
+    auto& pair{*m_nevm_startup_pair};
     const CBlockIndex* tip{ActiveTip()};
-    if (tip == nullptr || tip->nHeight < pair.height) return true;
+    if (tip == nullptr || tip->nHeight < pair.height) {
+        pair.status_wait_started.reset();
+        return true;
+    }
     const CBlockIndex* applied{tip->GetAncestor(pair.height)};
     if (applied == nullptr || applied->GetBlockHash() != pair.block_hash) {
         error = "Recovered Core tip does not contain Geth's startup pair";
@@ -3622,8 +3625,20 @@ bool ChainstateManager::MaybeCompleteNEVMStartupPair(std::string& error)
     std::string status_error;
     // cs_main excludes branch changes across this synchronous status snapshot.
     // Callers have already published the real connected tip, not fJustCheck.
+    if (!pair.status_wait_started) pair.status_wait_started = SteadyClock::now();
     GetMainSignals().NotifyGetNEVMBlockInfo(count, syscoin_hash, status_error);
     if (!status_error.empty()) {
+        if (m_options.geth_startup_timeout > std::chrono::seconds::zero() &&
+            std::chrono::duration_cast<std::chrono::seconds>(
+                SteadyClock::now() - *pair.status_wait_started) >= m_options.geth_startup_timeout) {
+            // Preserve the known pair and its readiness gates. Dropping to
+            // offline mode would abandon an unresolved recovery obligation.
+            error = strprintf("Timed out waiting for Geth status after Core recovered "
+                              "startup pair %s at height %d (-gethstartuptimeout=%d): %s",
+                              pair.block_hash.ToString(), pair.height,
+                              m_options.geth_startup_timeout.count(), status_error);
+            return false;
+        }
         LogPrintf("Geth's applied pair is unavailable after Core recovery; "
                   "startup remains pending: %s\n", status_error);
         return true;
