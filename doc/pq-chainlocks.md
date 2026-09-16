@@ -1617,6 +1617,17 @@ waiting its required Bitcoin and/or Syscoin confirmation depth. Reorganization
 handling remains explicit consumer policy rather than a claim that one BTCC is
 immune to Bitcoin reorgs.
 
+If the Bitcoin backend explicitly reports that the previous certified hash is
+unknown, a fresh active-chain candidate may advance without resolving that old
+header. The historical checkpoint remains recorded. This exception applies only
+to the previous hash, not the new candidate, a payment-audit anchor, or a
+roster-beacon anchor; RPC failures and malformed responses still stop signing.
+Recovery retains all candidate and stable-tip checks and caps lag at 36 blocks,
+or the exact depth required by a larger configured confirmation count. A
+stricter configured lag still applies.
+When the previous header is known, the ordinary Bitcoin-height continuity and
+reorg checks remain unchanged.
+
 ### 10.2 Authenticated fixed carrier and NEVM replay
 
 A Bitcoin cursor is not sent to NEVM merely because a miner placed `BTCPREV` in

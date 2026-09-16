@@ -15492,6 +15492,12 @@ bool CChainLocksHandler::CheckBTCHeaderSigningPolicy(
                  "cleared\n",
                  __func__, statement.height);
     }
+    if (checked->previous_was_unknown) {
+        LogPrint(BCLog::CHAINLOCKS,
+                 "CChainLocksHandler::%s -- accepting fresh BTCC ADVANCE at "
+                 "height %d after Bitcoin reported the previous cursor unknown\n",
+                 __func__, statement.height);
+    }
     return accept();
 }
 

@@ -40,6 +40,7 @@ struct BTCHeaderPolicyResult {
     int32_t btc_height{-1};
     int64_t confirmations{0};
     bool previous_was_reorged{false};
+    bool previous_was_unknown{false};
 };
 
 /** One fresh Bitcoin view binding the K anchor to its H+37 descendant. */
@@ -67,6 +68,8 @@ struct BTCHeaderActiveRangeCheck {
 /**
  * Execute one fixed Bitcoin RPC method. Implementations must not invoke a
  * shell. The configured implementation also bounds runtime and output size.
+ * A failed getblockheader may return the exact RPC error object in result
+ * ({"code": -5, "message": "Block not found"}); other failures leave it null.
  */
 using BTCHeaderCommandRunner = std::function<bool(
     const std::vector<std::string>& method_and_args,

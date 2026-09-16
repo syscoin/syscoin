@@ -127,6 +127,22 @@ bool IsAllowedMethod(const std::vector<std::string>& method_and_args)
 }
 
 #if defined(HAVE_BOOST_PROCESS)
+struct CommandFailure {
+    int exit_code{0};
+    std::string stderr_output;
+};
+
+bool IsHeaderNotFoundCommand(const CommandFailure& failure,
+                            const std::string& output)
+{
+    if (failure.exit_code != 5 || !output.empty()) return false;
+    // bitcoin-cli prints the RPC code and message on stderr. Match the whole
+    // response, including its exit code; transport failures are not absence.
+    const auto& detail{failure.stderr_output};
+    return detail == "error code: -5\nerror message:\nBlock not found\n" ||
+           detail == "error code: -5\r\nerror message:\r\nBlock not found\r\n";
+}
+
 bool ParseCommandResult(const std::string& output,
                         bool raw_hash,
                         UniValue& result,
@@ -230,7 +246,8 @@ void TerminateAndReap(bp::group& process_group,
 bool RunBoundedCommand(const std::vector<std::string>& command,
                        int64_t timeout_seconds,
                        std::string& output,
-                       std::string& error)
+                       std::string& error,
+                       CommandFailure* failure = nullptr)
 {
     if (command.empty()) {
         SetError(error, "btcheadercmd-not-set");
@@ -302,6 +319,10 @@ bool RunBoundedCommand(const std::vector<std::string>& command,
             return false;
         }
         if (process.exit_code() != 0) {
+            if (failure != nullptr) {
+                failure->exit_code = process.exit_code();
+                failure->stderr_output = stderr_output;
+            }
             if (stderr_output.size() > MAX_BTC_HEADER_ERROR_DETAIL) {
                 stderr_output.resize(MAX_BTC_HEADER_ERROR_DETAIL);
             }
@@ -318,15 +339,24 @@ bool RunBoundedCommand(const std::vector<std::string>& command,
 }
 #endif
 
-bool QueryHeader(const BTCHeaderCommandRunner& runner,
-                 const uint256& requested_hash,
-                 HeaderView& header,
-                 std::string& error)
+enum class HeaderQueryStatus { FOUND, NOT_FOUND, FAILED };
+
+HeaderQueryStatus ReadHeader(const BTCHeaderCommandRunner& runner,
+                             const uint256& requested_hash,
+                             HeaderView& header,
+                             std::string& error)
 {
     UniValue result;
     if (!runner({"getblockheader", requested_hash.GetHex(), "true"},
                 result, error)) {
-        return false;
+        int64_t code{0};
+        const auto& message{result.find_value("message")};
+        if (result.isObject() && result.size() == 2 &&
+            ParseInt64(result, "code", code) && code == -5 &&
+            message.isStr() && message.get_str() == "Block not found") {
+            return HeaderQueryStatus::NOT_FOUND;
+        }
+        return HeaderQueryStatus::FAILED;
     }
     if (!result.isObject() ||
         !ParseHash(result.find_value("hash"), header.hash) ||
@@ -336,9 +366,18 @@ bool QueryHeader(const BTCHeaderCommandRunner& runner,
         header.height < 0 ||
         header.height > std::numeric_limits<int32_t>::max()) {
         SetError(error, "btc-header-invalid-response");
-        return false;
+        return HeaderQueryStatus::FAILED;
     }
-    return true;
+    return HeaderQueryStatus::FOUND;
+}
+
+bool QueryHeader(const BTCHeaderCommandRunner& runner,
+                 const uint256& requested_hash,
+                 HeaderView& header,
+                 std::string& error)
+{
+    return ReadHeader(runner, requested_hash, header, error) ==
+           HeaderQueryStatus::FOUND;
 }
 
 bool CheckRecentForks(const BTCHeaderCommandRunner& runner,
@@ -532,28 +571,46 @@ std::optional<BTCHeaderPolicyResult> CheckCandidateWithTip(
     }
 
     bool previous_was_reorged{false};
+    bool previous_was_unknown{false};
     if (previous_hash && !previous_hash->IsNull() &&
         *previous_hash != candidate_hash) {
         HeaderView previous;
-        if (!QueryHeader(runner, *previous_hash, previous, error)) {
+        const auto status{ReadHeader(runner, *previous_hash, previous, error)};
+        if (status == HeaderQueryStatus::FAILED) {
             if (error.empty()) SetError(error, "btc-previous-header-failed");
             return std::nullopt;
         }
-        if (candidate.height < previous.height) {
-            SetError(error,
-                     strprintf("btc-non-monotonic-height(prev=%d cand=%d)",
-                               previous.height, candidate.height));
-            return std::nullopt;
-        }
-        uint256 active_at_previous_height;
-        if (!QueryActiveHash(runner, previous.height,
-                             active_at_previous_height, error)) {
-            return std::nullopt;
-        }
-        previous_was_reorged = active_at_previous_height != *previous_hash;
-        if (!previous_was_reorged && candidate.height == previous.height) {
-            SetError(error, "btc-same-height-different-active-hash");
-            return std::nullopt;
+        if (status == HeaderQueryStatus::NOT_FOUND) {
+            // A threshold-certified hash need not exist in Bitcoin. Keep its
+            // history, but do not let it veto every later honest checkpoint.
+            // Even unlimited ordinary lag cannot authorize an ancient recovery
+            // anchor; permit only the normal freshness window or the exact
+            // depth needed by a stricter confirmation policy.
+            const int64_t recovery_max_lag{std::max(
+                DEFAULT_BTC_HEADER_MAX_LAG_BLOCKS,
+                config.min_confirmations - 1)};
+            if (lag > recovery_max_lag) {
+                SetError(error, "btc-unknown-previous-candidate-too-old");
+                return std::nullopt;
+            }
+            previous_was_unknown = true;
+        } else {
+            if (candidate.height < previous.height) {
+                SetError(error,
+                         strprintf("btc-non-monotonic-height(prev=%d cand=%d)",
+                                   previous.height, candidate.height));
+                return std::nullopt;
+            }
+            uint256 active_at_previous_height;
+            if (!QueryActiveHash(runner, previous.height,
+                                 active_at_previous_height, error)) {
+                return std::nullopt;
+            }
+            previous_was_reorged = active_at_previous_height != *previous_hash;
+            if (!previous_was_reorged && candidate.height == previous.height) {
+                SetError(error, "btc-same-height-different-active-hash");
+                return std::nullopt;
+            }
         }
     }
 
@@ -570,7 +627,7 @@ std::optional<BTCHeaderPolicyResult> CheckCandidateWithTip(
     error.clear();
     return BTCHeaderPolicyResult{
         candidate_hash, static_cast<int32_t>(candidate.height),
-        candidate.confirmations, previous_was_reorged};
+        candidate.confirmations, previous_was_reorged, previous_was_unknown};
 }
 
 struct StableInactiveAnchorFacts {
@@ -911,6 +968,7 @@ bool RunConfiguredBTCHeaderCommand(
     std::string& error)
 {
     error.clear();
+    result.setNull();
     if (!IsAllowedMethod(method_and_args)) {
         SetError(error, "btcheadercmd-method-not-allowed");
         return false;
@@ -960,7 +1018,16 @@ bool RunConfiguredBTCHeaderCommand(
 
 #if defined(HAVE_BOOST_PROCESS)
     std::string output;
-    if (!RunBoundedCommand(command, timeout, output, error)) return false;
+    CommandFailure failure;
+    if (!RunBoundedCommand(command, timeout, output, error, &failure)) {
+        if (method_and_args.front() == "getblockheader" &&
+            IsHeaderNotFoundCommand(failure, output)) {
+            result = UniValue{UniValue::VOBJ};
+            result.pushKV("code", -5);
+            result.pushKV("message", "Block not found");
+        }
+        return false;
+    }
     return ParseCommandResult(output,
                               method_and_args.front() == "getblockhash",
                               result, error);

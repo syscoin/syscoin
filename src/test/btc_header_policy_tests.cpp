@@ -2,6 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#if defined(HAVE_CONFIG_H)
+#include <config/syscoin-config.h>
+#endif
+
 #include <llmq/btc_header_policy.h>
 
 #include <test/util/setup_common.h>
@@ -13,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -65,6 +70,7 @@ public:
              UniValue& result,
              std::string& error)
     {
+        result = UniValue{};
         const std::string method{args.empty() ? std::string{} : args.front()};
         const std::size_t method_call{++method_calls[method]};
         if (before_call) before_call(args, method_call);
@@ -110,6 +116,9 @@ public:
             hash.SetHex(args[1]);
             const auto found{headers.find(hash)};
             if (found == headers.end()) {
+                result = UniValue{UniValue::VOBJ};
+                result.pushKV("code", -5);
+                result.pushKV("message", "Block not found");
                 error = "header-not-found";
                 return false;
             }
@@ -450,6 +459,188 @@ BOOST_AUTO_TEST_CASE(candidate_never_moves_backward_in_bitcoin_height)
     BOOST_CHECK(!setup.Policy().CheckCandidate(
         setup.config, setup.old, setup.previous, setup.NOW, error));
     BOOST_CHECK(error.find("btc-non-monotonic-height") == 0);
+}
+
+BOOST_AUTO_TEST_CASE(unknown_previous_cursor_recovers_then_advances_normally)
+{
+    PolicySetup setup;
+    setup.backend.headers.erase(setup.previous);
+    setup.backend.active_hashes.erase(90);
+    std::string error;
+    const auto recovered{setup.Policy().CheckCandidate(
+        setup.config, setup.confirmed, setup.previous, setup.NOW, error)};
+    BOOST_REQUIRE_MESSAGE(recovered, error);
+    BOOST_CHECK(recovered->btc_hash == setup.confirmed);
+    BOOST_CHECK(recovered->previous_was_unknown);
+    BOOST_CHECK(!recovered->previous_was_reorged);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
+    BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockhash"], 1U);
+
+    const auto next{setup.Policy().CheckCandidate(
+        setup.config, setup.tip, recovered->btc_hash, setup.NOW, error)};
+    BOOST_REQUIRE_MESSAGE(next, error);
+    BOOST_CHECK(next->btc_hash == setup.tip);
+    BOOST_CHECK(!next->previous_was_unknown);
+    BOOST_CHECK(!next->previous_was_reorged);
+}
+
+BOOST_AUTO_TEST_CASE(previous_header_failure_requires_exact_not_found_result)
+{
+    struct Failure {
+        const char* result;
+        const char* error;
+        bool success{false};
+    };
+    for (const Failure& failure : {
+             Failure{"null", "btcheadercmd-timeout"},
+             Failure{"null", "Block not found"},
+             Failure{R"({"code":-1,"message":"Block not found"})", "rpc-failed"},
+             Failure{R"({"code":"-5","message":"Block not found"})", "rpc-failed"},
+             Failure{R"({"code":-5,"message":"Block not found on disk"})", "rpc-failed"},
+             Failure{R"({"code":-5})", "rpc-failed"},
+             Failure{R"({"code":-5,"message":"Block not found"})", "", true},
+             Failure{R"({"height":90,"confirmations":11})", "", true}}) {
+        BOOST_TEST_CONTEXT("result=" << failure.result << " error=" << failure.error
+                           << " success=" << failure.success) {
+            PolicySetup setup;
+            BTCHeaderPolicy policy{[&](const std::vector<std::string>& args,
+                                       UniValue& result, std::string& error) {
+                if (args == std::vector<std::string>{
+                                "getblockheader", setup.previous.GetHex(), "true"}) {
+                    BOOST_REQUIRE(result.read(failure.result));
+                    error = failure.error;
+                    return failure.success;
+                }
+                return setup.backend.Run(args, result, error);
+            }};
+            std::string error;
+            BOOST_CHECK(!policy.CheckCandidate(
+                setup.config, setup.confirmed, setup.previous, setup.NOW, error));
+            BOOST_CHECK(!error.empty());
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unknown_headers_cannot_supply_candidate_tip_or_audit_anchor)
+{
+    PolicySetup setup;
+    const uint256 unknown{NonNullHash(999)};
+    std::string error;
+    BOOST_CHECK(!setup.Policy().CheckCandidate(
+        setup.config, unknown, setup.previous, setup.NOW, error));
+    BOOST_CHECK(!setup.Policy().CheckPaymentAuditActiveRange(
+        setup.config, unknown, setup.NOW, error));
+    const auto audit{setup.Policy().ClassifyPaymentAuditActiveRange(
+        setup.config, unknown, 90, setup.NOW, error)};
+    BOOST_CHECK(audit.status == BTCHeaderActiveRangeStatus::TRANSIENT);
+    BOOST_CHECK(!audit.range);
+
+    setup.backend.best_hash = unknown;
+    BOOST_CHECK(!setup.Policy().CheckCandidate(
+        setup.config, setup.confirmed, setup.previous, setup.NOW, error));
+}
+
+BOOST_AUTO_TEST_CASE(unknown_previous_cursor_retains_candidate_and_backend_checks)
+{
+    using Mutation = std::pair<const char*, std::function<void(PolicySetup&)>>;
+    for (const Mutation& mutation : {
+             Mutation{"unconfirmed", [](PolicySetup& setup) {
+                 setup.config.min_confirmations = 4;
+             }},
+             Mutation{"inactive", [](PolicySetup& setup) {
+                 setup.backend.active_hashes[98] = NonNullHash(998);
+             }},
+             Mutation{"recent-fork", [](PolicySetup& setup) {
+                 setup.backend.chain_tips.push_back(
+                     ChainTip{NonNullHash(999), 99, "valid-fork"});
+             }},
+             Mutation{"stale-tip", [](PolicySetup& setup) {
+                 setup.backend.headers[setup.tip].time =
+                     setup.NOW - setup.config.tip_max_age - 1;
+             }},
+             Mutation{"wrong-network", [](PolicySetup& setup) {
+                 setup.backend.chain = "main";
+             }},
+             Mutation{"ibd", [](PolicySetup& setup) { setup.backend.ibd = true; }},
+             Mutation{"outage", [](PolicySetup& setup) { setup.backend.online = false; }}}) {
+        BOOST_TEST_CONTEXT(mutation.first) {
+            PolicySetup setup;
+            setup.backend.headers.erase(setup.previous);
+            mutation.second(setup);
+            std::string error;
+            BOOST_CHECK(!setup.Policy().CheckCandidate(
+                setup.config, setup.confirmed, setup.previous, setup.NOW, error));
+            BOOST_CHECK(!error.empty());
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unknown_previous_cursor_requires_stable_final_tip)
+{
+    PolicySetup setup;
+    setup.backend.headers.erase(setup.previous);
+    bool previous_queried{false};
+    const uint256 next_tip{NonNullHash(101)};
+    setup.backend.before_call = [&](const std::vector<std::string>& args,
+                                    std::size_t) {
+        if (args != std::vector<std::string>{
+                        "getblockheader", setup.previous.GetHex(), "true"}) return;
+        previous_queried = true;
+        setup.backend.best_hash = next_tip;
+        setup.backend.headers.emplace(next_tip, Header{101, 1, setup.NOW});
+        setup.backend.active_hashes[101] = next_tip;
+        setup.backend.chain_tips = {ChainTip{next_tip, 101, "active"}};
+    };
+    std::string error;
+    BOOST_CHECK(!setup.Policy().CheckCandidate(
+        setup.config, setup.confirmed, setup.previous, setup.NOW, error));
+    BOOST_CHECK(previous_queried);
+    BOOST_CHECK_EQUAL(error, "btc-candidate-tip-view-changed");
+}
+
+BOOST_AUTO_TEST_CASE(unknown_previous_recovery_bounds_lag_and_honors_confirmations)
+{
+    struct Boundary {
+        int64_t max_lag;
+        int64_t min_confirmations;
+        int64_t candidate_lag;
+        bool accepted;
+    };
+    for (const Boundary& boundary : {
+             Boundary{0, 1, 36, true}, Boundary{0, 1, 37, false},
+             Boundary{100, 1, 37, false}, Boundary{2, 1, 2, true},
+             Boundary{2, 1, 3, false}, Boundary{0, 100, 99, true},
+             Boundary{0, 100, 100, false}, Boundary{101, 100, 100, false},
+             Boundary{99, 100, 99, true}}) {
+        BOOST_TEST_CONTEXT("max_lag=" << boundary.max_lag
+                           << " confirmations=" << boundary.min_confirmations
+                           << " lag=" << boundary.candidate_lag) {
+            PolicySetup setup;
+            setup.config.max_lag_blocks = boundary.max_lag;
+            setup.config.min_confirmations = boundary.min_confirmations;
+            setup.backend.headers.erase(setup.previous);
+            setup.backend.headers[setup.tip] = Header{200, 1, setup.NOW};
+            setup.backend.chain_tips = {ChainTip{setup.tip, 200, "active"}};
+            const uint256 candidate{NonNullHash(10'000 + boundary.candidate_lag)};
+            const int64_t height{200 - boundary.candidate_lag};
+            setup.backend.headers.emplace(candidate,
+                Header{height, boundary.candidate_lag + 1, setup.NOW - 600});
+            setup.backend.active_hashes.clear();
+            setup.backend.active_hashes.emplace(200, setup.tip);
+            setup.backend.active_hashes.emplace(height, candidate);
+            std::string error;
+            const auto checked{setup.Policy().CheckCandidate(
+                setup.config, candidate, setup.previous, setup.NOW, error)};
+            BOOST_CHECK_EQUAL(checked.has_value(), boundary.accepted);
+            if (checked) {
+                BOOST_CHECK(checked->previous_was_unknown);
+                BOOST_CHECK_EQUAL(checked->confirmations, boundary.candidate_lag + 1);
+            } else {
+                BOOST_CHECK(!error.empty());
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(payment_audit_range_binds_active_h_plus_37)
@@ -818,6 +1009,84 @@ BOOST_AUTO_TEST_CASE(active_range_ready_repeats_both_active_hashes)
     BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockhash"], 4U);
     BOOST_CHECK_EQUAL(setup.backend.method_calls["getblockchaininfo"], 2U);
 }
+
+#if defined(HAVE_BOOST_PROCESS) && !defined(WIN32)
+BOOST_AUTO_TEST_CASE(command_runner_classifies_only_exact_header_not_found)
+{
+    struct RestoreForcedArgs {
+        decltype(common::Settings{}.forced_settings) saved;
+        RestoreForcedArgs()
+        {
+            gArgs.LockSettings([&](const common::Settings& settings) {
+                saved = settings.forced_settings;
+            });
+        }
+        ~RestoreForcedArgs()
+        {
+            gArgs.LockSettings([&](common::Settings& settings) {
+                settings.forced_settings = std::move(saved);
+            });
+        }
+    } restore_args;
+    const fs::path script_path{m_path_root / "bitcoin cli fixture.sh"};
+    gArgs.ForceSetArg("-btcheadermanaged", "0");
+    gArgs.ForceSetArg("-btcheadercmd", "/bin/sh");
+    gArgs.ForceSetArg("-btcheaderarg", fs::PathToString(script_path));
+    gArgs.ForceSetArg("-btcheadercmdtimeout", "1");
+
+    struct Response {
+        int exit_code;
+        const char* stderr_output;
+        const char* stdout_output;
+        bool not_found;
+        bool timeout{false};
+    };
+    for (const Response& response : {
+             Response{5, "error code: -5\nerror message:\nBlock not found\n", "", true},
+             Response{5, "error code: -5\r\nerror message:\r\nBlock not found\r\n", "", true},
+             Response{1, "error code: -5\nerror message:\nBlock not found\n", "", false},
+             Response{5, "error code: -1\nerror message:\nBlock not found\n", "", false},
+             Response{5, "error code: -5\nerror message:\nBlock not found on disk\n", "", false},
+             Response{5, "prefix error code: -5\nerror message:\nBlock not found\n", "", false},
+             Response{5, "error code: -5\nerror message:\nBlock not found\ntrailing", "", false},
+             Response{5, "error code: -5\nerror message:\nBlock not found\n", "{}", false},
+             Response{0, "error code: -5\nerror message:\nBlock not found\n", "", false},
+             Response{5, "error code:\n-5\nerror message:\nBlock not found\n", "", false},
+             Response{5, "error code: -5\nerror message:\nBlock not found\n", "", false, true}}) {
+        BOOST_TEST_CONTEXT("exit=" << response.exit_code << " stderr=" << response.stderr_output
+                           << " stdout=" << response.stdout_output << " timeout=" << response.timeout) {
+            {
+                std::ofstream script{script_path, std::ios::binary | std::ios::trunc};
+                BOOST_REQUIRE(script.is_open());
+                script << "printf '%s' '" << response.stderr_output << "' >&2\n"
+                       << "printf '%s' '" << response.stdout_output << "'\n";
+                if (response.timeout) script << "sleep 2\n";
+                script << "exit " << response.exit_code << "\n";
+                script.close();
+                BOOST_REQUIRE(script.good());
+            }
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("stale", true);
+            std::string error;
+            BOOST_CHECK(!RunConfiguredBTCHeaderCommand(
+                {"getblockheader", NonNullHash(999).GetHex(), "true"}, result, error));
+            BOOST_CHECK(!error.empty());
+            if (response.not_found) {
+                BOOST_REQUIRE(result.isObject());
+                BOOST_CHECK_EQUAL(result.size(), 2U);
+                BOOST_CHECK_EQUAL(result.find_value("code").getInt<int>(), -5);
+                BOOST_CHECK_EQUAL(result.find_value("message").get_str(), "Block not found");
+                BOOST_CHECK(!RunConfiguredBTCHeaderCommand(
+                    {"getblockchaininfo"}, result, error));
+                BOOST_CHECK(result.isNull());
+            } else {
+                BOOST_CHECK(result.isNull());
+                if (response.timeout) BOOST_CHECK_EQUAL(error, "btcheadercmd-timeout");
+            }
+        }
+    }
+}
+#endif
 
 #ifdef _MSC_VER
 // Guard on the toolchain so removing the feature flag cannot hide the test.

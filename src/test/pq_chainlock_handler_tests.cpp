@@ -49,6 +49,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <limits>
@@ -425,6 +426,26 @@ public:
     static pq::ChainLockFinalityStore* Store(CChainLocksHandler& handler)
     {
         return handler.m_store.get();
+    }
+
+    static bool CheckBTCHeaderSigningPolicy(
+        CChainLocksHandler& handler, const pq::ChainLockStatement& statement)
+    {
+        return handler.CheckBTCHeaderSigningPolicy(statement);
+    }
+
+    static std::optional<pq::NormalRosterAuthorizationDecision>
+    DeriveNormalSigningDecision(
+        const CChainLocksHandler& handler, const pq::ChainLockStatement& statement,
+        const pq::FinalChainLockRecordMetadata& prior,
+        pq::RosterAuthorizationTransitionKind requested)
+    {
+        const auto input{handler.BuildNormalRosterAuthorizationInput(
+            statement, prior, requested,
+            CChainLocksHandler::RosterBeaconEvidence::SIGNER_POLICY)};
+        return input ? pq::DeriveNormalRosterAuthorizationDecision(
+                           handler.m_genesis_hash, *input)
+                     : std::nullopt;
     }
 
     static void SetServableHistoricalCertificate(
@@ -12670,6 +12691,206 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(keep_receipt.accepted_cursor == base_cursor);
     BOOST_CHECK(Access::IsVerifiedBTCCReceipt(
         *handler, keep_receipt, *chain[KEEP_CARRIER]));
+
+#if defined(HAVE_BOOST_PROCESS) && !defined(WIN32)
+    {
+        // Start at this fixture's verified certificate/index boundary. The
+        // normal authorization, exact BTCPREV selection and live Bitcoin
+        // signing policy below are real; signature cryptography is covered by
+        // the signed-certificate fixtures rather than this store fixture.
+        struct RestoreArgs {
+            decltype(common::Settings{}.forced_settings) original;
+            RestoreArgs()
+            {
+                gArgs.LockSettings([&](const common::Settings& settings) {
+                    original = settings.forced_settings;
+                });
+            }
+            ~RestoreArgs()
+            {
+                gArgs.LockSettings([&](common::Settings& settings) {
+                    settings.forced_settings = std::move(original);
+                });
+            }
+        } restore_args;
+        const fs::path backend_path{m_path_root / "unknown previous bitcoin.sh"};
+        gArgs.ForceSetArg("-btcheaderpolicyondemand", "1");
+        gArgs.ForceSetArg("-btcheadermanaged", "0");
+        gArgs.ForceSetArg("-btcheaderwatchdog", "0");
+        gArgs.ForceSetArg("-btcheadercmd", "/bin/sh");
+        gArgs.ForceSetArg("-btcheaderarg", fs::PathToString(backend_path));
+        gArgs.ForceSetArg("-btcheadercmdtimeout", "1");
+        const uint256 btc_tip{NonNullHash(925'070)};
+        const uint256 fresh_btc{NonNullHash(925'071)};
+        const auto write_backend = [&](bool unknown_previous) {
+            std::ofstream backend{backend_path, std::ios::binary | std::ios::trunc};
+            BOOST_REQUIRE(backend.is_open());
+            backend << "case \"$1:$2\" in\n"
+                    << "getblockchaininfo:) printf '%s' '{\"chain\":\"regtest\","
+                       "\"initialblockdownload\":false,\"headers\":100,\"blocks\":100,"
+                       "\"bestblockhash\":\"" << btc_tip.GetHex() << "\"}';;\n"
+                    << "getchaintips:) printf '%s' '[{\"height\":100,\"hash\":\""
+                    << btc_tip.GetHex() << "\",\"status\":\"active\"}]';;\n"
+                    << "getblockheader:" << btc_tip.GetHex()
+                    << ") printf '%s' '{\"hash\":\"" << btc_tip.GetHex()
+                    << "\",\"height\":100,\"confirmations\":1,\"time\":" << GetTime() << "}';;\n"
+                    << "getblockheader:" << fresh_btc.GetHex()
+                    << ") printf '%s' '{\"hash\":\"" << fresh_btc.GetHex()
+                    << "\",\"height\":98,\"confirmations\":3}';;\n"
+                    << "getblockhash:98) printf '%s' '" << fresh_btc.GetHex() << "';;\n"
+                    << "getblockheader:" << base_cursor.btc_hash.GetHex() << ") ";
+            if (unknown_previous) {
+                backend << "printf 'error code: -5\\nerror message:\\nBlock not found\\n' >&2; exit 5;;\n";
+            } else {
+                backend << "printf 'connection refused\\n' >&2; exit 1;;\n";
+            }
+            backend << "*) exit 1;;\nesac\n";
+            backend.close();
+            BOOST_REQUIRE(backend.good());
+        };
+        // Keep a separate store while advancing through the intervening
+        // canonical KEEP edges. Each edge uses its receipt-selected normal
+        // authorization base; the recovery target cannot skip its wire parent.
+        auto progress_store{std::make_unique<ChainLockFinalityStore>(
+            genesis, *config, store_context)};
+        auto* progress{progress_store.get()};
+        struct RestoreStore {
+            llmq::CChainLocksHandler& handler;
+            std::unique_ptr<ChainLockFinalityStore> original;
+            ~RestoreStore()
+            {
+                Access::ExchangeFinalityStore(handler, std::move(original)).reset();
+            }
+        } restore_store{*handler, Access::ExchangeFinalityStore(
+            *handler, std::move(progress_store))};
+        install(*progress, base);
+        install(*progress, current);
+        install(*progress, candidate);
+        for (int32_t height{CANDIDATE_HEIGHT + static_cast<int32_t>(PQ_CL_PERIOD)};
+             height <= forward_height; height += static_cast<int32_t>(PQ_CL_PERIOD)) {
+            const auto objective{Access::ObjectiveRosterAuthorization(*handler, *chain[height])};
+            BOOST_REQUIRE(objective);
+            BOOST_REQUIRE(objective->mode == ObjectiveRosterAuthorizationMode::NORMAL);
+            BOOST_REQUIRE(objective->base);
+            const auto prior{progress->GetVerifiedRosterAuthorizationBase(*objective->base)};
+            BOOST_REQUIRE(prior);
+            const auto best{progress->GetBestRecord()};
+            BOOST_REQUIRE(best);
+            auto keep{candidate};
+            keep.statement.height = height;
+            keep.statement.block_hash = chain[height]->GetBlockHash();
+            keep.statement.previous_chainlock_height = best->metadata.statement.height;
+            keep.statement.previous_chainlock_hash = best->metadata.statement.block_hash;
+            keep.statement.btcc_receipt_state = height < KEEP_CARRIER
+                ? *receipted_state : *candidate_receipted_state;
+            keep.statement.roster_authorization_base = *objective->base;
+            const auto decision{Access::DeriveNormalSigningDecision(
+                *handler, keep.statement, prior->metadata, RosterAuthorizationTransitionKind::KEEP)};
+            BOOST_REQUIRE(decision);
+            BOOST_REQUIRE(decision->transition.kind == RosterAuthorizationTransitionKind::KEEP);
+            keep.statement.roster_transition = decision->transition.kind;
+            keep.statement.roster_beacons = decision->transition.new_window;
+            keep.statement.roster_authorization_state_hash = decision->state_hash;
+            BOOST_REQUIRE(Access::CheckBTCHeaderSigningPolicy(*handler, keep.statement));
+            install(*progress, keep);
+        }
+
+        struct RestoreCommitment {
+            CBlockIndex& source;
+            uint256 original;
+            ~RestoreCommitment() { source.btcpPrevCommitment = original; }
+        } restore_commitment{*chain[forward_height + PQ_CL_PERIOD],
+                             chain[forward_height + PQ_CL_PERIOD]->btcpPrevCommitment};
+        const int32_t recovered_height{forward_height + static_cast<int32_t>(PQ_CL_PERIOD)};
+        struct RestoreActiveTip {
+            ChainstateManager& chainman;
+            CBlockIndex* original;
+            ~RestoreActiveTip()
+            {
+                LOCK(::cs_main);
+                chainman.ActiveChainstate().m_chain.SetTip(*original);
+            }
+        } restore_tip{chainman, chain[TIP_HEIGHT]};
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChainstate().m_chain.SetTip(
+                *chain[recovered_height + config->chainlock_schedule.sign_lag]);
+        }
+        chain[recovered_height]->btcpPrevCommitment = fresh_btc;
+        const auto selected{SelectBTCCForChainLock(
+            config->btcc_schedule, *chain[recovered_height], base_cursor)};
+        BOOST_REQUIRE(selected);
+        BOOST_REQUIRE(selected->advance == BTCCAdvance::ADVANCE);
+        BOOST_REQUIRE(selected->cursor.btc_hash == fresh_btc);
+        BOOST_REQUIRE_EQUAL(selected->cursor.sys_height, recovered_height);
+        auto recovered{forward};
+        recovered.statement.height = recovered_height;
+        recovered.statement.block_hash = chain[recovered_height]->GetBlockHash();
+        recovered.statement.previous_chainlock_height = forward_height;
+        recovered.statement.previous_chainlock_hash = chain[forward_height]->GetBlockHash();
+        recovered.statement.accepted_btcc_cursor = selected->cursor;
+        recovered.statement.btcc_advance = selected->advance;
+        set_exact_continuation(recovered, candidate);
+
+        const FinalChainLockRecordMetadata prior{
+            candidate.GetLogicalId(genesis), candidate.GetWitnessId(genesis), candidate.statement};
+        write_backend(false);
+        BOOST_CHECK(!Access::DeriveNormalSigningDecision(
+            *handler, recovered.statement, prior, RosterAuthorizationTransitionKind::OBSERVE));
+        write_backend(true);
+        const auto decision{Access::DeriveNormalSigningDecision(
+            *handler, recovered.statement, prior, RosterAuthorizationTransitionKind::OBSERVE)};
+        BOOST_REQUIRE(decision);
+        BOOST_REQUIRE(decision->transition.kind == RosterAuthorizationTransitionKind::OBSERVE);
+        recovered.statement.roster_transition = decision->transition.kind;
+        recovered.statement.roster_beacons = decision->transition.new_window;
+        recovered.statement.roster_authorization_state_hash = decision->state_hash;
+        BOOST_REQUIRE(recovered.IsStructurallyValid());
+        BOOST_CHECK(recovered.statement.roster_beacons.next.anchor_cursor == selected->cursor);
+        BOOST_CHECK_EQUAL(recovered.statement.roster_beacons.next.anchor_btc_height, 98);
+        BOOST_REQUIRE(Access::StateAdvancingAuthorizationBaseAdmissible(
+            *handler, ChainLockCandidateAdmission::LIVE, recovered));
+        const auto prepared{Access::PrepareRuntimeCandidateWithoutStoreAdmission(
+            *handler, recovered, ChainLockCandidateAdmission::LIVE)};
+        BOOST_REQUIRE(prepared);
+        BOOST_CHECK(prepared->context.btcc_transition_validated);
+        BOOST_CHECK(prepared->context.special_transactions_validated);
+        BOOST_CHECK(prepared->context.scripts_validated);
+
+        write_backend(false);
+        BOOST_CHECK(!Access::CheckBTCHeaderSigningPolicy(*handler, recovered.statement));
+        write_backend(true);
+        BOOST_REQUIRE(Access::CheckBTCHeaderSigningPolicy(*handler, recovered.statement));
+        auto wrong_commitment{recovered.statement};
+        wrong_commitment.accepted_btcc_cursor.btc_hash = NonNullHash(925'072);
+        BOOST_CHECK(!Access::CheckBTCHeaderSigningPolicy(*handler, wrong_commitment));
+        auto wrong_authorization{recovered.statement};
+        wrong_authorization.roster_authorization_base.logical_id = NonNullHash(925'073);
+        BOOST_CHECK(!Access::CheckBTCHeaderSigningPolicy(*handler, wrong_authorization));
+
+        BOOST_REQUIRE(Access::CheckBTCHeaderSigningPolicy(*handler, recovered.statement));
+        install(*progress, recovered);
+        BOOST_REQUIRE(progress->GetBestRecord());
+        BOOST_CHECK(progress->GetBestRecord()->metadata.statement.accepted_btcc_cursor == selected->cursor);
+        const int32_t carrier{recovered_height + static_cast<int32_t>(PQ_BTCC_NEVM_LAG)};
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChainstate().m_chain.SetTip(*chain[carrier]);
+        }
+        const auto receipt{Access::BTCCReceiptForCarrier(*handler, carrier, *chain[carrier - 1])};
+        BOOST_REQUIRE(!receipt.IsNull());
+        BOOST_CHECK(receipt.accepted_cursor == selected->cursor);
+        BOOST_CHECK(receipt.chainlock_logical_id == recovered.GetLogicalId(genesis));
+        BOOST_CHECK(Access::IsVerifiedBTCCReceipt(*handler, receipt, *chain[carrier]));
+        const auto advanced_state{ApplyBTCCReceiptState(
+            genesis, config->chainlock_schedule, config->btcc_schedule,
+            config->activation_predecessor_height, carrier, chain[carrier]->GetBlockHash(),
+            *candidate_receipted_state, receipt)};
+        BOOST_REQUIRE(advanced_state);
+        BOOST_CHECK(advanced_state->cursor.btc_hash == fresh_btc);
+        BOOST_CHECK(candidate_receipted_state->cursor == base_cursor);
+    }
+#endif
 
     for (int32_t height{KEEP_CARRIER}; height <= TIP_HEIGHT; ++height) {
         chain[height]->pqBTCCReceiptCursorHeight =
