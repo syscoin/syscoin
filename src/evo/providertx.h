@@ -8,6 +8,7 @@
 #include <crypto/legacy_bls.h>
 #include <consensus/validation.h>
 #include <evo/provider_revoke_payload.h>
+#include <evo/pq_owner_key.h>
 #include <evo/pq_voting_key.h>
 #include <llmq/pq_chainlock_types.h>
 #include <primitives/transaction.h>
@@ -57,6 +58,8 @@ public:
     CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
     llmq::pq::GlobalPublicKey pqVotingPublicKey{};
+    llmq::pq::GlobalPublicKey pqOwnerPublicKey{};
+    llmq::pq::GlobalSignature pqOwnerProof{};
     uint16_t nOperatorReward{0};
     CScript scriptPayout;
     uint256 inputsHash; // replay protection
@@ -87,12 +90,13 @@ public:
                 obj.inputsHash
         );
         if (obj.nVersion == PQ_VERSION) {
-            READWRITE(obj.pqVotingPublicKey);
+            READWRITE(obj.pqVotingPublicKey, obj.pqOwnerPublicKey);
         } else {
-            SER_READ(obj, obj.pqVotingPublicKey = {});
+            SER_READ(obj, obj.pqVotingPublicKey = {}; obj.pqOwnerPublicKey = {}; obj.pqOwnerProof = {});
         }
         if (!(s.GetType() & SER_GETHASH)) {
             READWRITE(obj.vchSig);
+            if (obj.nVersion == PQ_VERSION) READWRITE(obj.pqOwnerProof);
         }
     }
 
@@ -110,10 +114,11 @@ public:
         obj.pushKV("collateralHash", collateralOutpoint.hash.ToString());
         obj.pushKV("collateralIndex", (int)collateralOutpoint.n);
         obj.pushKV("service", addr.ToStringAddr());
-        obj.pushKV("ownerAddress", EncodeDestination(WitnessV0KeyHash(keyIDOwner)));
+        if (!keyIDOwner.IsNull()) obj.pushKV("ownerAddress", EncodeDestination(WitnessV0KeyHash(keyIDOwner)));
         obj.pushKV("votingAddress", EncodeDestination(WitnessV0KeyHash(keyIDVoting)));
         if (nVersion == PQ_VERSION) {
             obj.pushKV("pqVotingPublicKey", HexStr(pqVotingPublicKey));
+            obj.pushKV("pqOwnerPublicKey", HexStr(pqOwnerPublicKey));
         }
 
         CTxDestination dest;
@@ -217,6 +222,10 @@ public:
     CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
     llmq::pq::GlobalPublicKey pqVotingPublicKey{};
+    /** Zero preserves ownership; a nonzero key enrolls or rotates the owner. */
+    llmq::pq::GlobalPublicKey pqOwnerPublicKey{};
+    uint32_t ownerKeyVersion{0};
+    llmq::pq::GlobalSignature pqOwnerProof{};
     CScript scriptPayout;
     uint256 inputsHash; // replay protection
     std::vector<unsigned char> vchSig;
@@ -242,14 +251,15 @@ public:
                 obj.inputsHash
         );
         if (obj.nVersion == PQ_VERSION) {
-            READWRITE(obj.pqVotingPublicKey);
+            READWRITE(obj.pqVotingPublicKey, obj.pqOwnerPublicKey, obj.ownerKeyVersion);
         } else {
-            SER_READ(obj, obj.pqVotingPublicKey = {});
+            SER_READ(obj, obj.pqVotingPublicKey = {}; obj.pqOwnerPublicKey = {}; obj.ownerKeyVersion = 0; obj.pqOwnerProof = {});
         }
         if (!(s.GetType() & SER_GETHASH)) {
             READWRITE(
                     obj.vchSig
             );
+            if (obj.nVersion == PQ_VERSION) READWRITE(obj.pqOwnerProof);
         }
     }
 
@@ -265,6 +275,8 @@ public:
         obj.pushKV("votingAddress", EncodeDestination(WitnessV0KeyHash(keyIDVoting)));
         if (nVersion == PQ_VERSION) {
             obj.pushKV("pqVotingPublicKey", HexStr(pqVotingPublicKey));
+            obj.pushKV("pqOwnerPublicKey", HexStr(pqOwnerPublicKey));
+            obj.pushKV("ownerKeyVersion", ownerKeyVersion);
         }
         CTxDestination dest;
         if (ExtractDestination(scriptPayout, dest)) {
@@ -279,9 +291,15 @@ public:
     bool IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const;
 };
 
+/** Domain-separated owner transcripts exclude all signatures and bind every payload field. */
+[[nodiscard]] uint256 GetProRegOwnerAuthorizationHash(const uint256& genesis_hash, const CProRegTx& payload);
+[[nodiscard]] uint256 GetProUpRegOwnerAuthorizationHash(const uint256& genesis_hash, const CProUpRegTx& payload);
+
 bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 #endif // SYSCOIN_EVO_PROVIDERTX_H

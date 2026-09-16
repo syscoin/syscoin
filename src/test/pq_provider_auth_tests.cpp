@@ -5,6 +5,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <evo/deterministicmns.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
@@ -274,6 +275,8 @@ public:
             assert(payload.pubKeyOperator.SetBytes(key));
         } else {
             payload.pqVotingPublicKey.fill(0x31);
+            payload.pqOwnerPublicKey.fill(0x32);
+            payload.pqOwnerProof.front() = 1;
         }
         payload.inputsHash = CalcTxInputsHash(CTransaction{transaction});
         SetTxPayload(transaction, payload);
@@ -383,13 +386,13 @@ public:
         switch (transaction.nVersion) {
         case SYSCOIN_TX_VERSION_MN_REGISTER:
             return CheckProRegTx(transaction, parent, state, view,
-                                 just_check, check_sigs);
+                                 just_check, check_sigs, context);
         case SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE:
             return CheckProUpServTx(transaction, parent, state,
                                     just_check, check_sigs, context);
         case SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR:
             return CheckProUpRegTx(transaction, parent, state, view,
-                                   just_check, check_sigs);
+                                   just_check, check_sigs, context);
         case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE:
             return CheckProUpRevTx(transaction, parent, state,
                                    just_check, check_sigs, context);
@@ -816,6 +819,175 @@ BOOST_AUTO_TEST_CASE(pq_voting_registrar_remains_owner_authorized)
         BOOST_CHECK(wrong_owner.IsInvalid());
         BOOST_CHECK_EQUAL(wrong_owner.GetRejectReason(), "bad-protx-hash-sig");
     }
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_migration_and_rotation_require_current_authority)
+{
+    LOCK(cs_main);
+    CKey legacy_owner;
+    legacy_owner.MakeNewKey(true);
+    slhdsa::KeyGenerationSeed seed{};
+    seed.fill(0x61);
+    auto owner = slhdsa::GenerateSecretKey(seed);
+    seed.front() ^= 1;
+    auto successor = slhdsa::GenerateSecretKey(seed);
+    BOOST_REQUIRE(owner);
+    BOOST_REQUIRE(successor);
+    llmq::pq::GlobalPublicKey owner_public{}, successor_public{};
+    BOOST_REQUIRE(owner->GetPublicKey(owner_public));
+    BOOST_REQUIRE(successor->GetPublicKey(successor_public));
+
+    auto parent_list = deterministicMNManager->GetListForBlock(&parent_index);
+    const auto member = parent_list.GetMN(pro_tx_hash);
+    BOOST_REQUIRE(member);
+    auto owner_state = std::make_shared<CDeterministicMNState>(*member->pdmnState);
+    owner_state->keyIDOwner = legacy_owner.GetPubKey().GetID();
+    owner_state->scriptPayout = GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(72)});
+    // The successor secret initially has only delegated voting authority.
+    BOOST_REQUIRE(owner_state->pqVotingKey.UpdatePublicKey(successor_public, parent_index.nHeight));
+    parent_list.UpdateMN(pro_tx_hash, owner_state);
+    deterministicMNManager->m_evoDb->WriteCache(parent_hash, parent_list);
+
+    CCoinsView base_view;
+    CCoinsViewCache view{&base_view};
+    view.AddCoin(member->collateralOutpoint,
+        Coin{CTxOut{nMNCollateralRequired, GetScriptForDestination(
+            WitnessV0KeyHash{NonNullKeyID(70)})}, parent_index.nHeight - 100, false}, false);
+    CMutableTransaction transaction;
+    transaction.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+    transaction.vin.emplace_back(COutPoint{NonNullHash(81), 0});
+    transaction.vout.emplace_back(1, CScript{} << OP_TRUE);
+    CProUpRegTx payload;
+    payload.nVersion = CProUpRegTx::PQ_VERSION;
+    payload.proTxHash = pro_tx_hash;
+    payload.keyIDVoting = owner_state->keyIDVoting;
+    payload.pqVotingPublicKey = successor_public;
+    payload.scriptPayout = GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(72)});
+    payload.inputsHash = CalcTxInputsHash(CTransaction{transaction});
+    payload.pqOwnerPublicKey = owner_public;
+    const auto sign_slh = [](const slhdsa::SecretKey& secret, const uint256& digest,
+                             std::string_view context, auto& signature) {
+        return slhdsa::SignDeterministic(secret,
+            std::span<const uint8_t>{digest.begin(), digest.size()},
+            std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(context.data()), context.size()},
+            signature);
+    };
+    const auto check = [&](const CProUpRegTx& update, bool expected,
+                           const char* reason = "") {
+        LOCK(cs_main);
+        SetTxPayload(transaction, update);
+        TxValidationState result;
+        const bool accepted = CheckProUpRegTx(CTransaction{transaction}, &parent_index,
+            result, view, false, false, SpecialTxValidationContext::NORMAL);
+        BOOST_CHECK_MESSAGE(accepted == expected, result.ToString());
+        if (!expected) BOOST_CHECK_EQUAL(result.GetRejectReason(), reason);
+    };
+    auto digest = GetProUpRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, payload);
+    BOOST_REQUIRE(sign_slh(*owner, digest, llmq::pq::PQ_OWNER_PROOF_CONTEXT, payload.pqOwnerProof));
+    BOOST_REQUIRE(CHashSigner::SignHash(digest, legacy_owner, payload.vchSig));
+    check(payload, true);
+    {
+        // Preparation admits owner migration, but cannot smuggle payout or
+        // voting changes through the otherwise activation-gated registrar.
+        auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+        const auto activation = consensus.nPQActivationHeight;
+        consensus.nPQActivationHeight = parent_index.nHeight + 2;
+        check(payload, true);
+        auto preparation_change = payload;
+        preparation_change.scriptPayout = GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(73)});
+        check(preparation_change, false, "bad-protx-owner-preparation-fields");
+        preparation_change = payload;
+        preparation_change.pqVotingPublicKey.front() ^= 1;
+        check(preparation_change, false, "bad-protx-owner-preparation-fields");
+        auto not_enrolled = std::make_shared<CDeterministicMNState>(*owner_state);
+        not_enrolled->pqVotingKey = {};
+        parent_list.UpdateMN(pro_tx_hash, not_enrolled);
+        deterministicMNManager->m_evoDb->WriteCache(parent_hash, parent_list);
+        // A missing independent voting key can be enrolled in the same
+        // authenticated owner migration, ready for activation payments.
+        check(payload, true);
+        preparation_change = payload;
+        preparation_change.pqVotingPublicKey.front() ^= 1;
+        check(preparation_change, false, "bad-protx-pq-owner-proof");
+        parent_list.UpdateMN(pro_tx_hash, owner_state);
+        deterministicMNManager->m_evoDb->WriteCache(parent_hash, parent_list);
+        consensus.nPQActivationHeight = activation;
+    }
+    auto changed = payload;
+    changed.pqOwnerProof.back() ^= 1;
+    check(changed, false, "bad-protx-pq-owner-proof");
+    changed = payload;
+    changed.vchSig.back() ^= 1;
+    check(changed, false, "bad-protx-hash-sig");
+
+    BOOST_REQUIRE(owner_state->pqOwnerKey.UpdatePublicKey(owner_public, parent_index.nHeight));
+    parent_list.UpdateMN(pro_tx_hash, owner_state);
+    deterministicMNManager->m_evoDb->WriteCache(parent_hash, parent_list);
+    payload.ownerKeyVersion = 1;
+    payload.pqOwnerPublicKey = {};
+    payload.pqOwnerProof = {};
+    digest = GetProUpRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, payload);
+    llmq::pq::GlobalSignature signature{};
+    BOOST_REQUIRE(sign_slh(*owner, digest, llmq::pq::PQ_OWNER_UPDATE_CONTEXT, signature));
+    payload.vchSig.assign(signature.begin(), signature.end());
+    check(payload, true);
+
+    changed = payload;
+    BOOST_REQUIRE(CHashSigner::SignHash(::SerializeHash(changed), legacy_owner, changed.vchSig));
+    check(changed, false, "bad-protx-pq-owner-sig");
+    changed = payload;
+    BOOST_REQUIRE(sign_slh(*successor, digest, llmq::pq::PQ_OWNER_UPDATE_CONTEXT, signature));
+    changed.vchSig.assign(signature.begin(), signature.end());
+    check(changed, false, "bad-protx-pq-owner-sig");
+    changed = payload;
+    changed.ownerKeyVersion = 0;
+    check(changed, false, "bad-protx-pq-owner-version");
+    changed = payload;
+    changed.scriptPayout = GetScriptForDestination(WitnessV0KeyHash{NonNullKeyID(73)});
+    check(changed, false, "bad-protx-pq-owner-sig");
+
+    payload.pqOwnerPublicKey = successor_public;
+    digest = GetProUpRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, payload);
+    BOOST_REQUIRE(sign_slh(*successor, digest, llmq::pq::PQ_OWNER_PROOF_CONTEXT, payload.pqOwnerProof));
+    BOOST_REQUIRE(sign_slh(*owner, digest, llmq::pq::PQ_OWNER_UPDATE_CONTEXT, signature));
+    payload.vchSig.assign(signature.begin(), signature.end());
+    check(payload, true);
+    changed = payload;
+    changed.pqOwnerPublicKey = owner_public;
+    check(changed, false, "bad-protx-pq-owner-proof");
+}
+
+BOOST_AUTO_TEST_CASE(new_pq_registration_requires_owner_proof_even_without_script_checks)
+{
+    LOCK(cs_main);
+    CMutableTransaction transaction{Registration(false)};
+    CProRegTx payload;
+    BOOST_REQUIRE(GetTxPayload(CTransaction{transaction}, payload));
+    payload.keyIDOwner.SetNull();
+    slhdsa::KeyGenerationSeed seed{};
+    seed.fill(0x63);
+    auto owner = slhdsa::GenerateSecretKey(seed);
+    BOOST_REQUIRE(owner);
+    BOOST_REQUIRE(owner->GetPublicKey(payload.pqOwnerPublicKey));
+    auto digest = GetProRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, payload);
+    const auto context = llmq::pq::PQ_OWNER_PROOF_CONTEXT;
+    BOOST_REQUIRE(slhdsa::SignDeterministic(*owner,
+        std::span<const uint8_t>{digest.begin(), digest.size()},
+        std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(context.data()), context.size()},
+        payload.pqOwnerProof));
+    SetTxPayload(transaction, payload);
+    TxValidationState valid;
+    BOOST_REQUIRE_MESSAGE(CheckProvider(CTransaction{transaction}, &parent_index,
+        valid, false, false, SpecialTxValidationContext::NORMAL), valid.ToString());
+    payload.pqOwnerProof.back() ^= 1;
+    SetTxPayload(transaction, payload);
+    TxValidationState invalid;
+    BOOST_CHECK(!CheckProvider(CTransaction{transaction}, &parent_index,
+        invalid, false, false, SpecialTxValidationContext::NORMAL));
+    BOOST_CHECK_EQUAL(invalid.GetRejectReason(), "bad-protx-pq-owner-proof");
+    TxValidationState precheck;
+    BOOST_CHECK(CheckProvider(CTransaction{transaction}, &parent_index,
+        precheck, true, false, SpecialTxValidationContext::MEMPOOL_PRECHECK));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -215,6 +215,65 @@ CMutableTransaction PQRegisterTransaction(
     return tx;
 }
 
+// Reservation fixtures deliberately use structural proofs: these tests exercise
+// admission/index lifecycle after the independent consensus signature checks.
+llmq::pq::GlobalPublicKey PQMempoolOwnerKey(uint8_t tag)
+{
+    llmq::pq::GlobalPublicKey key{};
+    key[0] = tag;
+    return key;
+}
+
+CMutableTransaction PQOwnerRegistration(uint32_t tag, uint8_t owner_tag)
+{
+    auto tx{PQRegisterTransaction(tag,
+        CService{LookupNumeric("127.0.0.1", 21'000 + tag)}, CKeyID{},
+        COutPoint{PQMempoolHash(210'000 + tag), 0})};
+    CProRegTx payload;
+    CHECK_NONFATAL(GetTxPayload(tx, payload));
+    payload.keyIDVoting = {};
+    payload.pqOwnerPublicKey = PQMempoolOwnerKey(owner_tag);
+    payload.pqOwnerProof[0] = 1;
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CMutableTransaction PQOwnerRegistrar(const uint256& pro_tx_hash,
+                                     uint32_t tag, uint8_t replacement_owner = 0)
+{
+    auto tx{PQRegistrarTransaction(pro_tx_hash)};
+    tx.vin[0].prevout = COutPoint{PQMempoolHash(220'000 + tag), 0};
+    CProUpRegTx payload;
+    CHECK_NONFATAL(GetTxPayload(tx, payload));
+    payload.ownerKeyVersion = 1;
+    payload.inputsHash = CalcTxInputsHash(CTransaction{tx});
+    payload.pqVotingPublicKey[0] = 1;
+    payload.vchSig.assign(llmq::pq::GLOBAL_SIGNATURE_SIZE, 1);
+    if (replacement_owner != 0) {
+        payload.pqOwnerPublicKey = PQMempoolOwnerKey(replacement_owner);
+        payload.pqOwnerProof[0] = 1;
+    }
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
+CMutableTransaction PQOwnerInitialOperator(const uint256& pro_tx_hash,
+                                           uint32_t tag)
+{
+    auto tx{PQGlobalKeyTransaction(pro_tx_hash, tag)};
+    tx.vin[0].prevout = COutPoint{PQMempoolHash(230'000 + tag), 0};
+    llmq::pq::GlobalKeyTxPayload payload;
+    CHECK_NONFATAL(GetTxPayload(tx, payload));
+    payload.version = llmq::pq::PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION;
+    payload.operation = llmq::pq::GlobalKeyOperation::INITIAL;
+    payload.candidate.key_version = 1;
+    payload.owner_key_version = 1;
+    payload.pq_owner_authorization[0] = 1;
+    payload.transaction_inputs_hash = CalcTxInputsHash(CTransaction{tx});
+    SetTxPayload(tx, payload);
+    return tx;
+}
+
 CDeterministicMNList PQMempoolMNList(const uint256& pro_tx_hash,
                                      const COutPoint& collateral)
 {
@@ -845,6 +904,199 @@ BOOST_AUTO_TEST_CASE(PQOperatorUpdateConflicts)
     pool.removeRecursive(CTransaction{retained_global}, REMOVAL_REASON_DUMMY);
     pool.removeRecursive(CTransaction{retained_ordinary},
                          REMOVAL_REASON_DUMMY);
+}
+
+BOOST_AUTO_TEST_CASE(PQOwnerKeyReservationsAcrossRegistrationsAndUpdates)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const CBlockIndex* tip{m_node.chainman->ActiveTip()};
+    const llmq::pq::PQRegistryMempoolView registry;
+    const auto package_conflict = [&](const std::vector<CTransactionRef>& package)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+        return PQMempoolTestAccess::FindPackageProviderTxConflict(
+            pool, package, CDeterministicMNList{}, registry);
+    };
+    const auto registration{PQOwnerRegistration(1, 1)};
+    const auto same_owner_registration{PQOwnerRegistration(2, 1)};
+    const auto distinct_registration{PQOwnerRegistration(3, 2)};
+    const auto owner_update{PQOwnerRegistrar(PQMempoolHash(200'001), 1, 1)};
+    const auto same_owner_update{PQOwnerRegistrar(PQMempoolHash(200'002), 2, 1)};
+
+    // New registrations carry no legacy owner identifier. Two independent PQ
+    // owners must coexist, both in a package and in the actual mempool indexes.
+    for (const bool reverse : {false, true}) {
+        const auto& first{reverse ? distinct_registration : registration};
+        const auto& second{reverse ? registration : distinct_registration};
+        BOOST_CHECK(!package_conflict({MakeTransactionRef(first), MakeTransactionRef(second)}));
+        BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(first)));
+        BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{second}, tip));
+        BOOST_CHECK(!package_conflict({MakeTransactionRef(second)}));
+        BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(second)));
+        BOOST_CHECK_EQUAL(pool.size(), 2U);
+        pool.removeRecursive(CTransaction{first}, REMOVAL_REASON_DUMMY);
+        pool.removeRecursive(CTransaction{second}, REMOVAL_REASON_DUMMY);
+    }
+
+    const std::vector<std::pair<CMutableTransaction, CMutableTransaction>> conflicts{
+        {registration, same_owner_registration},
+        {registration, owner_update},
+        {owner_update, same_owner_update},
+    };
+    for (const auto& [left, right] : conflicts) {
+        for (const bool reverse : {false, true}) {
+            const auto& first{reverse ? right : left};
+            const auto& second{reverse ? left : right};
+            const auto conflict{package_conflict({MakeTransactionRef(first), MakeTransactionRef(second)})};
+            BOOST_REQUIRE(conflict);
+            BOOST_CHECK_EQUAL(*conflict, 1U);
+            BOOST_CHECK_EQUAL(pool.size(), 0U); // Package preflight must not publish a reservation.
+            BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(first)));
+            BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{second}, tip));
+            const auto existing_conflict{package_conflict({MakeTransactionRef(second)})};
+            BOOST_REQUIRE(existing_conflict);
+            BOOST_CHECK_EQUAL(*existing_conflict, 0U);
+            // A confirmed competing owner reservation removes the old entry and
+            // releases its indexes, even when the block tx was never in our pool.
+            auto child{PQMempoolBaseTransaction(2, 240'001)};
+            child.vin[0].prevout = COutPoint{first.GetHash(), 0};
+            BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(child)));
+            PQMempoolTestAccess::RemoveProTxConflicts(pool, CTransaction{second}, {});
+            BOOST_CHECK_EQUAL(pool.size(), 0U);
+            BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{first}, tip));
+            BOOST_CHECK(!package_conflict({MakeTransactionRef(first)}));
+        }
+    }
+
+    // Unchecked duplicate insertion is a test-only stress case: removing it
+    // must not erase the reservation held by the original transaction.
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(registration)));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(owner_update)));
+    pool.removeRecursive(CTransaction{owner_update}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{same_owner_registration}, tip));
+    pool.removeRecursive(CTransaction{registration}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{same_owner_registration}, tip));
+}
+
+BOOST_AUTO_TEST_CASE(PQOwnerTransitionOrdersAndReservationCleanup)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const auto* tip{m_node.chainman->ActiveTip()};
+    const uint256 pro_tx_hash{PQMempoolHash(200'010)};
+    const auto owner_update{PQOwnerRegistrar(pro_tx_hash, 10, 10)};
+    const auto other_owner_update{PQOwnerRegistrar(pro_tx_hash, 11, 11)};
+    const auto registrar{PQOwnerRegistrar(pro_tx_hash, 12)};
+    const auto second_registrar{PQOwnerRegistrar(pro_tx_hash, 13)};
+    const auto unrelated{PQOwnerRegistrar(PQMempoolHash(200'011), 14)};
+    const auto initial{PQOwnerInitialOperator(pro_tx_hash, 10)};
+    llmq::pq::PQRegistryMempoolView registry;
+    registry.operators = {{.pro_tx_hash = pro_tx_hash, .state_exists = 0,
+                          .has_global_key = 0, .current_commitment = {}}};
+    const auto package_conflict = [&](const std::vector<CTransactionRef>& package)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs) {
+        return PQMempoolTestAccess::FindPackageProviderTxConflict(
+            pool, package, CDeterministicMNList{}, registry);
+    };
+    BOOST_CHECK(!package_conflict({MakeTransactionRef(registrar), MakeTransactionRef(second_registrar)}));
+    BOOST_CHECK(!package_conflict({MakeTransactionRef(owner_update), MakeTransactionRef(unrelated)}));
+    // Tx86 INITIAL retains parent-owner authorization for atomic blocks; it is
+    // not an ordinary registrar update and must remain independently admissible.
+    BOOST_CHECK(!package_conflict({MakeTransactionRef(owner_update), MakeTransactionRef(initial)}));
+    BOOST_CHECK(!package_conflict({MakeTransactionRef(initial), MakeTransactionRef(owner_update)}));
+
+    for (const auto& other : {registrar, other_owner_update}) {
+        for (const bool reverse : {false, true}) {
+            const auto& first{reverse ? other : owner_update};
+            const auto& second{reverse ? owner_update : other};
+            const auto conflict{package_conflict({MakeTransactionRef(first), MakeTransactionRef(second)})};
+            BOOST_REQUIRE(conflict);
+            BOOST_CHECK_EQUAL(*conflict, 1U);
+            BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(first)));
+            BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{second}, tip));
+            BOOST_CHECK(package_conflict({MakeTransactionRef(second)}));
+            pool.removeRecursive(CTransaction{first}, REMOVAL_REASON_DUMMY);
+            BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{second}, tip));
+        }
+    }
+
+    // Multiple ordinary registrars are indexed separately. Removing one cannot
+    // permit an owner transition while another still uses the current owner.
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(registrar)));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(second_registrar)));
+    pool.removeRecursive(CTransaction{registrar}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{owner_update}, tip));
+    pool.removeRecursive(CTransaction{second_registrar}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{owner_update}, tip));
+
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(owner_update)));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(other_owner_update)));
+    pool.removeRecursive(CTransaction{other_owner_update}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(pool.existsProviderTxConflict(CTransaction{registrar}, tip));
+    pool.removeRecursive(CTransaction{owner_update}, REMOVAL_REASON_DUMMY);
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{registrar}, tip));
+
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(owner_update)));
+    auto child{PQMempoolBaseTransaction(2, 240'010)};
+    child.vin[0].prevout = COutPoint{owner_update.GetHash(), 0};
+    const auto ordinary{PQMempoolBaseTransaction(2, 240'011)};
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(child)));
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(ordinary)));
+    pool.RemoveProviderTransactionsForReorg();
+    BOOST_CHECK_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+    BOOST_CHECK(!pool.existsProviderTxConflict(CTransaction{registrar}, tip));
+    BOOST_CHECK(!package_conflict({MakeTransactionRef(owner_update)}));
+}
+
+BOOST_AUTO_TEST_CASE(PQOwnerConfirmationEvictsOnlyStaleOwnerAuthority)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const uint256 pro_tx_hash{PQMempoolHash(200'020)};
+    const auto owner_update{PQOwnerRegistrar(pro_tx_hash, 20, 20)};
+    const auto registrar{PQOwnerRegistrar(pro_tx_hash, 21)};
+    const auto initial{PQOwnerInitialOperator(pro_tx_hash, 20)};
+    auto service{PQServiceTransaction(pro_tx_hash)};
+    service.vin[0].prevout = COutPoint{PQMempoolHash(240'020), 0};
+    const auto unrelated{PQOwnerRegistrar(PQMempoolHash(200'021), 22)};
+    const auto ordinary{PQMempoolBaseTransaction(2, 240'021)};
+    std::vector<CMutableTransaction> evicted{registrar, initial};
+    for (uint32_t i = 0; i < 2; ++i) {
+        auto child{PQMempoolBaseTransaction(2, 240'030 + i)};
+        child.vin[0].prevout = COutPoint{evicted[i].GetHash(), 0};
+        evicted.push_back(child);
+    }
+    for (const auto& tx : evicted) BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(tx)));
+    for (const auto& tx : {service, unrelated, ordinary}) BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(tx)));
+    BOOST_REQUIRE_EQUAL(pool.size(), 7U);
+    PQMempoolTestAccess::RemoveProTxConflicts(pool, CTransaction{owner_update}, {});
+    BOOST_CHECK_EQUAL(pool.size(), 3U);
+    for (const auto& tx : evicted) BOOST_CHECK(!pool.exists(GenTxid::Txid(tx.GetHash())));
+    for (const auto& tx : {service, unrelated, ordinary}) BOOST_CHECK(pool.exists(GenTxid::Txid(tx.GetHash())));
+
+    // Active global-key rotation uses the operator's own SLH authority and is
+    // unaffected by an owner update. Only INITIAL bootstrap/recovery is stale.
+    auto rotation{PQGlobalKeyTransaction(pro_tx_hash, 21)};
+    rotation.vin[0].prevout = COutPoint{PQMempoolHash(240'040), 0};
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(rotation)));
+    PQMempoolTestAccess::RemoveProTxConflicts(pool, CTransaction{owner_update}, {});
+    BOOST_CHECK(pool.exists(GenTxid::Txid(rotation.GetHash())));
+    pool.removeRecursive(CTransaction{rotation}, REMOVAL_REASON_DUMMY);
+
+    // Conversely, a confirmed registrar makes a prepared owner-only update's
+    // copied voting/payout metadata stale, so evict it and its descendants.
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(owner_update)));
+    auto child{PQMempoolBaseTransaction(2, 240'041)};
+    child.vin[0].prevout = COutPoint{owner_update.GetHash(), 0};
+    BOOST_REQUIRE(pool.addUnchecked(entry.FromTx(child)));
+    PQMempoolTestAccess::RemoveProTxConflicts(pool, CTransaction{registrar}, {});
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(owner_update.GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(child.GetHash())));
+    BOOST_CHECK_EQUAL(pool.size(), 3U);
 }
 
 BOOST_AUTO_TEST_CASE(PQReadinessConflictsAreIndexedWithoutNewKeyReservations)

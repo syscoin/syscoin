@@ -114,6 +114,28 @@ std::optional<uint256> GetProviderMutation(const CTransaction& tx)
                     : std::nullopt;
 }
 
+std::optional<CProUpRegTx> GetRegistrarPayload(const CTransaction& tx)
+{
+    if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) return std::nullopt;
+    CProUpRegTx payload;
+    if (!GetTxPayload(tx, payload)) return std::nullopt;
+    return payload;
+}
+
+std::optional<llmq::pq::GlobalPublicKey> GetPQOwnerPublicKey(const CTransaction& tx)
+{
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
+        CProRegTx payload;
+        if (GetTxPayload(tx, payload) && payload.nVersion == CProRegTx::PQ_VERSION &&
+            !llmq::pq::IsNullOwnerPublicKey(payload.pqOwnerPublicKey)) return payload.pqOwnerPublicKey;
+    } else if (const auto payload{GetRegistrarPayload(tx)};
+               payload && payload->nVersion == CProUpRegTx::PQ_VERSION &&
+               !llmq::pq::IsNullOwnerPublicKey(payload->pqOwnerPublicKey)) {
+        return payload->pqOwnerPublicKey;
+    }
+    return std::nullopt;
+}
+
 bool HasPQRegistryCapacity(std::size_t base,
                            std::size_t reserved,
                            std::size_t additional,
@@ -669,6 +691,11 @@ bool CTxMemPool::addUnchecked(
             mapProTxRefs.emplace(*pq_operator_hash, tx_hash);
         }
     }
+    if (const auto owner_key{GetPQOwnerPublicKey(tx)}) mapPQOwnerKeys.emplace(*owner_key, tx_hash);
+    if (const auto registrar{GetRegistrarPayload(tx)}) {
+        mapProTxRegistrarRefs.emplace(registrar->proTxHash, tx_hash);
+        if (GetPQOwnerPublicKey(tx)) mapPQOwnerTransitions.emplace(registrar->proTxHash, tx_hash);
+    }
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if(GetTxPayload(tx, proTx)) {
@@ -676,7 +703,7 @@ bool CTxMemPool::addUnchecked(
                 mapProTxRefs.emplace(tx_hash, proTx.collateralOutpoint.hash);
             }
             mapProTxAddresses.emplace(proTx.addr, tx_hash);
-            mapProTxPubKeyIDs.emplace(proTx.keyIDOwner, tx_hash);
+            if (!proTx.keyIDOwner.IsNull()) mapProTxPubKeyIDs.emplace(proTx.keyIDOwner, tx_hash);
             if (!proTx.collateralOutpoint.hash.IsNull()) {
                 mapProTxCollaterals.emplace(proTx.collateralOutpoint, tx_hash);
             } else {
@@ -788,6 +815,15 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         }
     };
     const uint256 tx_hash{it->GetTx().GetHash()};
+    if (const auto owner_key{GetPQOwnerPublicKey(it->GetTx())}) eraseExact(mapPQOwnerKeys, *owner_key, tx_hash);
+    if (const auto registrar{GetRegistrarPayload(it->GetTx())}) {
+        eraseExact(mapPQOwnerTransitions, registrar->proTxHash, tx_hash);
+        const auto range{mapProTxRegistrarRefs.equal_range(registrar->proTxHash)};
+        for (auto ref = range.first; ref != range.second;) {
+            if (ref->second == tx_hash) ref = mapProTxRegistrarRefs.erase(ref);
+            else ++ref;
+        }
+    }
     const auto global_reservation{mapPQGlobalReservations.find(tx_hash)};
     if (global_reservation != mapPQGlobalReservations.end()) {
         const auto key{mapPQGlobalKeys.find(
@@ -832,7 +868,7 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
                 eraseProTxRef(tx_hash, proTx.collateralOutpoint.hash);
             }
             eraseExact(mapProTxAddresses, proTx.addr, tx_hash);
-            eraseExact(mapProTxPubKeyIDs, proTx.keyIDOwner, tx_hash);
+            if (!proTx.keyIDOwner.IsNull()) eraseExact(mapProTxPubKeyIDs, proTx.keyIDOwner, tx_hash);
             eraseExact(mapProTxCollaterals, proTx.collateralOutpoint,
                        tx_hash);
             eraseExact(mapProTxCollaterals,
@@ -1221,6 +1257,26 @@ void CTxMemPool::removeProTxConflicts(
     // A connected block can contain a conflicting provider mutation that was
     // never in this mempool. Copy ids before recursive removal mutates indexes.
     std::set<uint256> pq_conflicts;
+    const auto owner_key{GetPQOwnerPublicKey(tx)};
+    if (owner_key) {
+        const auto conflict{mapPQOwnerKeys.find(*owner_key)};
+        if (conflict != mapPQOwnerKeys.end() && conflict->second != tx_hash) pq_conflicts.emplace(conflict->second);
+    }
+    if (const auto registrar{GetRegistrarPayload(tx)}) {
+        const auto transition{mapPQOwnerTransitions.find(registrar->proTxHash)};
+        if (transition != mapPQOwnerTransitions.end() && transition->second != tx_hash) pq_conflicts.emplace(transition->second);
+        if (owner_key) {
+            const auto refs{mapProTxRefs.equal_range(registrar->proTxHash)};
+            for (auto ref = refs.first; ref != refs.second; ++ref) {
+                if (ref->second == tx_hash) continue;
+                const auto pending{mapTx.find(ref->second)};
+                if (pending == mapTx.end()) continue;
+                const auto global{GetPQGlobalKeyPayload(pending->GetTx())};
+                if (GetRegistrarPayload(pending->GetTx()) ||
+                    (global && global->operation == llmq::pq::GlobalKeyOperation::INITIAL)) pq_conflicts.emplace(ref->second);
+            }
+        }
+    }
     const auto global_payload{GetPQGlobalKeyPayload(tx)};
     const auto pq_operator_update{GetPQOperatorUpdate(tx)};
     const auto provider_mutation{GetProviderMutation(tx)};
@@ -1303,7 +1359,7 @@ void CTxMemPool::removeProTxConflicts(
                 removeRecursive(mapTx.find(conflictHash)->GetTx(), MemPoolRemovalReason::CONFLICT);
             }
         }
-        removeProTxPubKeyConflicts(tx, proTx.keyIDOwner);
+        if (!proTx.keyIDOwner.IsNull()) removeProTxPubKeyConflicts(tx, proTx.keyIDOwner);
         if (!proTx.collateralOutpoint.hash.IsNull()) {
             removeProTxCollateralConflicts(tx, proTx.collateralOutpoint);
         } else {
@@ -1445,6 +1501,9 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
     std::set<CService> package_provider_addresses;
     std::set<std::vector<unsigned char>> package_provider_nevm_addresses;
     std::set<CKeyID> package_provider_owner_keys;
+    std::set<llmq::pq::GlobalPublicKey> package_pq_owner_keys;
+    std::set<uint256> package_owner_transitions;
+    std::set<uint256> package_registrars;
     std::set<COutPoint> package_provider_collaterals;
     std::set<COutPoint> spent_inputs;
     std::map<uint256, const CTransaction*> prior_package_transactions;
@@ -1535,6 +1594,17 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
     for (size_t index{0}; index < package.size(); ++index) {
         if (!package[index]) continue;
         const CTransaction& tx{*package[index]};
+        const auto owner_key{GetPQOwnerPublicKey(tx)};
+        if (owner_key) {
+            if (package_pq_owner_keys.count(*owner_key) || mapPQOwnerKeys.count(*owner_key)) return index;
+            package_pq_owner_keys.insert(*owner_key);
+        }
+        if (const auto registrar{GetRegistrarPayload(tx)}) {
+            if (package_owner_transitions.count(registrar->proTxHash) || mapPQOwnerTransitions.count(registrar->proTxHash) ||
+                (owner_key && (package_registrars.count(registrar->proTxHash) || mapProTxRegistrarRefs.count(registrar->proTxHash)))) return index;
+            package_registrars.insert(registrar->proTxHash);
+            if (owner_key) package_owner_transitions.insert(registrar->proTxHash);
+        }
         const auto global{GetPQGlobalKeyPayload(tx)};
         if (tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY && !global) {
             return index;
@@ -1624,12 +1694,13 @@ std::optional<size_t> CTxMemPool::FindPackageProviderTxConflict(
             if (!GetTxPayload(tx, payload)) return index;
             if (package_provider_addresses.count(payload.addr) != 0 ||
                 mapProTxAddresses.count(payload.addr) != 0 ||
-                package_provider_owner_keys.count(payload.keyIDOwner) != 0 ||
-                mapProTxPubKeyIDs.count(payload.keyIDOwner) != 0) {
+                (!payload.keyIDOwner.IsNull() &&
+                 (package_provider_owner_keys.count(payload.keyIDOwner) != 0 ||
+                  mapProTxPubKeyIDs.count(payload.keyIDOwner) != 0))) {
                 return index;
             }
             package_provider_addresses.insert(payload.addr);
-            package_provider_owner_keys.insert(payload.keyIDOwner);
+            if (!payload.keyIDOwner.IsNull()) package_provider_owner_keys.insert(payload.keyIDOwner);
 
             COutPoint collateral{payload.collateralOutpoint};
             if (collateral.hash.IsNull()) {
@@ -2267,6 +2338,11 @@ bool CTxMemPool::existsProviderTxConflict(
         return true;
     }
     const auto provider_mutation{GetProviderMutation(tx)};
+    const auto owner_key{GetPQOwnerPublicKey(tx)};
+    if (owner_key && mapPQOwnerKeys.count(*owner_key)) return true;
+    if (const auto registrar{GetRegistrarPayload(tx)};
+        registrar && (mapPQOwnerTransitions.count(registrar->proTxHash) ||
+                      (owner_key && mapProTxRegistrarRefs.count(registrar->proTxHash)))) return true;
     const bool is_pq_revoke{
         tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE &&
         pq_operator_update.has_value()};
@@ -2366,7 +2442,7 @@ bool CTxMemPool::existsProviderTxConflict(
         CProRegTx payload;
         if (!GetTxPayload(tx, payload) ||
             mapProTxAddresses.count(payload.addr) != 0 ||
-            mapProTxPubKeyIDs.count(payload.keyIDOwner) != 0) {
+            (!payload.keyIDOwner.IsNull() && mapProTxPubKeyIDs.count(payload.keyIDOwner) != 0)) {
             return true;
         }
         COutPoint collateral{payload.collateralOutpoint};
@@ -2591,6 +2667,10 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
            memusage::DynamicUsage(mapProTxAddresses) +
            memusage::DynamicUsage(mapProTxNEVMAddresses) +
            memusage::DynamicUsage(mapProTxPubKeyIDs) +
+           memusage::DynamicUsage(mapPQOwnerKeys) +
+           memusage::DynamicUsage(mapPQOwnerTransitions) +
+           // map and multimap use the same uint256-pair tree-node estimate.
+           memusage::IncrementalDynamicUsage(mapPQOwnerTransitions) * mapProTxRegistrarRefs.size() +
            memusage::DynamicUsage(mapProTxCollaterals) +
            cachedInnerUsage;
 }

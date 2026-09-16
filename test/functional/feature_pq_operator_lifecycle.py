@@ -383,6 +383,10 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
             masternode, independent_tx)
         rotated_key = self.rotate_operator_on_same_root(
             operator_rpc, masternode, initial_key)
+        node.protx_update_owner(
+            masternode["protx_hash"], node.protx_generate_owner_key(),
+            masternode["funds_address"], node.protx_generate_voting_key())
+        self.generate(node, 1)
         self.activate_pq()
         expected_info = self.update_service(masternode)
         self.check_restart_and_fresh_replay(

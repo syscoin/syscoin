@@ -7,6 +7,7 @@
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <consensus/pq_migration_config.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <llmq/pq_global_auth.h>
 #include <llmq/quorums_utils.h>
 
@@ -156,7 +157,31 @@ bool GetProviderPayload(const CTransaction& tx,
     }
 }
 
+bool VerifyOwnerSignature(const llmq::pq::GlobalPublicKey& public_key,
+                          const uint256& digest, std::string_view context,
+                          std::span<const uint8_t> signature)
+{
+    return slhdsa::Verify(public_key, std::span{digest.begin(), digest.size()},
+        std::span{reinterpret_cast<const uint8_t*>(context.data()), context.size()}, signature);
+}
+
 } // namespace
+
+uint256 GetProRegOwnerAuthorizationHash(const uint256& genesis_hash, const CProRegTx& payload)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_OWNER_PROREG_V1"} << genesis_hash
+           << CProRegTx::SPECIALTX_TYPE << ::SerializeHash(payload);
+    return writer.GetHash();
+}
+
+uint256 GetProUpRegOwnerAuthorizationHash(const uint256& genesis_hash, const CProUpRegTx& payload)
+{
+    CHashWriter writer{SER_GETHASH, 0};
+    writer << std::string{"SYS_PQ_OWNER_REGISTRAR_V1"} << genesis_hash
+           << CProUpRegTx::SPECIALTX_TYPE << ::SerializeHash(payload);
+    return writer.GetHash();
+}
 
 std::optional<ProviderMutationIdentity>
 DecodeProviderMutationIdentity(const CTransaction& tx) noexcept
@@ -222,13 +247,17 @@ bool CProRegTx::IsTriviallyValid(TxValidationState& state, bool) const
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-mode");
     }
 
-    if (keyIDOwner.IsNull() || keyIDVoting.IsNull() ||
-        (nVersion <= BASIC_BLS_VERSION && !pubKeyOperator.IsValid()) ||
+    if ((nVersion <= BASIC_BLS_VERSION &&
+         (keyIDOwner.IsNull() || keyIDVoting.IsNull() || !pubKeyOperator.IsValid())) ||
         (nVersion == PQ_VERSION && !pubKeyOperator.IsNull())) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-key-null");
     }
     if (nVersion == PQ_VERSION && llmq::pq::IsNullVotingPublicKey(pqVotingPublicKey)) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-pq-voting-key");
+    }
+    if (nVersion == PQ_VERSION &&
+        (llmq::pq::IsNullOwnerPublicKey(pqOwnerPublicKey) || !HasNonZeroByte(pqOwnerProof))) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-pq-owner-key");
     }
     CTxDestination payoutDest;
     if (!ExtractDestination(scriptPayout, payoutDest)) {
@@ -301,6 +330,12 @@ static bool CheckInputsHash(const CTransaction& tx, const ProTx& proTx, TxValida
 }
 
 bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs)
+{
+    return CheckProRegTx(tx, pindexPrev, state, view, fJustCheck, check_sigs,
+                            SpecialTxValidationContext::NORMAL);
+}
+
+bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context)
 {
     AssertLockHeld(cs_main);
     if (tx.nVersion != SYSCOIN_TX_VERSION_MN_REGISTER) {
@@ -386,7 +421,8 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
         }
 
         // never allow duplicate keys, even if this ProTx would replace an existing MN
-        if (mnList.HasUniqueProperty(ptx.keyIDOwner) ||
+        if ((!ptx.keyIDOwner.IsNull() && mnList.HasUniqueProperty(ptx.keyIDOwner)) ||
+            (ptx.nVersion == CProRegTx::PQ_VERSION && mnList.HasUniqueProperty(ptx.pqOwnerPublicKey)) ||
             (ptx.nVersion <= CProRegTx::BASIC_BLS_VERSION &&
              mnList.HasUniqueProperty(ptx.pubKeyOperator))) {
             return FormatSyscoinErrorMessage(state, "bad-protx-dup-key", fJustCheck);
@@ -396,6 +432,14 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
 
     if (!CheckInputsHash(tx, ptx, state, fJustCheck)) {
         return false;
+    }
+
+    if (auth_era == ProviderAuthEra::POST_QUANTUM &&
+        ShouldCheckProviderAuthorization(auth_era, check_sigs, validation_context) &&
+        !VerifyOwnerSignature(ptx.pqOwnerPublicKey,
+            GetProRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, ptx),
+            llmq::pq::PQ_OWNER_PROOF_CONTEXT, ptx.pqOwnerProof)) {
+        return FormatSyscoinErrorMessage(state, "bad-protx-pq-owner-proof", fJustCheck);
     }
 
     if (!keyForPayloadSig.IsNull()) {
@@ -540,6 +584,12 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
 
 bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs)
 {
+    return CheckProUpRegTx(tx, pindexPrev, state, view, fJustCheck, check_sigs,
+                            SpecialTxValidationContext::NORMAL);
+}
+
+bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, SpecialTxValidationContext validation_context)
+{
     if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
         return FormatSyscoinErrorMessage(state, "bad-protx-type", fJustCheck);
     }
@@ -549,11 +599,25 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
     if (!GetProviderPayload(tx, auth_era, ptx)) {
         return FormatSyscoinErrorMessage(state, "bad-protx-payload", fJustCheck);
     }
+    // SYSCOIN: Preparation permits owner enrollment/rotation and initial
+    // PQ voting enrollment in the same owner-authorized transaction.
+    // General provider metadata keeps its existing activation boundary.
+    llmq::pq::PQRegistryConfig preparation_config;
+    const bool owner_preparation_update{
+        auth_era == ProviderAuthEra::LEGACY_REPLAY &&
+        ptx.nVersion == CProUpRegTx::PQ_VERSION && pindexPrev != nullptr &&
+        llmq::pq::GetPQRegistryConfig(Params().GetConsensus(), preparation_config) ==
+            llmq::pq::PQRegistryDeploymentResult::VALID &&
+        pindexPrev->nHeight + 1 >= preparation_config.preparation_height};
+    const auto registrar_era{owner_preparation_update ? ProviderAuthEra::POST_QUANTUM : auth_era};
+    if (owner_preparation_update && !GetProviderPayload(tx, registrar_era, ptx)) {
+        return FormatSyscoinErrorMessage(state, "bad-protx-payload", fJustCheck);
+    }
     const bool basic_scheme = pindexPrev != nullptr &&
         llmq::CLLMQUtils::IsV19Active(pindexPrev->nHeight);
     if (!CheckProviderVersion(ptx.nVersion,
                               CProUpRegTx::GetVersion(basic_scheme),
-                              CProUpRegTx::PQ_VERSION, auth_era, state) ||
+                              CProUpRegTx::PQ_VERSION, registrar_era, state) ||
         !ptx.IsTriviallyValid(state, basic_scheme)) {
         return FormatSyscoinErrorMessage(state, state.GetRejectReason(), fJustCheck);
     }
@@ -571,6 +635,18 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
         auto dmn = mnList.GetMN(ptx.proTxHash);
         if (!dmn) {
             return FormatSyscoinErrorMessage(state, "bad-protx-hash", fJustCheck);
+        }
+
+        if (owner_preparation_update &&
+            (llmq::pq::IsNullOwnerPublicKey(ptx.pqOwnerPublicKey) ||
+             ptx.keyIDVoting != dmn->pdmnState->keyIDVoting ||
+             (dmn->pdmnState->pqVotingKey.key_version != 0 &&
+              ptx.pqVotingPublicKey != dmn->pdmnState->pqVotingKey.public_key) ||
+             ptx.scriptPayout != dmn->pdmnState->scriptPayout)) {
+            return FormatSyscoinErrorMessage(state, "bad-protx-owner-preparation-fields", fJustCheck);
+        }
+        if (dmn->pdmnState->pqOwnerKey.HasActiveKey() && ptx.nVersion != CProUpRegTx::PQ_VERSION) {
+            return FormatSyscoinErrorMessage(state, "bad-protx-owner-downgrade", fJustCheck);
         }
 
         if (ptx.nVersion == CProUpRegTx::PQ_VERSION) {
@@ -613,8 +689,44 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
             // pass the state returned by the function above
             return false;
         }
-        if (check_sigs && !CheckHashSig(ptx, dmn->pdmnState->keyIDOwner, state, fJustCheck)) {
-            // pass the state returned by the function above
+        // SYSCOIN: Legacy owners retain authority until they explicitly enroll.
+        // Enrollment is one-way on this branch; an enrolled owner never falls
+        // back to ECDSA, including when an operator has been reset or revoked.
+        if (registrar_era == ProviderAuthEra::POST_QUANTUM) {
+            const auto& owner = dmn->pdmnState->pqOwnerKey;
+            if (!owner.IsStructurallyValid() || ptx.ownerKeyVersion != owner.key_version) {
+                return FormatSyscoinErrorMessage(state, "bad-protx-pq-owner-version", fJustCheck);
+            }
+            const bool replaces_owner = !llmq::pq::IsNullOwnerPublicKey(ptx.pqOwnerPublicKey);
+            if (replaces_owner) {
+                auto next_owner = owner;
+                if (!next_owner.UpdatePublicKey(ptx.pqOwnerPublicKey, pindexPrev->nHeight + 1)) {
+                    return FormatSyscoinErrorMessage(state, "bad-protx-pq-owner-key", fJustCheck);
+                }
+                if (mnList.HasUniqueProperty(ptx.pqOwnerPublicKey) &&
+                    mnList.GetUniquePropertyMN(ptx.pqOwnerPublicKey)->proTxHash != ptx.proTxHash) {
+                    return FormatSyscoinErrorMessage(state, "bad-protx-dup-owner-key", fJustCheck);
+                }
+            }
+            const auto digest = GetProUpRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, ptx);
+            if (ShouldCheckProviderAuthorization(registrar_era, check_sigs, validation_context)) {
+                if (replaces_owner && !VerifyOwnerSignature(ptx.pqOwnerPublicKey, digest,
+                        llmq::pq::PQ_OWNER_PROOF_CONTEXT, ptx.pqOwnerProof)) {
+                    return FormatSyscoinErrorMessage(state, "bad-protx-pq-owner-proof", fJustCheck);
+                }
+                if (owner.HasActiveKey()) {
+                    if (!VerifyOwnerSignature(owner.public_key, digest,
+                            llmq::pq::PQ_OWNER_UPDATE_CONTEXT, ptx.vchSig)) {
+                        return FormatSyscoinErrorMessage(state, "bad-protx-pq-owner-sig", fJustCheck);
+                    }
+                } else if ((check_sigs || replaces_owner) &&
+                           (dmn->pdmnState->keyIDOwner.IsNull() ||
+                            !CHashSigner::VerifyHash(replaces_owner ? digest : ::SerializeHash(ptx),
+                                dmn->pdmnState->keyIDOwner, ptx.vchSig))) {
+                    return FormatSyscoinErrorMessage(state, "bad-protx-hash-sig", fJustCheck);
+                }
+            }
+        } else if (check_sigs && !CheckHashSig(ptx, dmn->pdmnState->keyIDOwner, state, fJustCheck)) {
             return false;
         }
     }
@@ -762,10 +874,13 @@ bool CProUpRegTx::IsTriviallyValid(TxValidationState& state, bool) const
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-mode");
     }
 
-    if (keyIDVoting.IsNull() ||
-        (nVersion <= BASIC_BLS_VERSION && !pubKeyOperator.IsValid()) ||
+    if ((nVersion <= BASIC_BLS_VERSION && (keyIDVoting.IsNull() || !pubKeyOperator.IsValid())) ||
         (nVersion == PQ_VERSION && !pubKeyOperator.IsNull())) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-key-null");
+    }
+    if (nVersion == PQ_VERSION &&
+        (llmq::pq::IsNullOwnerPublicKey(pqOwnerPublicKey) == HasNonZeroByte(pqOwnerProof))) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-protx-pq-owner-proof");
     }
     return true;
 }

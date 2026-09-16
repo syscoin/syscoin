@@ -99,6 +99,8 @@ extern const std::string WATCHS;
 extern const std::string GOBJECT;
 extern const std::string PQ_VOTING_KEY;
 extern const std::string PQ_VOTING_CRYPTED_KEY;
+extern const std::string PQ_OWNER_KEY;
+extern const std::string PQ_OWNER_CRYPTED_KEY;
 
 // Keys in this set pertain only to the legacy wallet (LegacyScriptPubKeyMan) and are removed during migration from legacy to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -308,6 +310,9 @@ public:
     bool WriteVotingKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret);
     bool WriteCryptedVotingKey(const slhdsa::PublicKey& public_key,
                                const std::vector<unsigned char>& secret, bool erase_plaintext = false);
+    bool WriteOwnerKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret);
+    bool WriteCryptedOwnerKey(const slhdsa::PublicKey& public_key,
+                             const std::vector<unsigned char>& secret, bool erase_plaintext = false);
 private:
     std::unique_ptr<DatabaseBatch> m_batch;
     WalletDatabase& m_database;

@@ -82,9 +82,9 @@ BOOST_AUTO_TEST_CASE(post_anchor_registrar_codecs_omit_legacy_operator_key)
     std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> operator_key{};
     operator_key[0] = 1;
     BOOST_REQUIRE(legacy_registration.pubKeyOperator.SetBytes(operator_key));
-    BOOST_CHECK_EQUAL(WireSize(legacy_registration) - WireSize(pq_registration),
-                      CLegacyBLSPublicKey::SERIALIZED_SIZE -
-                          llmq::pq::GLOBAL_PUBLIC_KEY_SIZE);
+    BOOST_CHECK_EQUAL(WireSize(pq_registration) + CLegacyBLSPublicKey::SERIALIZED_SIZE,
+                      WireSize(legacy_registration) +
+                          2 * llmq::pq::GLOBAL_PUBLIC_KEY_SIZE + llmq::pq::GLOBAL_SIGNATURE_SIZE);
 
     CProUpRegTx pq_update;
     pq_update.nVersion = CProUpRegTx::PQ_VERSION;
@@ -95,9 +95,9 @@ BOOST_AUTO_TEST_CASE(post_anchor_registrar_codecs_omit_legacy_operator_key)
     CProUpRegTx legacy_update = pq_update;
     legacy_update.nVersion = CProUpRegTx::BASIC_BLS_VERSION;
     BOOST_REQUIRE(legacy_update.pubKeyOperator.SetBytes(operator_key));
-    BOOST_CHECK_EQUAL(WireSize(legacy_update) - WireSize(pq_update),
-                      CLegacyBLSPublicKey::SERIALIZED_SIZE -
-                          llmq::pq::GLOBAL_PUBLIC_KEY_SIZE);
+    BOOST_CHECK_EQUAL(WireSize(pq_update) + CLegacyBLSPublicKey::SERIALIZED_SIZE,
+                      WireSize(legacy_update) + 2 * llmq::pq::GLOBAL_PUBLIC_KEY_SIZE +
+                          sizeof(uint32_t) + llmq::pq::GLOBAL_SIGNATURE_SIZE);
 }
 
 BOOST_AUTO_TEST_CASE(pq_voting_provider_fields_preserve_legacy_bytes_and_bind_authorization)
@@ -108,6 +108,8 @@ BOOST_AUTO_TEST_CASE(pq_voting_provider_fields_preserve_legacy_bytes_and_bind_au
     registration.inputsHash = NonNullHash(3);
     registration.scriptPayout = GetScriptForDestination(WitnessV0KeyHash(NonNullKeyID(4)));
     registration.pqVotingPublicKey.fill(0x31);
+    registration.pqOwnerPublicKey.fill(0x32);
+    registration.pqOwnerProof.front() = 1;
     std::array<uint8_t, CLegacyBLSPublicKey::SERIALIZED_SIZE> operator_key{};
     operator_key[0] = 1;
     BOOST_REQUIRE(registration.pubKeyOperator.SetBytes(operator_key));
@@ -132,6 +134,7 @@ BOOST_AUTO_TEST_CASE(pq_voting_provider_fields_preserve_legacy_bytes_and_bind_au
         CProRegTx decoded_registration = registration;
         expected_registration >> decoded_registration;
         BOOST_CHECK(llmq::pq::IsNullVotingPublicKey(decoded_registration.pqVotingPublicKey));
+        BOOST_CHECK(llmq::pq::IsNullOwnerPublicKey(decoded_registration.pqOwnerPublicKey));
 
         CDataStream expected_update{SER_NETWORK, PROTOCOL_VERSION};
         expected_update << update.nVersion << update.proTxHash << update.nMode
@@ -177,9 +180,14 @@ BOOST_AUTO_TEST_CASE(pq_voting_provider_roundtrip_and_truncation)
     CProRegTx registration;
     registration.nVersion = CProRegTx::PQ_VERSION;
     registration.pqVotingPublicKey.fill(0x51);
+    registration.pqOwnerPublicKey.fill(0x52);
+    registration.pqOwnerProof.front() = 1;
     CProUpRegTx update;
     update.nVersion = CProUpRegTx::PQ_VERSION;
     update.pqVotingPublicKey.fill(0x61);
+    update.pqOwnerPublicKey.fill(0x62);
+    update.ownerKeyVersion = 7;
+    update.pqOwnerProof.front() = 2;
     const auto check = []<typename Payload>(const Payload& payload) {
         const auto bytes{Encoded(payload)};
         CDataStream full{bytes, SER_NETWORK, PROTOCOL_VERSION};
@@ -187,6 +195,8 @@ BOOST_AUTO_TEST_CASE(pq_voting_provider_roundtrip_and_truncation)
         full >> decoded;
         BOOST_CHECK(full.empty());
         BOOST_CHECK(decoded.pqVotingPublicKey == payload.pqVotingPublicKey);
+        BOOST_CHECK(decoded.pqOwnerPublicKey == payload.pqOwnerPublicKey);
+        BOOST_CHECK(decoded.pqOwnerProof == payload.pqOwnerProof);
         for (std::size_t size = 0; size < bytes.size(); ++size) {
             CDataStream truncated{std::vector<std::byte>(bytes.begin(), bytes.begin() + size),
                                   SER_NETWORK, PROTOCOL_VERSION};
@@ -321,7 +331,7 @@ BOOST_AUTO_TEST_CASE(pq_voting_dmn_encoding_rejects_noncanonical_records)
         BOOST_CHECK_THROW(truncated >> decoded, std::ios_base::failure);
     }
     auto unknown_schema{bytes};
-    unknown_schema[4] = std::byte{2};
+    unknown_schema[4] = std::byte{3};
     CDataStream unknown{unknown_schema, SER_DISK, PROTOCOL_VERSION};
     CDeterministicMNState decoded;
     BOOST_CHECK_THROW(unknown >> decoded, std::ios_base::failure);
@@ -337,6 +347,36 @@ BOOST_AUTO_TEST_CASE(pq_voting_dmn_encoding_rejects_noncanonical_records)
     negative_version[3] = std::byte{0xff};
     CDataStream invalid_version{negative_version, SER_DISK, PROTOCOL_VERSION};
     BOOST_CHECK_THROW(invalid_version >> decoded, std::ios_base::failure);
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_dmn_encoding_survives_operator_reset_without_ecdsa_fallback)
+{
+    CDeterministicMNState state;
+    state.nVersion = CProRegTx::PQ_VERSION;
+    state.keyIDOwner = NonNullKeyID(7);
+    llmq::pq::GlobalPublicKey owner{};
+    owner.fill(0x76);
+    BOOST_REQUIRE(state.pqOwnerKey.UpdatePublicKey(owner, 100));
+    const auto before = state.pqOwnerKey;
+    state.ResetOperatorFields();
+    BOOST_CHECK(state.pqOwnerKey == before);
+    CDataStream header{Encoded(state), SER_DISK, PROTOCOL_VERSION};
+    int32_t marker;
+    uint16_t schema;
+    header >> marker >> schema;
+    BOOST_CHECK_EQUAL(marker, -1);
+    BOOST_CHECK_EQUAL(schema, 2);
+    CDataStream stream{Encoded(state), SER_DISK, PROTOCOL_VERSION};
+    CDeterministicMNState decoded;
+    stream >> decoded;
+    BOOST_CHECK(stream.empty());
+    BOOST_CHECK(decoded.pqOwnerKey == before);
+    BOOST_CHECK(decoded.pqVotingKey == llmq::pq::VotingKeyRecord{});
+    BOOST_CHECK(decoded.keyIDOwner == state.keyIDOwner);
+    BOOST_CHECK(!decoded.pqOwnerKey.UpdatePublicKey({}, 101));
+    decoded.pqOwnerKey.key_version = std::numeric_limits<uint32_t>::max();
+    owner.front() ^= 1;
+    BOOST_CHECK(!decoded.pqOwnerKey.UpdatePublicKey(owner, 101));
 }
 
 BOOST_AUTO_TEST_CASE(pq_service_round_trip_and_hash_excludes_signature)

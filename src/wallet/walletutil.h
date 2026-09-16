@@ -80,6 +80,8 @@ enum WalletFlags : uint64_t {
     //! Older wallets must not ignore independent secrets when encrypting the database.
     WALLET_FLAG_PQ_VOTING_KEYS = (1ULL << 36),
     // SYSCOIN END: Require compatibility with independent PQ voting secrets.
+    //! SYSCOIN: Older PQ wallets must not ignore independent owner secrets.
+    WALLET_FLAG_PQ_OWNER_KEYS = (1ULL << 37),
 };
 
 //! Get the path of the wallet directory.

@@ -50,6 +50,7 @@ public:
     CLegacyBLSPublicKey pubKeyOperator;
     CKeyID keyIDVoting;
     llmq::pq::VotingKeyRecord pqVotingKey;
+    llmq::pq::OwnerKeyRecord pqOwnerKey;
     CService addr;
     CScript scriptPayout;
     CScript scriptOperatorPayout;
@@ -75,32 +76,30 @@ public:
 
     SERIALIZE_METHODS(CDeterministicMNState, obj)
     {
-        // The provider version changes on operator reset, so it cannot also
-        // select the persistent owner-delegated voting-key schema.
+        // SYSCOIN: Owner enrollment survives every operator reset. Schema 1
+        // retains the voting-only encoding; schema 2 adds independent ownership.
         static constexpr int32_t PQ_STATE_SENTINEL{-1};
-        static constexpr uint16_t PQ_STATE_SCHEMA{1};
-        SER_WRITE(obj, if (obj.nVersion < 0 || !obj.pqVotingKey.IsStructurallyValid()) {
-            throw std::ios_base::failure("non-canonical DMN voting-key state");
+        SER_WRITE(obj, if (obj.nVersion < 0 || !obj.pqVotingKey.IsStructurallyValid() ||
+                           !obj.pqOwnerKey.IsStructurallyValid()) {
+            throw std::ios_base::failure("non-canonical DMN PQ-key state");
         });
-        int32_t encoded_version{obj.pqVotingKey.key_version == 0
+        int32_t encoded_version{obj.pqVotingKey.key_version == 0 && obj.pqOwnerKey.key_version == 0
             ? obj.nVersion : PQ_STATE_SENTINEL};
         READWRITE(encoded_version);
         if (encoded_version < PQ_STATE_SENTINEL) {
             throw std::ios_base::failure("invalid DMN state encoding");
         }
-        const bool has_voting_record{encoded_version == PQ_STATE_SENTINEL};
-        if (has_voting_record) {
-            uint16_t schema{PQ_STATE_SCHEMA};
+        uint16_t schema{obj.pqOwnerKey.key_version == 0 ? uint16_t{1} : uint16_t{2}};
+        const bool extended{encoded_version == PQ_STATE_SENTINEL};
+        if (extended) {
             READWRITE(schema);
-            if (schema != PQ_STATE_SCHEMA) {
-                throw std::ios_base::failure("unknown DMN voting-key schema");
+            if (schema != 1 && schema != 2) {
+                throw std::ios_base::failure("unknown DMN PQ-key schema");
             }
             READWRITE(obj.nVersion);
-            if (obj.nVersion < 0) {
-                throw std::ios_base::failure("invalid DMN provider version");
-            }
+            if (obj.nVersion < 0) throw std::ios_base::failure("invalid DMN provider version");
         } else {
-            SER_READ(obj, obj.nVersion = encoded_version; obj.pqVotingKey = {});
+            SER_READ(obj, obj.nVersion = encoded_version; obj.pqVotingKey = {}; obj.pqOwnerKey = {});
         }
         READWRITE(
             obj.nRegisteredHeight,
@@ -120,10 +119,14 @@ public:
             obj.scriptOperatorPayout,
             obj.nCollateralHeight,
             obj.vchNEVMAddress);
-        if (has_voting_record) {
+        if (extended) {
             READWRITE(obj.pqVotingKey);
-            if (obj.pqVotingKey.key_version == 0) {
-                throw std::ios_base::failure("empty extended DMN voting-key state");
+            if (schema == 2) {
+                READWRITE(obj.pqOwnerKey);
+                if (!obj.pqOwnerKey.HasActiveKey()) throw std::ios_base::failure("empty extended DMN owner-key state");
+            } else {
+                SER_READ(obj, obj.pqOwnerKey = {});
+                if (obj.pqVotingKey.key_version == 0) throw std::ios_base::failure("empty extended DMN voting-key state");
             }
         }
     }
@@ -184,6 +187,7 @@ public:
         stream << keyIDVoting << addr << scriptPayout << scriptOperatorPayout
                << static_cast<int32_t>(nCollateralHeight) << vchNEVMAddress;
         llmq::pq::SerializeVotingKeyCommitment(stream, pqVotingKey);
+        llmq::pq::SerializeOwnerKeyCommitment(stream, pqOwnerKey);
     }
 
 public:
@@ -213,6 +217,7 @@ public:
         Field_nVersion = 0x8000,
         Field_vchNEVMAddress = 0x10000,
         Field_pqVotingKey = 0x20000,
+        Field_pqOwnerKey = 0x40000,
     };
 
 #define DMN_STATE_DIFF_ALL_FIELDS                      \
@@ -233,7 +238,8 @@ public:
     DMN_STATE_DIFF_LINE(nCollateralHeight)             \
     DMN_STATE_DIFF_LINE(nVersion)                      \
     DMN_STATE_DIFF_LINE(vchNEVMAddress)                \
-    DMN_STATE_DIFF_LINE(pqVotingKey)
+    DMN_STATE_DIFF_LINE(pqVotingKey)                    \
+    DMN_STATE_DIFF_LINE(pqOwnerKey)
 
 public:
     uint32_t fields{0};

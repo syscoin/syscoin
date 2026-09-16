@@ -17,11 +17,13 @@ or reconstructed-state checkpoint.
 
 The design fixes the following decisions:
 
-- Existing ECDSA owner, collateral, and base masternode identities remain.
-  Proposal funding votes use a separate owner-delegated PQ voting key after
-  activation. This migration replaces BLS operator authentication and quorum
-  signing; it is not a complete post-quantum conversion of every Syscoin
-  authorization path.
+- Existing masternodes may migrate their ECDSA owner authority to an independent
+  SLH owner key from preparation onward. Active SLH owner and voting keys are
+  required for payment eligibility at activation. New registrations at and
+  above activation require an SLH owner key. The separate owner-delegated PQ
+  voting key controls proposal funding votes, not ownership. Collateral and
+  ordinary coin spending retain their existing rules; this is not a complete
+  post-quantum conversion of every Syscoin authorization path.
 - Each deterministic masternode has a long-lived global
   **FIPS 205 SLH-DSA-SHAKE-128s** public key. This is the category-1 `128s`
   profile, not a category-5 profile.
@@ -71,8 +73,8 @@ The design fixes the following decisions:
 
 The design does not attempt to:
 
-- make ECDSA-protected coins, collateral, or owner/registrar authorization
-  post-quantum;
+- make ECDSA-protected coins or collateral post-quantum, or automatically
+  migrate existing owners without their authorization;
 - provide encrypted or channel-bound transport through MNAUTH;
 - prove historical Bitcoin best-chain membership from AuxPoW alone;
 - make the scheduled child profile production-ready by specification fiat; or
@@ -172,20 +174,75 @@ reuse `CHILD_SCHEDULED_WOTS_SHAKE_128_V1` with a wider authorized domain.
 
 ## 3. Cryptographic key hierarchy
 
-### 3.1 ECDSA base identity
+### 3.1 Owner authority and migration
 
-The current deterministic masternode owner identity and collateral rules remain.
-The legacy voting identifier remains serialized for historical replay, but is
-not accepted as proposal funding authority after activation. Initial registration
-of a global PQ key is authorized by the applicable existing ECDSA
-owner/registration rules.
+Ownership, delegated voting, and operator authority are distinct roles. Each
+has its own signing domain and independent wallet or operator secret. The
+collateral outpoint remains the base masternode identity and retains its
+existing spending rules. The legacy voting identifier remains serialized for
+historical replay, but is not accepted as proposal funding authority after
+activation.
+
+Existing masternodes keep their ECDSA owner authority until the owner explicitly
+migrates it. Migration is available from the configured preparation height `P`
+onward. At `A`, nodes without both an active SLH owner and an independent PQ
+voting key become payment-ineligible; late enrollment restores eligibility
+when all other payment requirements are met. It does not replace or revoke
+the operator key or child commitment.
+Operator preparation and its cutoff schedule remain separate. New registrations in block `A` or later
+require an SLH owner public key and proof of possession, rather than an ECDSA
+owner address.
+
+`protx_generate_owner_key` generates an independent SLH-DSA-SHAKE-128s owner key
+in the selected wallet and returns only its 32-byte public key as hex. Back up
+the wallet after creating it. From preparation onward, the existing owner runs:
+
+```text
+protx_update_owner "proTxHash" "newOwnerPublicKey" "feeSourceAddress" "votingPublicKey"
+```
+
+Generate the independent voting key with `protx_generate_voting_key` and pass
+that public key in the fourth argument to enroll both owner-side authorities
+together. Omitting the voting argument preserves its existing value; an
+owner-only migration remains valid but is insufficient for rewards at `A`.
+An already migrated owner may pass its current owner public key with an initial
+voting key to complete enrollment without rotating ownership or incrementing
+the owner-key version.
+
+The registrar transaction is authorized by the current owner and includes the
+new key's proof of possession. Initial migration requires the old ECDSA owner;
+later owner rotation requires the current SLH owner. The selected wallet must
+hold both the current authority and the new owner secret. The update preserves
+the payout, global operator key, and child commitment, and preserves the voting
+key unless the voting argument explicitly enrolls it.
+Before activation, the narrowly scoped migration also preserves the historical
+provider version and BLS operator bytes. During preparation it may initial-enroll
+a missing PQ voting key, but cannot change an already enrolled voting key or
+payout; other PQ registrar changes remain activation-gated.
+Each ownership change increments the branch-local owner-key version. Restart
+and branch rollback restore that exact owner record with the rest of the
+deterministic masternode state.
+
+After migration there is no ECDSA owner fallback. Payout changes, voting
+delegation, owner rotation, and owner-authorized operator bootstrap/recovery
+require the active SLH owner key and version. A voting-only wallet cannot
+exercise these permissions. Collateral spending and re-registration remain
+outside this owner-key protection until collateral itself is migrated.
+
+The wallet encrypts owner secrets with its other private material and preserves
+them in `backupwallet`/`restorewallet`. Legacy `dumpwallet`/`importwallet` use a
+separate `pqownerkey=` record, so importing a voting key does not create owner
+authority. Dumps contain unencrypted secrets and must be kept private. Older
+wallet backups and descriptor-only exports do not recover these new keys.
 
 In the legacy protocol, `ProRegTx.pubKeyOperator` stored the BLS operator
 public key and an owner-signed `ProUpRegTx` could replace it. After the PQ
 preparation boundary, both PQ `ProRegTx` and `ProUpRegTx` require that legacy
-field to be null. The owner-signed registrar update remains available for the
-separate PQ voting key and payout metadata only; it cannot rotate the global
-PQ operator key.
+field to be null. The owner-signed registrar update controls owner migration
+and rotation, the separate PQ voting key, and payout metadata; it cannot rotate
+the global PQ operator key. Before activation only the owner-change operation
+is available, optionally enrolling the independent voting key, with the other
+historical metadata preserved.
 The first tx86 record is the explicit owner-authorized bootstrap, with a
 proof-of-possession by the new SLH key. Subsequent active-key rotation is tx86
 authorized by the current SLH key, while owner recovery is available only
@@ -197,14 +254,60 @@ the PQ trust root. Active rotation and revocation require a valid signature
 from the currently active global SLH-DSA key. Revocation marks it inactive in
 the containing block and clears that snapshot's retained child-key material.
 Recovery is delayed for one full
-four-quorum active window and then requires both the ECDSA owner signature and
+four-quorum active window and then requires both the current owner's signature and
 a proof of possession by a different new key at exactly the revoked key's
 version plus one. It also starts a fresh child-tree generation; owner
 authorization alone cannot rotate an active key.
 
-New masternodes registered after activation necessarily bootstrap their first
-global key through the remaining base-identity rules. This is an explicit limit
-of retaining ECDSA identities, not a property supplied by PQ ChainLocks.
+### 3.1.1 Hosted operator registration without shared private keys
+
+The hosting provider holds the global SLH operator secret and the independent
+ChainLock seed. The customer retains the owner key and, unless delegated, the
+independent proposal voting key. The global operator key is per masternode; it
+is not a single shared provider-wide key.
+
+The provider uses its funded wallet to prepare the registration:
+
+```text
+protx_register_operator_prepare "proTxHash" "operatorKey" "chainlockSeed" "feeSourceAddress"
+```
+
+The returned object's `request` hex contains the public registration, its
+operator proof of possession, and the funded transaction. It contains neither
+the operator secret nor the ChainLock seed. The provider sends this request to
+the customer, who uses a synced node with their owner wallet:
+
+```text
+protx_decode_operator_request "request"
+protx_register_operator_sign "request"
+```
+
+Before signing, review the decoded masternode identity, network, operator
+public key, and child commitment against the provider's intended setup. The
+signing RPC returns an authorization signature as hex. It requires the current
+owner key but no operator secret, ChainLock seed, or funds in the owner wallet.
+An unmigrated owner signs with ECDSA; a migrated owner signs with SLH. The
+customer returns only that signature to the provider:
+
+```text
+protx_register_operator_submit "request" "signature"
+```
+
+The provider seals the complete funded transaction under a separate SLH request
+domain. Changing fee outputs, input sequences, locktime, or registration data
+invalidates the request before the customer signs it. The request is bound to
+the network and is not an arbitrary-message signing interface.
+
+Submission rechecks current owner authority, operator proof, transaction inputs,
+and registration eligibility before signing the provider's fee inputs and
+broadcasting. `submit=false` returns the completed transaction without
+broadcasting. Changed ownership, stale cutoffs, or spent fee inputs require
+preparing and signing a new request. Signing is local, while authority takes
+effect only after the registration is confirmed on chain. This is a one-time
+bootstrap/recovery authorization, not an owner signature on every block.
+
+`protx_register_operator_key` remains the combined convenience RPC when one
+wallet process intentionally holds both roles.
 
 ### 3.2 Global operator key
 
@@ -276,27 +379,29 @@ operator-key fallbacks are not accepted after activation. Reconciliation must
 restore the applicable signed history after a branch rollback, including an
 `A -> B -> A` public-key sequence with distinct key versions.
 
-The new DMN record uses an explicit storage discriminator (`-1`, schema `1`)
-and includes the voting-key record in diffs and state commitments. Historical
+The DMN record uses an explicit storage discriminator (`-1`, schema `1` for
+voting-only state and schema `2` when owner authority is present), and includes
+the voting and owner records in diffs and state commitments. Historical
 records with no PQ voting-key history retain their old encoding. The mutable
 operator/provider `nVersion` is not the storage discriminator: operator reset
 can return it to the legacy value without revoking the voting key.
-One first-release inverse-journal format, version `1`, handles all transitions,
-including changes to the PQ voting key.
+Inverse-journal version `2` handles ownership changes; existing version `1`
+records remain readable and cannot encode owner fields.
 
 These changes belong to the same scheduled PQ activation. Deploy the upgraded
 software before height `A`; it replays legacy blocks below `A` and enforces the
 new rules at `A`. Existing pre-journal datadirs require a one-time reindex to
 build the inverse history; this journal is not an existing mainnet format.
-Existing masternode owners must register their separate voting
-key using a PQ registrar update. Pre-activation ECDSA funding votes stop counting
+Existing masternode owners must register their separate voting key, either
+together with ownership during preparation or through a PQ registrar update
+after activation. Pre-activation ECDSA funding votes stop counting
 at the boundary and must be recast with that key. The wallet signer waits six
 blocks after key registration so its signing-block anchor includes the key.
 
-This does not make registrar ownership quantum-resistant:
-the retained ECDSA owner authorization can still change the delegated voting
-key. PQ funding signatures protect the voting role, not that remaining owner
-authorization path.
+PQ funding signatures protect the voting role independently of ownership. An
+unmigrated ECDSA owner can still change the delegated voting key. After explicit
+owner migration, that registrar permission requires the SLH owner key; possession
+of the voting secret alone never grants it.
 
 ### 3.3 Scheduled Merkle-WOTS+ child key
 
@@ -470,9 +575,12 @@ domain, genesisHash, proTxHash, recordVersion, profile,
 keyVersion, publicKey, completeChildCommitment, transactionInputsHash
 ```
 
-An `INITIAL` version-86 payload also carries one canonical 65-byte Bitcoin
-compact ECDSA signature verified against `keyIDOwner` from the previous
-deterministic-masternode snapshot. Its distinct transcript is:
+An `INITIAL` transaction uses the owner authority from the previous
+deterministic-masternode snapshot. Payload version 1 carries a canonical
+65-byte compact ECDSA signature for an unmigrated owner. Payload version 2
+carries the exact owner-key version and a 7,856-byte SLH signature for a
+migrated owner. Version 2 does not permit an ECDSA fallback. The distinct
+version-1 transcript is:
 
 ```text
 SYS_PQ_GLOBAL_OWNER_REGISTER_V1,
@@ -485,10 +593,13 @@ transactionInputsHash
 ```
 
 The owner signature bytes are excluded from the digest. `INITIAL` requires a
-recoverable compact signature with header 27 through 34 plus the independent
-new-global-key SLH-DSA proof of possession. The same transcript recovers an
-inactive key only at exact version +1. `ROTATE` requires the owner field to be
-all zero and is authorized by the current global SLH-DSA key; this avoids
+current-owner signature plus the independent new-global-key SLH-DSA proof of
+possession. Version 1 requires a recoverable compact signature with header 27
+through 34. Version 2 uses `SYS_PQ_GLOBAL_OWNER_REGISTER_V2` for its digest and
+SLH context, and additionally binds the owner-key version. The same operation
+recovers an inactive key only at exact global-key version +1. `ROTATE` retains
+payload version 1 with all owner fields zero and is authorized by the current
+global SLH-DSA key; this avoids
 reintroducing an ECDSA-only PQ trust-root replacement path.
 
 Rotation additionally binds the complete old record and is signed by the old
@@ -2601,10 +2712,20 @@ Expected failures are fail-closed:
 ### Deterministic state and quorum tests
 
 - Roster/key-root agreement across implementations and architectures.
-- Initial tx86 authorization requires both the existing ECDSA owner and the new
+- Initial tx86 authorization requires both the current ECDSA-or-SLH owner and the new
   SLH key's proof of possession; active rotation requires the current SLH key,
   while owner recovery is rejected before PQ revocation plus the full
   1,152-block delay.
+- Preparation owner migration preserves historical operator/voting/payout
+  state; migrated owners cannot fall back to ECDSA. At activation, root-bearing
+  nodes without both an SLH owner and independent PQ voting key are excluded
+  from payments, including the audit fallback; late enrollment restores
+  eligibility without replacing roots.
+- Independent provider and unfunded owner wallets complete prepare/decode/sign/
+  submit for both ECDSA and SLH owners. Mutated requests or outputs, wrong
+  owner wallets, invalid signatures, and stale owner versions are rejected.
+- Owner rotation and branch rollback preserve exact key versions, and owner
+  storage/dump/import remains separate from delegated voting authority.
 - Registration immediately before/after cutoff; wrong depth/profile/cap,
   generation, first epoch, mismatched deterministic tree ID, and root encodings.
 - Key-only and root-changing global rotation before/after cutoff, owner recovery

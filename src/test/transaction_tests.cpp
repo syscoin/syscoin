@@ -14,6 +14,7 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <core_io.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <key.h>
 #include <key_io.h>
 #include <llmq/pq_btcc.h> // SYSCOIN: PQ BTCC activation schedule coverage.
@@ -2199,6 +2200,106 @@ BOOST_AUTO_TEST_CASE(test_witness)
     UpdateInput(input1.vin[0], CombineSignatures(input1, input2, output1));
     CheckWithFlag(output1, input1, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS, true);
     CheckWithFlag(output1, input1, STANDARD_SCRIPT_VERIFY_FLAGS, true);
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_data_relay_limits)
+{
+    // Relay policy checks the version and framing only. These deliberately
+    // unsigned payloads exercise the space needed by both SLH signatures;
+    // consensus tests separately require valid, completely decoded payloads.
+    constexpr size_t TWO_SIGNATURE_PAYLOAD_SIZE{2 + 2 * slhdsa::SIGNATURE_SIZE};
+    constexpr size_t MAX_PQ_OWNER_SCRIPT_SIZE{2 * slhdsa::SIGNATURE_SIZE + 1024};
+    constexpr size_t PUSHDATA2_FRAMING_SIZE{4}; // OP_RETURN, PUSHDATA2, uint16 length
+    const std::array<std::pair<int, unsigned char>, 2> formats{{
+        {SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR, 3},
+        {SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY, 2},
+    }};
+    const auto check = [](const CMutableTransaction& tx, bool expected,
+                          const std::string& expected_reason = {},
+                          std::optional<unsigned> data_limit = MAX_OP_RETURN_RELAY) {
+        std::string reason;
+        BOOST_CHECK_EQUAL(IsStandardTx(CTransaction{tx}, data_limit, g_bare_multi, g_dust, reason), expected);
+        BOOST_CHECK_EQUAL(reason, expected_reason);
+    };
+    const auto data_script = [](unsigned char version, size_t payload_size) {
+        std::vector<unsigned char> payload(payload_size, 0);
+        payload[0] = version;
+        return CScript{} << OP_RETURN << payload;
+    };
+
+    for (const auto& [tx_version, payload_version] : formats) {
+        BOOST_TEST_CONTEXT("transaction version " << tx_version) {
+            CMutableTransaction tx;
+            tx.nVersion = tx_version;
+            tx.vin.resize(1);
+            tx.vin[0].prevout = COutPoint{uint256S("01"), 0};
+            tx.vin[0].scriptSig << std::vector<unsigned char>(65, 0);
+            tx.vout.emplace_back(0, data_script(payload_version, TWO_SIGNATURE_PAYLOAD_SIZE));
+            BOOST_REQUIRE_GT(tx.vout[0].scriptPubKey.size(), MAX_SCRIPT_SIZE);
+            check(tx, true);
+            check(tx, false, "scriptpubkey", std::nullopt);
+
+            auto changed = tx;
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_PQ_OWNER_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE);
+            BOOST_REQUIRE_EQUAL(changed.vout[0].scriptPubKey.size(), MAX_PQ_OWNER_SCRIPT_SIZE);
+            check(changed, true);
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_PQ_OWNER_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE + 1);
+            check(changed, false, "scriptpubkey");
+
+            // Neither another payload version nor a nonzero high version byte
+            // may inherit the expanded allowance.
+            changed = tx;
+            changed.vout[0].scriptPubKey = data_script(payload_version + 1, TWO_SIGNATURE_PAYLOAD_SIZE);
+            check(changed, false, "scriptpubkey");
+            std::vector<unsigned char> payload(TWO_SIGNATURE_PAYLOAD_SIZE, 0);
+            payload[0] = payload_version;
+            payload[1] = 1;
+            changed.vout[0].scriptPubKey = CScript{} << OP_RETURN << payload;
+            check(changed, false, "scriptpubkey");
+            payload[1] = 0;
+
+            changed = tx;
+            changed.vout[0].scriptPubKey << OP_0;
+            check(changed, false, "scriptpubkey");
+            changed = tx;
+            changed.vout[0].scriptPubKey << OP_RETURN;
+            check(changed, false, "scriptpubkey");
+
+            // PUSHDATA4 encodes the same bytes but is not the canonical push.
+            CScript noncanonical;
+            noncanonical << OP_RETURN << OP_PUSHDATA4;
+            for (unsigned shift = 0; shift < 32; shift += 8) {
+                noncanonical.push_back(static_cast<unsigned char>(payload.size() >> shift));
+            }
+            noncanonical.insert(noncanonical.end(), payload.begin(), payload.end());
+            changed.vout[0].scriptPubKey = noncanonical;
+            check(changed, false, "scriptpubkey");
+
+            changed = tx;
+            changed.vout[0].nValue = 1;
+            check(changed, false, "scriptpubkey");
+            changed = tx;
+            changed.vout.push_back(tx.vout[0]);
+            check(changed, false, "multi-op-return");
+
+            // Existing limits remain in force for other special transactions
+            // and for ordinary transaction data outputs.
+            changed = tx;
+            changed.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+            check(changed, false, "scriptpubkey");
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE);
+            check(changed, true);
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE + 1);
+            check(changed, false, "scriptpubkey");
+            changed = tx;
+            changed.nVersion = 2;
+            check(changed, false, "scriptpubkey");
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_IsStandard)

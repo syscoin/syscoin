@@ -228,6 +228,178 @@ BOOST_AUTO_TEST_CASE(pq_voting_keys_import_validation)
 }
 // SYSCOIN END: Independent PQ voting-key import validation and persistence.
 
+// SYSCOIN: Owner keys use a separate store, compatibility flag and signing domains.
+BOOST_AUTO_TEST_CASE(pq_owner_keys_roles_and_domains)
+{
+    slhdsa::PublicKey owner, voting, replacement;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateOwnerKey(owner, error));
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(voting, error));
+    BOOST_CHECK(owner != voting);
+    BOOST_CHECK(m_wallet.HasOwnerKey(owner));
+    BOOST_CHECK(!m_wallet.HasOwnerKey(voting));
+    BOOST_CHECK(!m_wallet.HasVotingKey(owner));
+    BOOST_CHECK(m_wallet.IsWalletFlagSet(WALLET_FLAG_PQ_OWNER_KEYS));
+    BOOST_CHECK((WALLET_FLAG_PQ_OWNER_KEYS >> 32) != 0);
+    const uint256 digest{GetRandHash()};
+    slhdsa::Signature signature;
+    for (const std::string_view context : {"SYS_PQ_OWNER_UPDATE_V1", "SYS_PQ_OWNER_PROOF_V1", "SYS_PQ_GLOBAL_OWNER_REGISTER_V2"}) {
+        BOOST_REQUIRE(m_wallet.SignOwnerAuthorization(owner, digest, context, signature, error));
+        const std::span<const uint8_t> context_bytes{reinterpret_cast<const uint8_t*>(context.data()), context.size()};
+        BOOST_CHECK(slhdsa::Verify(owner, std::span{digest.begin(), digest.size()}, context_bytes, signature));
+        BOOST_CHECK(!slhdsa::Verify(voting, std::span{digest.begin(), digest.size()}, context_bytes, signature));
+        BOOST_CHECK(!slhdsa::Verify(owner, std::span{digest.begin(), digest.size()},
+            llmq::pq::GetGlobalAuthContext(llmq::pq::GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE), signature));
+        BOOST_CHECK(!m_wallet.SignOwnerAuthorization(voting, digest, context, signature, error));
+        BOOST_CHECK(!m_wallet.SignOwnerAuthorization(owner, {}, context, signature, error));
+    }
+    BOOST_CHECK(!m_wallet.SignOwnerAuthorization(owner, digest, "", signature, error));
+    BOOST_CHECK(!m_wallet.SignOwnerAuthorization(owner, digest, "SYS_PQ_OWNER_UPDATE_V1-suffix", signature, error));
+    BOOST_CHECK(!m_wallet.SignOwnerAuthorization(owner, digest, "SYS_PQ_GOV_PROPOSAL_FUNDING_VOTE_V1", signature, error));
+    BOOST_CHECK(!m_wallet.SignVotingAuthorization(owner, digest, signature, error));
+    for (const auto flag : {WALLET_FLAG_DISABLE_PRIVATE_KEYS, WALLET_FLAG_EXTERNAL_SIGNER}) {
+        CWallet disabled(m_node.chain.get(), "", CreateMockableWalletDatabase());
+        disabled.SetWalletFlag(flag);
+        BOOST_CHECK(!disabled.GenerateOwnerKey(replacement, error));
+        BOOST_CHECK(!disabled.IsWalletFlagSet(WALLET_FLAG_PQ_OWNER_KEYS));
+        BOOST_CHECK(replacement == slhdsa::PublicKey{});
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_keys_encryption_reload)
+{
+    slhdsa::PublicKey first, second;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateOwnerKey(first, error));
+    const auto plain_record{std::make_pair(DBKeys::PQ_OWNER_KEY, first)};
+    const auto encrypted_record{std::make_pair(DBKeys::PQ_OWNER_CRYPTED_KEY, first)};
+    BOOST_CHECK(m_wallet.GetDatabase().MakeBatch()->Exists(plain_record));
+    const uint256 digest{GetRandHash()};
+    slhdsa::Signature original, restored;
+    constexpr std::string_view context{"SYS_PQ_OWNER_UPDATE_V1"};
+    BOOST_REQUIRE(m_wallet.SignOwnerAuthorization(first, digest, context, original, error));
+    BOOST_REQUIRE(m_wallet.EncryptWallet(SecureString{"pq-owner-test"}));
+    BOOST_CHECK(m_wallet.IsLocked());
+    BOOST_CHECK(!m_wallet.GetDatabase().MakeBatch()->Exists(plain_record));
+    BOOST_CHECK(m_wallet.GetDatabase().MakeBatch()->Exists(encrypted_record));
+    BOOST_CHECK(!m_wallet.SignOwnerAuthorization(first, digest, context, restored, error));
+    BOOST_CHECK(!m_wallet.GenerateOwnerKey(second, error));
+    std::map<slhdsa::PublicKey, CKeyingMaterial> exported;
+    BOOST_CHECK(!m_wallet.ExportOwnerKeys(exported, error));
+    BOOST_CHECK(!m_wallet.Unlock(SecureString{"wrong-passphrase"}));
+    BOOST_REQUIRE(m_wallet.Unlock(SecureString{"pq-owner-test"}));
+    BOOST_REQUIRE(m_wallet.GenerateOwnerKey(second, error));
+    BOOST_REQUIRE(m_wallet.ExportOwnerKeys(exported, error));
+    BOOST_REQUIRE_EQUAL(exported.size(), 2U);
+    BOOST_REQUIRE(m_wallet.ChangeWalletPassphrase(SecureString{"pq-owner-test"}, SecureString{"pq-owner-new"}));
+    CWallet reloaded(m_node.chain.get(), "", DuplicateMockDatabase(m_wallet.GetDatabase()));
+    BOOST_REQUIRE_EQUAL(reloaded.LoadWallet(), DBErrors::LOAD_OK);
+    BOOST_CHECK(reloaded.IsLocked());
+    BOOST_CHECK(reloaded.HasOwnerKey(first));
+    BOOST_CHECK(reloaded.HasOwnerKey(second));
+    BOOST_CHECK(!reloaded.HasVotingKey(first));
+    BOOST_CHECK(!reloaded.Unlock(SecureString{"pq-owner-test"}));
+    BOOST_REQUIRE(reloaded.Unlock(SecureString{"pq-owner-new"}));
+    BOOST_REQUIRE(reloaded.SignOwnerAuthorization(first, digest, context, restored, error));
+    BOOST_CHECK(original == restored);
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_keys_reject_corruption)
+{
+    slhdsa::PublicKey public_key;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateOwnerKey(public_key, error));
+    {
+        auto database{DuplicateMockDatabase(m_wallet.GetDatabase())};
+        // A wallet understanding voting keys alone must not silently load owner secrets.
+        BOOST_REQUIRE(database->MakeBatch()->Write(DBKeys::FLAGS, uint64_t{WALLET_FLAG_PQ_VOTING_KEYS}));
+        CWallet corrupted(m_node.chain.get(), "", std::move(database));
+        BOOST_CHECK_EQUAL(corrupted.LoadWallet(), DBErrors::CORRUPT);
+    }
+    {
+        auto database{DuplicateMockDatabase(m_wallet.GetDatabase())};
+        BOOST_REQUIRE(database->MakeBatch()->Write(std::make_pair(DBKeys::PQ_OWNER_KEY, public_key),
+                                                 CKeyingMaterial(slhdsa::SECRET_KEY_SIZE, 0)));
+        CWallet corrupted(m_node.chain.get(), "", std::move(database));
+        BOOST_CHECK_EQUAL(corrupted.LoadWallet(), DBErrors::CORRUPT);
+    }
+    BOOST_REQUIRE(m_wallet.EncryptWallet(SecureString{"pq-owner-test"}));
+    for (const bool repair_checksum : {false, true}) {
+        auto database{DuplicateMockDatabase(m_wallet.GetDatabase())};
+        std::pair<std::vector<unsigned char>, uint256> encrypted;
+        const auto record{std::make_pair(DBKeys::PQ_OWNER_CRYPTED_KEY, public_key)};
+        BOOST_REQUIRE(database->MakeBatch()->Read(record, encrypted));
+        encrypted.first.front() ^= 1;
+        if (repair_checksum) encrypted.second = Hash(encrypted.first);
+        BOOST_REQUIRE(database->MakeBatch()->Write(record, encrypted));
+        CWallet corrupted(m_node.chain.get(), "", std::move(database));
+        if (repair_checksum) {
+            BOOST_REQUIRE_EQUAL(corrupted.LoadWallet(), DBErrors::LOAD_OK);
+            BOOST_CHECK(!corrupted.Unlock(SecureString{"pq-owner-test"}));
+            BOOST_CHECK(corrupted.IsLocked());
+        } else {
+            BOOST_CHECK_EQUAL(corrupted.LoadWallet(), DBErrors::CORRUPT);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_and_voting_import_is_atomic)
+{
+    slhdsa::PublicKey owner, voting;
+    std::string error;
+    BOOST_REQUIRE(m_wallet.GenerateOwnerKey(owner, error));
+    BOOST_REQUIRE(m_wallet.GenerateVotingKey(voting, error));
+    std::map<slhdsa::PublicKey, CKeyingMaterial> owners, voters;
+    BOOST_REQUIRE(m_wallet.ExportOwnerKeys(owners, error));
+    BOOST_REQUIRE(m_wallet.ExportVotingKeys(voters, error));
+    CWallet imported(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    auto invalid{owners};
+    invalid.begin()->second.pop_back();
+    BOOST_CHECK(!imported.ImportPQKeys(voters, invalid, error));
+    BOOST_CHECK(!imported.HasVotingKey(voting));
+    BOOST_CHECK(!imported.HasOwnerKey(owner));
+    BOOST_CHECK(GetMockableDatabase(imported).m_records.empty());
+    BOOST_CHECK(!imported.IsWalletFlagSet(WALLET_FLAG_PQ_OWNER_KEYS | WALLET_FLAG_PQ_VOTING_KEYS));
+
+    class CommitFailureBatch final : public MockableBatch {
+        MockableData& m_records;
+        MockableData m_before;
+    public:
+        explicit CommitFailureBatch(MockableData& records) : MockableBatch(records, true), m_records(records) {}
+        bool TxnBegin() override { m_before = m_records; return true; }
+        bool TxnCommit() override { return false; }
+        bool TxnAbort() override { m_records = m_before; return true; }
+    };
+    class CommitFailureDatabase final : public MockableDatabase {
+    public:
+        std::unique_ptr<DatabaseBatch> MakeBatch(bool flush_on_close = true) override
+        {
+            return std::make_unique<CommitFailureBatch>(m_records);
+        }
+    };
+    CWallet failed(m_node.chain.get(), "", std::make_unique<CommitFailureDatabase>());
+    BOOST_CHECK(!failed.ImportPQKeys(voters, owners, error));
+    BOOST_CHECK(!failed.HasOwnerKey(owner));
+    BOOST_CHECK(!failed.HasVotingKey(voting));
+    BOOST_CHECK(!failed.IsWalletFlagSet(WALLET_FLAG_PQ_OWNER_KEYS | WALLET_FLAG_PQ_VOTING_KEYS));
+    BOOST_CHECK(GetMockableDatabase(failed).m_records.empty());
+    slhdsa::PublicKey failed_generated;
+    BOOST_CHECK(!failed.GenerateOwnerKey(failed_generated, error));
+    BOOST_CHECK(failed_generated == slhdsa::PublicKey{});
+    BOOST_CHECK(GetMockableDatabase(failed).m_records.empty());
+
+    BOOST_REQUIRE(imported.ImportPQKeys(voters, owners, error));
+    const auto records{GetMockableDatabase(imported).m_records};
+    BOOST_REQUIRE(imported.ImportOwnerKeys(owners, error));
+    BOOST_CHECK(GetMockableDatabase(imported).m_records == records);
+    BOOST_CHECK(imported.HasOwnerKey(owner));
+    BOOST_CHECK(imported.HasVotingKey(voting));
+    BOOST_CHECK(!imported.HasOwnerKey(voting));
+    BOOST_CHECK(!imported.HasVotingKey(owner));
+    BOOST_CHECK(!imported.ImportOwnerKeys(invalid, error));
+    BOOST_CHECK(GetMockableDatabase(imported).m_records == records);
+}
+
 static CMutableTransaction TestSimpleSpend(const CTransaction& from, uint32_t index, const CKey& key, const CScript& pubkey)
 {
     CMutableTransaction mtx;
@@ -550,7 +722,8 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
     const SecureString passphrase{"pq-voting-dump-test"};
     const uint256 digest{GetRandHash()};
     const auto signing_context{llmq::pq::GetGlobalAuthContext(llmq::pq::GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE)};
-    slhdsa::PublicKey first, second;
+    slhdsa::PublicKey first, second, first_owner, second_owner;
+    constexpr std::string_view owner_context{"SYS_PQ_OWNER_UPDATE_V1"};
     std::string error;
     auto source{make_wallet()};
     {
@@ -561,19 +734,27 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
         BOOST_REQUIRE(source->SetAddressBook(spending_address, long_label, AddressPurpose::RECEIVE));
     }
     BOOST_REQUIRE(source->GenerateVotingKey(first, error));
+    BOOST_REQUIRE(source->GenerateOwnerKey(first_owner, error));
     BOOST_REQUIRE(source->EncryptWallet(passphrase));
     BOOST_CHECK_THROW(call_rpc(source, wallet::dumpwallet(), backup_file), UniValue);
     BOOST_CHECK(!fs::exists(fs::PathFromString(backup_file)));
-    std::map<slhdsa::PublicKey, CKeyingMaterial> exported_keys;
+    std::map<slhdsa::PublicKey, CKeyingMaterial> exported_keys, exported_owners;
     BOOST_CHECK(!source->ExportVotingKeys(exported_keys, error));
+    BOOST_CHECK(!source->ExportOwnerKeys(exported_owners, error));
     BOOST_REQUIRE(source->Unlock(passphrase));
     BOOST_REQUIRE(source->GenerateVotingKey(second, error));
+    BOOST_REQUIRE(source->GenerateOwnerKey(second_owner, error));
+    BOOST_REQUIRE(source->ExportOwnerKeys(exported_owners, error));
     BOOST_REQUIRE(source->ExportVotingKeys(exported_keys, error));
     std::map<slhdsa::PublicKey, slhdsa::Signature> original_signatures;
     for (const auto& public_key : {first, second}) {
         auto& signature = original_signatures[public_key];
         BOOST_REQUIRE(source->SignVotingAuthorization(public_key, digest, signature, error));
         BOOST_REQUIRE(slhdsa::Verify(public_key, std::span{digest.begin(), digest.size()}, signing_context, signature));
+    }
+    for (const auto& public_key : {first_owner, second_owner}) {
+        BOOST_REQUIRE(source->SignOwnerAuthorization(public_key, digest, owner_context,
+            original_signatures[public_key], error));
     }
     const auto dump_result{call_rpc(source, wallet::dumpwallet(), backup_file)};
     BOOST_REQUIRE_EQUAL(dump_result["filename"].get_str(), backup_file);
@@ -584,6 +765,8 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
             BOOST_REQUIRE(restored->EncryptWallet(passphrase));
             BOOST_CHECK_THROW(call_rpc(restored, wallet::importwallet(), backup_file), UniValue);
             BOOST_CHECK(!restored->HasVotingKey(first));
+            BOOST_CHECK(!restored->HasOwnerKey(first_owner));
+            BOOST_CHECK(!restored->ImportOwnerKeys(exported_owners, error));
             BOOST_CHECK(!restored->ImportVotingKeys(exported_keys, error));
             BOOST_REQUIRE(restored->Unlock(passphrase));
         }
@@ -610,6 +793,16 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
             BOOST_CHECK_EQUAL(batch->Exists(std::make_pair(DBKeys::PQ_VOTING_KEY, public_key)), !encrypted);
             BOOST_CHECK_EQUAL(batch->Exists(std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, public_key)), encrypted);
         }
+        for (const auto& public_key : {first_owner, second_owner}) {
+            BOOST_CHECK(restored->HasOwnerKey(public_key));
+            BOOST_CHECK(!restored->HasVotingKey(public_key));
+            slhdsa::Signature signature;
+            BOOST_REQUIRE(restored->SignOwnerAuthorization(public_key, digest, owner_context, signature, error));
+            BOOST_CHECK(signature == original_signatures.at(public_key));
+            auto batch{restored->GetDatabase().MakeBatch()};
+            BOOST_CHECK_EQUAL(batch->Exists(std::make_pair(DBKeys::PQ_OWNER_KEY, public_key)), !encrypted);
+            BOOST_CHECK_EQUAL(batch->Exists(std::make_pair(DBKeys::PQ_OWNER_CRYPTED_KEY, public_key)), encrypted);
+        }
         CWallet reloaded(m_node.chain.get(), "", DuplicateMockDatabase(restored->GetDatabase()));
         BOOST_REQUIRE_EQUAL(reloaded.LoadWallet(), DBErrors::LOAD_OK);
         BOOST_CHECK_EQUAL(reloaded.IsLocked(), encrypted);
@@ -621,6 +814,11 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
         for (const auto& public_key : {first, second}) {
             slhdsa::Signature signature;
             BOOST_REQUIRE(reloaded.SignVotingAuthorization(public_key, digest, signature, error));
+            BOOST_CHECK(signature == original_signatures.at(public_key));
+        }
+        for (const auto& public_key : {first_owner, second_owner}) {
+            slhdsa::Signature signature;
+            BOOST_REQUIRE(reloaded.SignOwnerAuthorization(public_key, digest, owner_context, signature, error));
             BOOST_CHECK(signature == original_signatures.at(public_key));
         }
     }
@@ -636,7 +834,7 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
         std::ofstream output{compatible_path, std::ios::binary};
         for (std::string line; std::getline(input, line);) {
             output << line;
-            if (line.starts_with("pqvotingkey=")) output << " # independent funding key";
+            if (line.starts_with("pqvotingkey=") || line.starts_with("pqownerkey=")) output << " # independent PQ key";
             output << "\r\n";
         }
     }
@@ -645,6 +843,11 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
     for (const auto& public_key : {first, second}) {
         slhdsa::Signature signature;
         BOOST_REQUIRE(compatible->SignVotingAuthorization(public_key, digest, signature, error));
+        BOOST_CHECK(signature == original_signatures.at(public_key));
+    }
+    for (const auto& public_key : {first_owner, second_owner}) {
+        slhdsa::Signature signature;
+        BOOST_REQUIRE(compatible->SignOwnerAuthorization(public_key, digest, owner_context, signature, error));
         BOOST_CHECK(signature == original_signatures.at(public_key));
     }
     CKey compatible_spending_key;
@@ -662,6 +865,10 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
         "pqvotingkey=00 " + HexStr(first),
         "pqvotingkey=" + HexStr(secret) + " " + HexStr(second),
         "pqvotingkey=" + HexStr(secret) + " " + HexStr(first) + " unexpected",
+        "pqownerkey=",
+        "pqownerkey=00 " + HexStr(first_owner),
+        "pqownerkey=" + HexStr(exported_owners.at(first_owner)) + " " + HexStr(second_owner),
+        "pqownerkey=" + HexStr(exported_owners.at(first_owner)) + " " + HexStr(first_owner) + " unexpected",
     };
     for (size_t i = 0; i < malformed_records.size(); ++i) {
         const auto malformed_path{m_args.GetDataDirNet() / fs::PathFromString(strprintf("pq-voting-malformed-%d.dump", i))};
@@ -671,6 +878,9 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_dumpwallet_roundtrip, TestChain100Setup)
         }
         auto rejected{make_wallet()};
         BOOST_CHECK_THROW(call_rpc(rejected, wallet::importwallet(), fs::PathToString(malformed_path)), UniValue);
+        BOOST_CHECK(!rejected->HasOwnerKey(first_owner));
+        BOOST_CHECK(!rejected->HasOwnerKey(second_owner));
+        BOOST_CHECK(!rejected->IsWalletFlagSet(WALLET_FLAG_PQ_OWNER_KEYS));
         BOOST_CHECK(!rejected->HasVotingKey(first));
         BOOST_CHECK(!rejected->HasVotingKey(second));
         BOOST_CHECK(!rejected->IsWalletFlagSet(WALLET_FLAG_PQ_VOTING_KEYS));
@@ -790,17 +1000,21 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_database_reopen, TestingSetup)
 {
     for (DatabaseFormat format : DATABASE_FORMATS) {
         const std::string name{strprintf("pq-voting-keys-%i", format)};
-        slhdsa::PublicKey first, second;
-        slhdsa::Signature original, restored;
+        slhdsa::PublicKey first, second, owner;
+        constexpr std::string_view owner_context{"SYS_PQ_OWNER_PROOF_V1"};
+        slhdsa::Signature original, restored, owner_original;
         const uint256 digest{GetRandHash()};
         std::string error;
         TestLoadWallet(name, format, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
             wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_BLANK_WALLET);
             BOOST_REQUIRE(wallet->GenerateVotingKey(first, error));
+            BOOST_REQUIRE(wallet->GenerateOwnerKey(owner, error));
+            BOOST_REQUIRE(wallet->SignOwnerAuthorization(owner, digest, owner_context, owner_original, error));
             BOOST_REQUIRE(wallet->SignVotingAuthorization(first, digest, original, error));
         });
         TestLoadWallet(name, format, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
             BOOST_CHECK(wallet->HasVotingKey(first));
+            BOOST_CHECK(wallet->HasOwnerKey(owner));
             BOOST_REQUIRE(wallet->SignVotingAuthorization(first, digest, restored, error));
             BOOST_CHECK(restored == original);
             BOOST_REQUIRE(wallet->EncryptWallet(SecureString{"pq-persistent-wallet"}));
@@ -810,6 +1024,7 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_database_reopen, TestingSetup)
         TestLoadWallet(name, format, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
             BOOST_CHECK(wallet->IsLocked());
             BOOST_CHECK(wallet->HasVotingKey(first));
+            BOOST_CHECK(wallet->HasOwnerKey(owner));
             BOOST_CHECK(wallet->HasVotingKey(second));
             BOOST_CHECK(!wallet->SignVotingAuthorization(first, digest, restored, error));
             auto batch{wallet->GetDatabase().MakeBatch()};
@@ -817,7 +1032,12 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_database_reopen, TestingSetup)
                 BOOST_CHECK(!batch->Exists(std::make_pair(DBKeys::PQ_VOTING_KEY, public_key)));
                 BOOST_CHECK(batch->Exists(std::make_pair(DBKeys::PQ_VOTING_CRYPTED_KEY, public_key)));
             }
+            BOOST_CHECK(!batch->Exists(std::make_pair(DBKeys::PQ_OWNER_KEY, owner)));
+            BOOST_CHECK(batch->Exists(std::make_pair(DBKeys::PQ_OWNER_CRYPTED_KEY, owner)));
             BOOST_REQUIRE(wallet->Unlock(SecureString{"pq-persistent-wallet"}));
+            slhdsa::Signature owner_restored;
+            BOOST_REQUIRE(wallet->SignOwnerAuthorization(owner, digest, owner_context, owner_restored, error));
+            BOOST_CHECK(owner_original == owner_restored);
             BOOST_REQUIRE(wallet->SignVotingAuthorization(first, digest, restored, error));
             BOOST_CHECK(restored == original);
         });
@@ -827,34 +1047,37 @@ BOOST_FIXTURE_TEST_CASE(pq_voting_keys_database_reopen, TestingSetup)
 #ifdef USE_BDB
 BOOST_FIXTURE_TEST_CASE(pq_voting_keys_salvage_refuses_loss, TestingSetup)
 {
-    for (bool encrypted : {false, true}) {
-        const std::string name{encrypted ? "pq-salvage-encrypted" : "pq-salvage-plain"};
-        slhdsa::PublicKey public_key;
-        TestLoadWallet(name, DatabaseFormat::BERKELEY, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
-            std::string key_error;
-            BOOST_REQUIRE(wallet->GenerateVotingKey(public_key, key_error));
-            if (encrypted) BOOST_REQUIRE(wallet->EncryptWallet(SecureString{"pq-salvage-test"}));
-        });
-        const fs::path path{GetWalletDir() / fs::PathFromString(name)};
-        const auto directory_entries = [&] {
-            std::set<fs::path> entries;
-            for (const auto& entry : fs::directory_iterator(path)) entries.insert(entry.path());
-            return entries;
-        };
-        const auto before{directory_entries()};
-        bilingual_str error;
-        std::vector<bilingual_str> warnings;
-        BOOST_CHECK(!RecoverDatabaseFile(m_args, path, error, warnings));
-        BOOST_CHECK(error.original.find("does not support wallets containing PQ voting keys") != std::string::npos);
-        BOOST_CHECK(before == directory_entries());
-        TestLoadWallet(name, DatabaseFormat::BERKELEY, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
-            BOOST_CHECK(wallet->HasVotingKey(public_key));
-            BOOST_CHECK(wallet->IsWalletFlagSet(WALLET_FLAG_PQ_VOTING_KEYS));
-            if (encrypted) BOOST_REQUIRE(wallet->Unlock(SecureString{"pq-salvage-test"}));
-            slhdsa::Signature signature;
-            std::string key_error;
-            BOOST_CHECK(wallet->SignVotingAuthorization(public_key, GetRandHash(), signature, key_error));
-        });
+    for (bool owner : {false, true}) {
+        for (bool encrypted : {false, true}) {
+            const std::string name{strprintf("pq-salvage-%d-%d", owner, encrypted)};
+            slhdsa::PublicKey public_key;
+            TestLoadWallet(name, DatabaseFormat::BERKELEY, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+                std::string key_error;
+                BOOST_REQUIRE(owner ? wallet->GenerateOwnerKey(public_key, key_error) : wallet->GenerateVotingKey(public_key, key_error));
+                if (encrypted) BOOST_REQUIRE(wallet->EncryptWallet(SecureString{"pq-salvage-test"}));
+            });
+            const fs::path path{GetWalletDir() / fs::PathFromString(name)};
+            const auto directory_entries = [&] {
+                std::set<fs::path> entries;
+                for (const auto& entry : fs::directory_iterator(path)) entries.insert(entry.path());
+                return entries;
+            };
+            const auto before{directory_entries()};
+            bilingual_str error;
+            std::vector<bilingual_str> warnings;
+            BOOST_CHECK(!RecoverDatabaseFile(m_args, path, error, warnings));
+            BOOST_CHECK(error.original.find("does not support wallets containing PQ voting keys") != std::string::npos);
+            BOOST_CHECK(before == directory_entries());
+            TestLoadWallet(name, DatabaseFormat::BERKELEY, [&](std::shared_ptr<CWallet> wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+                BOOST_CHECK(owner ? wallet->HasOwnerKey(public_key) : wallet->HasVotingKey(public_key));
+                BOOST_CHECK(wallet->IsWalletFlagSet(owner ? WALLET_FLAG_PQ_OWNER_KEYS : WALLET_FLAG_PQ_VOTING_KEYS));
+                if (encrypted) BOOST_REQUIRE(wallet->Unlock(SecureString{"pq-salvage-test"}));
+                slhdsa::Signature signature;
+                std::string key_error;
+                BOOST_CHECK(owner ? wallet->SignOwnerAuthorization(public_key, GetRandHash(), "SYS_PQ_OWNER_UPDATE_V1", signature, key_error)
+                                  : wallet->SignVotingAuthorization(public_key, GetRandHash(), signature, key_error));
+            });
+        }
     }
 }
 #endif

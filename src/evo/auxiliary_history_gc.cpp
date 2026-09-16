@@ -565,7 +565,10 @@ MakeAuxiliaryHistoryGCDeployment(const Consensus::Params& consensus)
            << static_cast<int32_t>(
                   consensus.nPQBTCCReceiptAnchorLatestCarrierHeight)
            << static_cast<int32_t>(consensus.nCLReceiptStartBlock)
-           << CDeterministicMNListInverse::VERSION
+           // SYSCOIN: V2 inverse entries add reversible owner fields while
+           // retaining V1 reading and the same GC closure/retention contract.
+           // Pin this binding so existing authorized GC journals remain usable.
+           << CDeterministicMNListInverse::LEGACY_VERSION
            << CDeterministicMNManager::LIST_CACHE_SIZE
            << llmq::pq::PQ_REGISTRY_DISK_VERSION
            << llmq::pq::PQ_REGISTRY_CHECKPOINT_INTERVAL

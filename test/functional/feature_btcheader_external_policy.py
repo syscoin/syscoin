@@ -200,6 +200,10 @@ class BTCHeaderPolicyAuxpowTest(SyscoinTestFramework):
             funds_address,
         )
         self.generatetoaddress(node, 1, mining_address, sync_fun=self.no_op)
+        node.protx_update_owner(
+            protx_hash, node.protx_generate_owner_key(), funds_address,
+            node.protx_generate_voting_key())
+        self.generatetoaddress(node, 1, mining_address, sync_fun=self.no_op)
         info = node.protx_info(protx_hash)
         assert_equal(info["state"]["PoSeBanHeight"], -1)
         assert_equal(node.protx_operator_key_info(protx_hash)["keyVersion"], 1)

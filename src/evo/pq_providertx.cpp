@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <evo/pq_providertx.h>
+#include <crypto/slhdsa/slhdsa.h>
 
 #include <llmq/pq_global_auth.h>
 #include <hash.h>
@@ -23,7 +24,8 @@ bool HasAuthorization(const GlobalSignature& signature) noexcept
                        [](uint8_t byte) { return byte != 0; });
 }
 
-bool IsAllZero(const CompactECDSAOwnerSignature& signature) noexcept
+template <typename Signature>
+bool IsAllZero(const Signature& signature) noexcept
 {
     return std::all_of(signature.begin(), signature.end(),
                        [](uint8_t byte) { return byte == 0; });
@@ -86,12 +88,17 @@ bool DecodeStrict(const std::vector<unsigned char>& encoded,
 bool GlobalKeyTxPayload::IsTriviallyValid(int32_t transaction_version) const noexcept
 {
     if (transaction_version != SPECIALTX_TYPE ||
-        version != PQ_GLOBAL_KEY_PAYLOAD_VERSION || pro_tx_hash.IsNull() ||
+        (version != PQ_GLOBAL_KEY_PAYLOAD_VERSION && version != PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION) || pro_tx_hash.IsNull() ||
         transaction_inputs_hash.IsNull() ||
         !IsGlobalKeyCandidateStructurallyValid(candidate) ||
         !HasAuthorization(authorization)) {
         return false;
     }
+    if (version == PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION) {
+        return operation == GlobalKeyOperation::INITIAL && owner_key_version != 0 &&
+               IsAllZero(owner_authorization) && HasAuthorization(pq_owner_authorization);
+    }
+    if (owner_key_version != 0 || !IsAllZero(pq_owner_authorization)) return false;
     if (operation == GlobalKeyOperation::INITIAL) {
         // Version one is first registration. Higher versions are the same
         // owner + new-key-PoP transcript used to recover a revoked operator;
@@ -109,7 +116,8 @@ std::optional<uint256> GetGlobalOwnerRegistrationAuthorizationHash(
     const GlobalKeyTxPayload& payload)
 {
     if (genesis_hash.IsNull() ||
-        payload.version != PQ_GLOBAL_KEY_PAYLOAD_VERSION ||
+        (payload.version != PQ_GLOBAL_KEY_PAYLOAD_VERSION &&
+         payload.version != PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION) ||
         payload.operation != GlobalKeyOperation::INITIAL ||
         payload.pro_tx_hash.IsNull() ||
         payload.transaction_inputs_hash.IsNull() ||
@@ -118,7 +126,8 @@ std::optional<uint256> GetGlobalOwnerRegistrationAuthorizationHash(
     }
 
     CHashWriter writer{SER_GETHASH, 0};
-    WriteDomain(writer, PQ_GLOBAL_OWNER_REGISTER_DOMAIN);
+    WriteDomain(writer, payload.version == PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION
+        ? PQ_GLOBAL_OWNER_REGISTER_CONTEXT : PQ_GLOBAL_OWNER_REGISTER_DOMAIN);
     writer << genesis_hash << PQ_GLOBAL_KEY_TX_VERSION << payload.version
            << static_cast<uint8_t>(payload.operation) << payload.pro_tx_hash
            << payload.candidate.version << payload.candidate.profile
@@ -126,6 +135,7 @@ std::optional<uint256> GetGlobalOwnerRegistrationAuthorizationHash(
            << payload.candidate.child_key_commitment
            << payload.candidate.activated_height
            << payload.transaction_inputs_hash;
+    if (payload.version == PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION) writer << payload.owner_key_version;
     return writer.GetHash();
 }
 
@@ -136,7 +146,8 @@ bool VerifyGlobalOwnerRegistrationAuthorization(
 {
     const auto digest = GetGlobalOwnerRegistrationAuthorizationHash(
         genesis_hash, payload);
-    if (!digest || !payload.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION)) {
+    if (payload.version != PQ_GLOBAL_KEY_PAYLOAD_VERSION || previous_owner_key_id.IsNull() ||
+        !digest || !payload.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION)) {
         return false;
     }
     const std::vector<unsigned char> signature{
@@ -145,11 +156,28 @@ bool VerifyGlobalOwnerRegistrationAuthorization(
     return CHashSigner::VerifyHash(*digest, previous_owner_key_id, signature);
 }
 
+bool VerifyGlobalOwnerRegistrationAuthorization(
+    const uint256& genesis_hash, const GlobalKeyTxPayload& payload,
+    const CKeyID& previous_owner_key_id, const OwnerKeyRecord& previous_owner)
+{
+    if (!previous_owner.IsStructurallyValid()) return false;
+    if (!previous_owner.HasActiveKey()) {
+        return VerifyGlobalOwnerRegistrationAuthorization(genesis_hash, payload, previous_owner_key_id);
+    }
+    const auto digest = GetGlobalOwnerRegistrationAuthorizationHash(genesis_hash, payload);
+    return payload.version == PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION &&
+           payload.owner_key_version == previous_owner.key_version && digest &&
+           payload.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION) &&
+           slhdsa::Verify(previous_owner.public_key, std::span{digest->begin(), digest->size()},
+               std::span{reinterpret_cast<const uint8_t*>(PQ_GLOBAL_OWNER_REGISTER_CONTEXT.data()),
+                         PQ_GLOBAL_OWNER_REGISTER_CONTEXT.size()}, payload.pq_owner_authorization);
+}
+
 bool DecodeGlobalKeyTxPayload(const std::vector<unsigned char>& encoded,
                               GlobalKeyTxPayload& payload) noexcept
 {
     return DecodeStrict(encoded, GlobalKeyTxPayload::WIRE_SIZE,
-                        GlobalKeyTxPayload::WIRE_SIZE, payload);
+                        GlobalKeyTxPayload::PQ_OWNER_WIRE_SIZE, payload);
 }
 
 bool RecoveryReadinessTxPayload::IsTriviallyValid(int32_t transaction_version) const noexcept

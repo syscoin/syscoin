@@ -26,6 +26,7 @@
 #include <evo/providertx.h>
 #include <evo/deterministicmns.h>
 #include <evo/pq_providertx.h>
+#include <evo/pq_owner_key.h>
 #include <evo/pq_registry.h>
 #include <governance/governancevote.h>
 
@@ -430,6 +431,57 @@ static void ConfigureProviderVotingKey(CProRegTx& payload, const std::string& vo
     }
 }
 
+// SYSCOIN: new PQ registrations use an independent wallet-held SLH owner.
+static void ConfigureProviderOwnerKey(CProRegTx& payload, const std::string& owner)
+{
+    if (payload.nVersion == CProRegTx::PQ_VERSION) {
+        payload.pqOwnerPublicKey = ParseVotingPublicKey(owner);
+        payload.keyIDOwner = {};
+    } else {
+        payload.keyIDOwner = ParsePubKeyIDFromAddress(owner, "owner address");
+    }
+}
+
+static void SignProviderOwnerProof(CWallet& wallet, CProRegTx& payload)
+{
+    if (payload.nVersion != CProRegTx::PQ_VERSION) return;
+    std::string error;
+    if (!wallet.SignOwnerAuthorization(payload.pqOwnerPublicKey,
+            GetProRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, payload),
+            llmq::pq::PQ_OWNER_PROOF_CONTEXT, payload.pqOwnerProof, error)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, error);
+    }
+}
+
+static void SignRegistrarOwner(CWallet& wallet, const CDeterministicMNState& state,
+                               CProUpRegTx& payload)
+{
+    const uint256 digest{GetProUpRegOwnerAuthorizationHash(
+        Params().GetConsensus().hashGenesisBlock, payload)};
+    payload.vchSig.clear();
+    if (state.pqOwnerKey.HasActiveKey()) {
+        slhdsa::Signature signature{};
+        std::string error;
+        if (!wallet.SignOwnerAuthorization(state.pqOwnerKey.public_key, digest,
+                llmq::pq::PQ_OWNER_UPDATE_CONTEXT, signature, error)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, error);
+        }
+        payload.vchSig.assign(signature.begin(), signature.end());
+    } else {
+        CKey key;
+        if (!wallet.GetKey(state.keyIDOwner, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "The masternode owner key is not in this wallet");
+        }
+        // Legacy registrar signatures retain their historical hash unless
+        // explicitly enrolling a new PQ owner in the domain-separated transcript.
+        const uint256 legacy_digest{llmq::pq::IsNullOwnerPublicKey(payload.pqOwnerPublicKey)
+            ? ::SerializeHash(payload) : digest};
+        if (!CHashSigner::SignHash(legacy_digest, key, payload.vchSig)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign owner authorization");
+        }
+    }
+}
+
 static void EnsurePQPreparationRPCActive(int current_height)
 {
     llmq::pq::PQRegistryConfig config;
@@ -610,9 +662,11 @@ static llmq::pq::OperatorKeyState GetActivePQOperator(
 
 static void SignInitialGlobalKeyPayload(
     llmq::pq::GlobalKeyTxPayload& payload,
-    const CKey& owner_key,
+    CWallet& wallet,
+    const CDeterministicMNState& owner_state,
     const slhdsa::SecretKey& operator_key,
-    const llmq::pq::GlobalKeyRecord* previous_key = nullptr)
+    const llmq::pq::GlobalKeyRecord* previous_key = nullptr,
+    bool prepare_only = false)
 {
     const uint256 genesis_hash = Params().GetConsensus().hashGenesisBlock;
     const auto owner_hash = llmq::pq::GetGlobalOwnerRegistrationAuthorizationHash(
@@ -624,15 +678,40 @@ static void SignInitialGlobalKeyPayload(
         : llmq::pq::GetGlobalRecoveryAuthorizationHash(
               genesis_hash, payload.pro_tx_hash, *previous_key,
               payload.candidate, payload.transaction_inputs_hash);
-    std::vector<unsigned char> owner_signature;
-    if (!owner_hash || !operator_hash ||
-        !CHashSigner::SignHash(*owner_hash, owner_key, owner_signature) ||
-        owner_signature.size() != payload.owner_authorization.size()) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR,
-                           "Failed to sign PQ global-key owner authorization");
+    if (!owner_hash || !operator_hash) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid operator registration transcript");
     }
-    std::copy(owner_signature.begin(), owner_signature.end(),
-              payload.owner_authorization.begin());
+    payload.owner_authorization.fill(0);
+    payload.pq_owner_authorization.fill(0);
+    if (prepare_only) {
+        // Canonical placeholders are transported only in an RPC request.
+        // They are replaced and verified before a transaction can be submitted.
+        if (owner_state.pqOwnerKey.HasActiveKey()) {
+            payload.pq_owner_authorization.front() = 1;
+        } else {
+            payload.owner_authorization[0] = 27;
+            payload.owner_authorization[32] = 1;
+            payload.owner_authorization[64] = 1;
+        }
+    } else if (owner_state.pqOwnerKey.HasActiveKey()) {
+        std::string error;
+        if (!wallet.SignOwnerAuthorization(owner_state.pqOwnerKey.public_key,
+                *owner_hash, llmq::pq::PQ_GLOBAL_OWNER_REGISTER_CONTEXT,
+                payload.pq_owner_authorization, error)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, error);
+        }
+    } else {
+        CKey key;
+        std::vector<unsigned char> signature;
+        if (!wallet.GetKey(owner_state.keyIDOwner, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "The masternode owner key is not in this wallet");
+        }
+        if (!CHashSigner::SignHash(*owner_hash, key, signature) ||
+            signature.size() != payload.owner_authorization.size()) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign operator owner authorization");
+        }
+        std::copy(signature.begin(), signature.end(), payload.owner_authorization.begin());
+    }
     if (!slhdsa::SignDeterministic(
             operator_key,
             std::span<const uint8_t>{operator_hash->begin(), operator_hash->size()},
@@ -665,7 +744,7 @@ static void SignGlobalKeyRotationPayload(
     }
 }
 static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const wallet::CWallet& pwallet, const CMutableTransaction& tx, bool fSubmit = true,
-                                    const std::function<void()>& check_prepared = {})
+                                    const std::function<void()>& check_prepared = {}, bool check_fee_cap = false)
 {
     CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
     ds << tx;
@@ -676,21 +755,55 @@ static UniValue SignAndSendSpecialTx(const node::JSONRPCRequest& request, const 
     signRequest.params.setArray();
     signRequest.params.push_back(HexStr(ds));
     UniValue signResult = signrawtransactionwithwallet().HandleRequest(signRequest);
-    // Funding and wallet signing can cross a cutoff after the expensive tree
-    // build. Check even the offline result before exposing stale signed hex.
+    if (!signResult["complete"].get_bool()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Unable to sign all transaction fee inputs");
+    }
+    CTransactionRef txRef;
+    if (fSubmit || check_fee_cap) {
+        CMutableTransaction mtx;
+        if (!DecodeHexTx(mtx, signResult["hex"].get_str())) {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed. Make sure the tx has at least one input.");
+        }
+        txRef = MakeTransactionRef(std::move(mtx));
+    }
+    CAmount max_raw_tx_fee{0};
+    if (txRef) {
+        max_raw_tx_fee = node::DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(GetVirtualTransactionSize(*txRef));
+    }
+    if (check_fee_cap) {
+        // A provider request may be signed by a different operator. Protect the
+        // funding wallet even when the caller requests offline transaction hex.
+        std::map<COutPoint, Coin> coins;
+        for (const auto& input : txRef->vin) {
+            if (!coins.emplace(input.prevout, Coin{}).second) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Operator registration contains duplicate fee inputs");
+            }
+        }
+        pwallet.chain().findCoins(coins);
+        CAmount input_value{0};
+        for (const auto& [outpoint, coin] : coins) {
+            if (coin.IsSpent() || !MoneyRange(coin.out.nValue) || coin.out.nValue > MAX_MONEY - input_value) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Operator registration fee inputs are unavailable or invalid");
+            }
+            input_value += coin.out.nValue;
+        }
+        CAmount output_value{0};
+        for (const auto& output : txRef->vout) {
+            if (!MoneyRange(output.nValue) || output.nValue > MAX_MONEY - output_value) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Operator registration output amounts are invalid");
+            }
+            output_value += output.nValue;
+        }
+        if (input_value < output_value || input_value - output_value > max_raw_tx_fee) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Operator registration fee is invalid or exceeds the maximum fee rate");
+        }
+    }
+    // Funding, wallet signing and fee checks can cross a cutoff. Check even
+    // the offline result immediately before exposing the signed transaction.
     if (check_prepared) check_prepared();
     if (!fSubmit) {
         return signResult["hex"].get_str();
     }
-    CMutableTransaction mtx;
-    if(!DecodeHexTx(mtx, signResult["hex"].get_str())) {
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed. Make sure the tx has at least one input.");
-    }
-    CTransactionRef txRef(MakeTransactionRef(std::move(mtx)));
-
-    int64_t virtual_size = GetVirtualTransactionSize(*txRef);
-    CAmount max_raw_tx_fee = node::DEFAULT_MAX_RAW_TX_FEE_RATE.GetFee(virtual_size);
-
     std::string err_string;
     if (!pwallet.chain().broadcastTransaction(txRef, max_raw_tx_fee, true, err_string)) {
         throw JSONRPCError(RPC_WALLET_ERROR, err_string);
@@ -712,9 +825,7 @@ static RPCHelpMan protx_register()
                     {"collateralIndex", RPCArg::Type::NUM, RPCArg::Optional::NO, "The collateral transaction output index."},
                     {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO, "IP and port in the form \"IP:PORT\".\n"
                                         "Must be unique on the network. Can be set to 0, which will require a ProUpServTx afterwards."},
-                    {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
-                                        "The corresponding private key does not have to be known by your wallet.\n"
-                                        "The address must be unused and must differ from the collateralAddress."},
+                    {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "Before activation, an unused ECDSA owner address distinct from collateral. After activation, the 32-byte public key from protx_generate_owner_key; its private key must be in this wallet."},
                     {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. The global SLH-DSA key is registered separately."},
                     {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
                                         "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
@@ -776,10 +887,10 @@ static RPCHelpMan protx_register()
             ptx.addr = addr.value();
         }
 
-        ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
         ConfigureProviderRegistrationForNextBlock(
             ptx, current_height,
             request.params[paramIdx + 2].get_str());
+        ConfigureProviderOwnerKey(ptx, request.params[paramIdx + 1].get_str());
         ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
         int64_t operatorReward;
@@ -841,6 +952,7 @@ static RPCHelpMan protx_register()
     // lets prove we own the collateral
     UpdateSpecialTxInputsHash(tx, ptx);
     ptx.vchSig.clear();
+    SignProviderOwnerProof(*pwallet, ptx);
     std::string signature_b64;
     const SigningResult collateral_sign_result = pwallet->SignMessage(ptx.MakeSignString(), txDest, signature_b64);
     if (collateral_sign_result == SigningResult::PRIVATE_KEY_NOT_AVAILABLE) {
@@ -871,9 +983,7 @@ static RPCHelpMan protx_register_fund()
                     {"collateralAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to send the collateral to."},
                     {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO, "IP and port in the form \"IP:PORT\".\n"
                                         "Must be unique on the network. Can be set to 0, which will require a ProUpServTx afterwards."},
-                    {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
-                                        "The corresponding private key does not have to be known by your wallet.\n"
-                                        "The address must be unused and must differ from the collateralAddress."},
+                    {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "Before activation, an unused ECDSA owner address distinct from collateral. After activation, the 32-byte public key from protx_generate_owner_key; its private key must be in this wallet."},
                     {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
                     {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
                                         "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
@@ -933,10 +1043,10 @@ static RPCHelpMan protx_register_fund()
         ptx.addr = addr.value();
     }
 
-    ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
     ConfigureProviderRegistrationForNextBlock(
         ptx, current_height,
         request.params[paramIdx + 2].get_str());
+    ConfigureProviderOwnerKey(ptx, request.params[paramIdx + 1].get_str());
     ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
     int64_t operatorReward;
@@ -980,6 +1090,7 @@ static RPCHelpMan protx_register_fund()
     }
     CHECK_NONFATAL(collateralIndex != (uint32_t) -1);
     ptx.collateralOutpoint.n = collateralIndex;
+    SignProviderOwnerProof(*pwallet, ptx);
 
     SetTxPayload(tx, ptx);
     UniValue res = SignAndSendSpecialTx(request, *pwallet, tx, fSubmit);
@@ -1004,9 +1115,7 @@ static RPCHelpMan protx_register_prepare()
                 {"collateralIndex", RPCArg::Type::NUM, RPCArg::Optional::NO, "The collateral transaction output index."},
                 {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO, "IP and port in the form \"IP:PORT\".\n"
                                     "Must be unique on the network. Can be set to 0, which will require a ProUpServTx afterwards."},
-                {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "The Syscoin address to use for payee updates and proposal voting.\n"
-                                    "The corresponding private key does not have to be known by your wallet.\n"
-                                    "The address must be unused and must differ from the collateralAddress."},
+                {"ownerAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "Before activation, an unused ECDSA owner address distinct from collateral. After activation, the 32-byte public key from protx_generate_owner_key; its private key must be in this wallet."},
                 {"legacyOperatorPubKey", RPCArg::Type::STR, RPCArg::Optional::NO, "Legacy 48-byte operator public key before PQ activation; must be empty after activation. Register the global SLH-DSA key separately."},
                 {"votingAddress", RPCArg::Type::STR, RPCArg::Optional::NO, "After PQ activation, the nonzero 32-byte SLH voting public key (64 hex characters) from protx_generate_voting_key.\n"
                                     "Before activation, a legacy voting address; an empty string uses ownerAddress.\n"},
@@ -1064,10 +1173,10 @@ static RPCHelpMan protx_register_prepare()
             ptx.addr = addr.value();
         }
 
-        ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
         ConfigureProviderRegistrationForNextBlock(
             ptx, current_height,
             request.params[paramIdx + 2].get_str());
+        ConfigureProviderOwnerKey(ptx, request.params[paramIdx + 1].get_str());
         ConfigureProviderVotingKey(ptx, request.params[paramIdx + 3].get_str());
 
         int64_t operatorReward;
@@ -1123,6 +1232,7 @@ static RPCHelpMan protx_register_prepare()
     }
     // external signing with collateral key
     ptx.vchSig.clear();
+    SignProviderOwnerProof(*pwallet, ptx);
     SetTxPayload(tx, ptx);
     
 
@@ -1184,29 +1294,328 @@ static RPCHelpMan protx_register_submit()
     };
 }
 
-// SYSCOIN: one-time bootstrap/recovery of the global operator key and child root.
-static RPCHelpMan protx_register_operator_key()
+// SYSCOIN: public, network-bound registration requests keep provider secrets
+// and owner secrets in their respective wallets. A request is never broadcast.
+struct CheckedOperatorRegistration {
+    CMutableTransaction tx;
+    llmq::pq::GlobalKeyTxPayload payload;
+    CDeterministicMNCPtr dmn;
+};
+
+static constexpr std::string_view OPERATOR_REQUEST_CONTEXT{"SYS_PQ_OPERATOR_REQUEST_V1"};
+
+static uint256 GetOperatorRegistrationRequestHash(const CMutableTransaction& tx)
 {
-    return RPCHelpMan{
-        "protx_register_operator_key",
-        "\nRegisters the initial global SLH-DSA operator key, or recovers a revoked key, using owner ECDSA authorization plus new-key proof of possession.\n",
-        {
-            {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
-             "The deterministic masternode ProRegTx hash."},
-            {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
-             "The exactly 64-byte SLH-DSA-SHAKE-128s secret key. Avoid exposing this argument through shell history."},
-            {"chainlockSeed", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
-             "The independent nonzero 32-byte ChainLock seed. It deterministically commits 65,536 epoch keys and is never placed on-chain."},
-            {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""},
-             "Wallet address used to fund the transaction; defaults to the masternode payout address."},
-            {"submit", RPCArg::Type::BOOL, RPCArg::Default{true},
-             "Broadcast when true; otherwise return the signed transaction hex."},
-        },
+    return (CHashWriter{SER_GETHASH, PROTOCOL_VERSION}
+            << std::string{OPERATOR_REQUEST_CONTEXT}
+            << Params().GetConsensus().hashGenesisBlock << tx).GetHash();
+}
+
+static std::string MakeOperatorRegistrationRequest(
+    const CMutableTransaction& tx, const slhdsa::SecretKey& operator_key)
+{
+    // Fee funding may have left signatures for an earlier payload. The handoff
+    // authenticates an exact unsigned template, including change and fees.
+    CMutableTransaction unsigned_tx{tx};
+    for (auto& input : unsigned_tx.vin) {
+        input.scriptSig.clear();
+        input.scriptWitness.SetNull();
+    }
+    const uint256 digest{GetOperatorRegistrationRequestHash(unsigned_tx)};
+    const std::span<const uint8_t> context{
+        reinterpret_cast<const uint8_t*>(OPERATOR_REQUEST_CONTEXT.data()), OPERATOR_REQUEST_CONTEXT.size()};
+    slhdsa::Signature seal{};
+    if (!slhdsa::SignDeterministic(operator_key, std::span{digest.begin(), digest.size()}, context, seal)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Unable to authenticate operator registration request");
+    }
+    CDataStream stream{SER_NETWORK, PROTOCOL_VERSION};
+    stream << std::string{OPERATOR_REQUEST_CONTEXT}
+           << Params().GetConsensus().hashGenesisBlock << unsigned_tx << seal;
+    return HexStr(stream);
+}
+
+static CheckedOperatorRegistration CheckOperatorRegistrationRequest(
+    node::NodeContext& node, const std::string& request_hex)
+{
+    CheckedOperatorRegistration result;
+    // Bound allocation before decoding externally supplied data.
+    if (request_hex.size() > 262144 || !IsHex(request_hex)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid operator registration request encoding");
+    }
+    try {
+        CDataStream stream{ParseHex(request_hex), SER_NETWORK, PROTOCOL_VERSION};
+        std::string domain;
+        uint256 genesis;
+        slhdsa::Signature seal{};
+        stream >> domain >> genesis >> result.tx >> seal;
+        if (!stream.empty() || domain != OPERATOR_REQUEST_CONTEXT ||
+            genesis != Params().GetConsensus().hashGenesisBlock ||
+            result.tx.nVersion != llmq::pq::PQ_GLOBAL_KEY_TX_VERSION || result.tx.vin.empty()) {
+            throw std::runtime_error("wrong network, version, or transaction");
+        }
+        std::vector<unsigned char> data;
+        int output_index;
+        if (!GetSyscoinData(CTransaction{result.tx}, data, output_index) ||
+            !llmq::pq::DecodeGlobalKeyTxPayload(data, result.payload) ||
+            result.payload.operation != llmq::pq::GlobalKeyOperation::INITIAL ||
+            result.payload.transaction_inputs_hash != CalcTxInputsHash(CTransaction{result.tx})) {
+            throw std::runtime_error("invalid registration payload or funding inputs");
+        }
+        CScript canonical_payload;
+        canonical_payload << OP_RETURN << data;
+        for (size_t i = 0; i < result.tx.vout.size(); ++i) {
+            const auto& output{result.tx.vout[i]};
+            if (i == static_cast<size_t>(output_index)) {
+                if (output.nValue != 0 || output.scriptPubKey != canonical_payload) {
+                    throw std::runtime_error("noncanonical registration output");
+                }
+            } else if (output.scriptPubKey.IsUnspendable()) {
+                throw std::runtime_error("unexpected additional data output");
+            }
+        }
+        for (const auto& input : result.tx.vin) {
+            if (!input.scriptSig.empty() || !input.scriptWitness.IsNull()) {
+                throw std::runtime_error("operator request fee inputs must be unsigned");
+            }
+        }
+        const uint256 digest{GetOperatorRegistrationRequestHash(result.tx)};
+        const std::span<const uint8_t> context{
+            reinterpret_cast<const uint8_t*>(OPERATOR_REQUEST_CONTEXT.data()), OPERATOR_REQUEST_CONTEXT.size()};
+        if (!slhdsa::Verify(result.payload.candidate.public_key,
+                std::span{digest.begin(), digest.size()}, context, seal)) {
+            throw std::runtime_error("invalid operator request authentication");
+        }
+    } catch (const std::exception& error) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           std::string{"Invalid operator registration request: "} + error.what());
+    }
+    auto& payload{result.payload};
+    llmq::pq::OperatorKeyState operator_state;
+    std::optional<llmq::pq::OperatorKeyScheduleView> schedule;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip{node.chainman->ActiveTip()};
+        if (!tip) throw JSONRPCError(RPC_INTERNAL_ERROR, "Active chain tip is unavailable");
+        EnsurePQPreparationRPCActive(tip->nHeight);
+        result.dmn = deterministicMNManager->GetListForBlock(tip).GetMN(payload.pro_tx_hash);
+        if (!result.dmn) throw JSONRPCError(RPC_INVALID_PARAMETER, "Masternode not found at active tip");
+        const auto& owner{result.dmn->pdmnState->pqOwnerKey};
+        if (owner.HasActiveKey()) {
+            if (payload.version != llmq::pq::PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION ||
+                payload.owner_key_version != owner.key_version) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Operator request has stale owner authority");
+            }
+        } else if (payload.version != llmq::pq::PQ_GLOBAL_KEY_PAYLOAD_VERSION) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Operator request has stale owner authority");
+        }
+        llmq::pq::PQRegistryReadView snapshot;
+        std::string error;
+        if (!deterministicMNManager->GetPQRegistryReadView(tip, snapshot, error)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read PQ registry snapshot: " + error);
+        }
+        const auto key_owner{snapshot.FindRetainedGlobalKeyOwner(payload.candidate.public_key)};
+        if (key_owner && *key_owner != payload.pro_tx_hash) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Operator key belongs to another masternode");
+        }
+        if (const auto* current{snapshot.FindOperator(payload.pro_tx_hash)}) {
+            operator_state = *current;
+        } else {
+            operator_state.pro_tx_hash = payload.pro_tx_hash;
+        }
+        llmq::pq::PQRegistryConfig config;
+        if (llmq::pq::GetPQRegistryConfig(Params().GetConsensus(), config) !=
+            llmq::pq::PQRegistryDeploymentResult::VALID) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "PQ registry configuration is invalid");
+        }
+        schedule = llmq::pq::DeriveOperatorKeyScheduleView(config.schedule,
+            tip->nHeight + 1, config.registration_cutoff_blocks, config.future_horizon_epochs);
+    }
+    // Reuse the consensus state machine, including recovery delay and cutoff,
+    // on a copy. The owner's signature is deliberately checked separately.
+    if (!schedule || operator_state.Advance(*schedule) != llmq::pq::OperatorKeyStateResult::OK ||
+        operator_state.ApplyInitialGlobalKey(*schedule, Params().GetConsensus().hashGenesisBlock,
+            payload.candidate, payload.transaction_inputs_hash, payload.authorization,
+            /*owner_authorization_verified=*/true) != llmq::pq::OperatorKeyStateResult::OK) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "Operator registration proof or schedule is invalid; prepare a new request");
+    }
+    // Only unsigned requests belong in this handoff. Reject signatures carried
+    // inside the envelope so each owner signs the same canonical template.
+    llmq::pq::CompactECDSAOwnerSignature compact{};
+    llmq::pq::GlobalSignature pq{};
+    if (result.dmn->pdmnState->pqOwnerKey.HasActiveKey()) {
+        pq.front() = 1;
+    } else {
+        compact[0] = 27;
+        compact[32] = 1;
+        compact[64] = 1;
+    }
+    if (payload.owner_authorization != compact || payload.pq_owner_authorization != pq) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Operator request contains a noncanonical owner placeholder");
+    }
+    return result;
+}
+
+static UniValue DescribeOperatorRegistration(const CheckedOperatorRegistration& registration)
+{
+    const auto& payload{registration.payload};
+    const auto& state{*registration.dmn->pdmnState};
+    const bool pq{state.pqOwnerKey.HasActiveKey()};
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("proTxHash", payload.pro_tx_hash.ToString());
+    result.pushKV("genesisHash", Params().GetConsensus().hashGenesisBlock.ToString());
+    result.pushKV("ownerType", pq ? "slh-dsa" : "ecdsa");
+    result.pushKV("ownerKeyVersion", state.pqOwnerKey.key_version);
+    if (pq) result.pushKV("ownerPublicKey", HexStr(state.pqOwnerKey.public_key));
+    else result.pushKV("ownerAddress", EncodeDestination(WitnessV0KeyHash(state.keyIDOwner)));
+    result.pushKV("operatorPublicKey", HexStr(payload.candidate.public_key));
+    result.pushKV("operatorKeyVersion", payload.candidate.key_version);
+    result.pushKV("chainlockRoot", payload.candidate.child_key_commitment.root.ToString());
+    result.pushKV("treeGeneration", payload.candidate.child_key_commitment.generation);
+    result.pushKV("firstEpoch", payload.candidate.child_key_commitment.first_epoch);
+    result.pushKV("inputsHash", payload.transaction_inputs_hash.ToString());
+    return result;
+}
+
+static RPCHelpMan protx_decode_operator_request()
+{
+    return RPCHelpMan{"protx_decode_operator_request",
+        "\nValidates a provider request and displays its public registration details without signing.\n",
+        {{"request", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Request hex from protx_register_operator_prepare."}},
+        RPCResult{RPCResult::Type::ANY, "", "Validated public registration details"},
+        RPCExamples{HelpExampleCli("protx_decode_operator_request", "<request>")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            wallet->BlockUntilSyncedToCurrentChain();
+            return DescribeOperatorRegistration(CheckOperatorRegistrationRequest(
+                GetWalletNodeContext(*wallet), request.params[0].get_str()));
+        }};
+}
+
+static RPCHelpMan protx_register_operator_sign()
+{
+    return RPCHelpMan{"protx_register_operator_sign",
+        "\nAuthorizes a provider request with this wallet's current owner key. Does not sign fee inputs or broadcast. Inspect it first with protx_decode_operator_request.\n",
+        {{"request", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Request hex from the provider."}},
+        RPCResult{RPCResult::Type::STR_HEX, "", "Owner authorization hex to return to the provider"},
+        RPCExamples{HelpExampleCli("protx_register_operator_sign", "<request>")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            wallet->BlockUntilSyncedToCurrentChain();
+            const auto registration{CheckOperatorRegistrationRequest(
+                GetWalletNodeContext(*wallet), request.params[0].get_str())};
+            const auto digest{llmq::pq::GetGlobalOwnerRegistrationAuthorizationHash(
+                Params().GetConsensus().hashGenesisBlock, registration.payload)};
+            if (!digest) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid owner authorization transcript");
+            const auto& state{*registration.dmn->pdmnState};
+            if (state.pqOwnerKey.HasActiveKey()) {
+                slhdsa::Signature signature{};
+                std::string error;
+                if (!wallet->SignOwnerAuthorization(state.pqOwnerKey.public_key, *digest,
+                        llmq::pq::PQ_GLOBAL_OWNER_REGISTER_CONTEXT, signature, error)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, error);
+                }
+                return HexStr(signature);
+            }
+            CKey key;
+            std::vector<unsigned char> signature;
+            if (!wallet->GetKey(state.keyIDOwner, key)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "The masternode owner key is not in this wallet");
+            }
+            if (!CHashSigner::SignHash(*digest, key, signature)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign operator owner authorization");
+            }
+            return HexStr(signature);
+        }};
+}
+
+static RPCHelpMan protx_register_operator_submit()
+{
+    return RPCHelpMan{"protx_register_operator_submit",
+        "\nChecks the customer's owner authorization, signs provider fee inputs, and submits the prepared operator registration.\n",
+        {{"request", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Original prepared request hex."},
+         {"signature", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Authorization returned by protx_register_operator_sign."},
+         {"submit", RPCArg::Type::BOOL, RPCArg::Default{true}, "Broadcast, or return the completed transaction hex."}},
         RPCResult{RPCResult::Type::STR_HEX, "", "Transaction hash or signed transaction hex"},
+        RPCExamples{HelpExampleCli("protx_register_operator_submit", "<request> <signature>")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            wallet->BlockUntilSyncedToCurrentChain();
+            auto& node{GetWalletNodeContext(*wallet)};
+            const auto request_hex{request.params[0].get_str()};
+            auto registration{CheckOperatorRegistrationRequest(node, request_hex)};
+            {
+                LOCK(wallet->cs_wallet);
+                for (const auto& output : registration.tx.vout) {
+                    if (!output.scriptPubKey.IsUnspendable() &&
+                        !(wallet->IsMine(output.scriptPubKey) & ISMINE_SPENDABLE)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR,
+                            "Operator registration change must belong to the submitting wallet");
+                    }
+                }
+            }
+            const auto& encoded{request.params[1].get_str()};
+            const bool pq{registration.dmn->pdmnState->pqOwnerKey.HasActiveKey()};
+            const size_t expected{pq ? slhdsa::SIGNATURE_SIZE : llmq::pq::COMPACT_ECDSA_SIGNATURE_SIZE};
+            if (encoded.size() != expected * 2 || !IsHex(encoded)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Wrong owner authorization size or encoding");
+            }
+            const auto signature{ParseHex(encoded)};
+            if (pq) std::copy(signature.begin(), signature.end(), registration.payload.pq_owner_authorization.begin());
+            else std::copy(signature.begin(), signature.end(), registration.payload.owner_authorization.begin());
+            const auto& state{*registration.dmn->pdmnState};
+            const bool valid{pq
+                ? llmq::pq::VerifyGlobalOwnerRegistrationAuthorization(Params().GetConsensus().hashGenesisBlock,
+                    registration.payload, state.keyIDOwner, state.pqOwnerKey)
+                : llmq::pq::VerifyGlobalOwnerRegistrationAuthorization(Params().GetConsensus().hashGenesisBlock,
+                    registration.payload, state.keyIDOwner)};
+            if (!valid) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid owner authorization");
+            SetTxPayload(registration.tx, registration.payload);
+            const bool submit{request.params[2].isNull() || request.params[2].get_bool()};
+            return SignAndSendSpecialTx(request, *wallet, registration.tx, submit, [&]() {
+                // Wallet input signing may span an owner rotation or epoch cutoff.
+                const auto current{CheckOperatorRegistrationRequest(node, request_hex)};
+                if (current.dmn->pdmnState->pqOwnerKey != state.pqOwnerKey ||
+                    current.dmn->pdmnState->keyIDOwner != state.keyIDOwner) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Operator request has stale owner authority");
+                }
+            }, /*check_fee_cap=*/true);
+        }};
+}
+
+// SYSCOIN: one-time bootstrap/recovery of the global operator key and child root.
+static RPCHelpMan MakeRegisterOperatorRPC(bool prepare_only)
+{
+    std::vector<RPCArg> args{
+        {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+         "The deterministic masternode ProRegTx hash."},
+        {"operatorKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+         "The exactly 64-byte SLH-DSA-SHAKE-128s secret key. Avoid exposing this argument through shell history."},
+        {"chainlockSeed", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+         "The independent nonzero 32-byte ChainLock seed. It deterministically commits 65,536 epoch keys and is never placed on-chain."},
+        {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""},
+         "Funded address in this wallet; defaults to the masternode payout address. A separate provider wallet normally needs its own fee address here."},
+    };
+    if (!prepare_only) {
+        args.emplace_back("submit", RPCArg::Type::BOOL, RPCArg::Default{true},
+                          "Broadcast when true; otherwise return the signed transaction hex.");
+    }
+    return RPCHelpMan{
+        prepare_only ? "protx_register_operator_prepare" : "protx_register_operator_key",
+        prepare_only
+            ? "\nPrepares and funds a PQ operator registration using only provider secrets. Send the returned request to the owner for protx_register_operator_sign, then use protx_register_operator_submit. No owner private key is needed here.\n"
+            : "\nRegisters or recovers the SLH operator key using the current ECDSA or PQ owner authorization. For separate provider/owner wallets use protx_register_operator_prepare/sign/submit.\n",
+        std::move(args),
+        RPCResult{RPCResult::Type::ANY, "", "Transaction hash, signed transaction hex, or prepared request with public details"},
         RPCExamples{HelpExampleCli(
-            "protx_register_operator_key",
-            "<proTxHash> <64-byte-secret-key> <32-byte-chainlock-seed>")},
-        [&](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            prepare_only ? "protx_register_operator_prepare" : "protx_register_operator_key",
+            "<proTxHash> <64-byte-secret-key> <32-byte-chainlock-seed> <provider-fee-address>")},
+        [prepare_only](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
             auto pwallet = GetWalletForJSONRPCRequest(request);
             if (!pwallet) return NullUniValue;
             EnsureWalletIsUnlocked(*pwallet);
@@ -1278,13 +1687,11 @@ static RPCHelpMan protx_register_operator_key()
             const auto child_commitment = BuildCurrentChildKeyTreeCommitment(
                 node, chainlock_seed, pro_tx_hash, tree_generation);
 
-            CKey owner_key;
-            if (!pwallet->GetKey(dmn->pdmnState->keyIDOwner, owner_key)) {
-                throw JSONRPCError(RPC_WALLET_ERROR,
-                                   "The masternode owner key is not in this wallet");
-            }
-
             llmq::pq::GlobalKeyTxPayload payload;
+            if (dmn->pdmnState->pqOwnerKey.HasActiveKey()) {
+                payload.version = llmq::pq::PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION;
+                payload.owner_key_version = dmn->pdmnState->pqOwnerKey.key_version;
+            }
             payload.operation = llmq::pq::GlobalKeyOperation::INITIAL;
             payload.pro_tx_hash = pro_tx_hash;
             payload.candidate.key_version = key_version;
@@ -1295,8 +1702,8 @@ static RPCHelpMan protx_register_operator_key()
             payload.candidate.child_key_commitment = child_commitment;
             payload.transaction_inputs_hash = uint256::ONEV;
             SignInitialGlobalKeyPayload(
-                payload, owner_key, operator_key,
-                previous_key ? &*previous_key : nullptr);
+                payload, *pwallet, *dmn->pdmnState, operator_key,
+                previous_key ? &*previous_key : nullptr, prepare_only);
 
             CMutableTransaction tx;
             tx.nVersion = llmq::pq::PQ_GLOBAL_KEY_TX_VERSION;
@@ -1316,9 +1723,17 @@ static RPCHelpMan protx_register_operator_key()
             FundSpecialTx(*pwallet, tx, payload, fee_source);
             payload.transaction_inputs_hash = CalcTxInputsHash(CTransaction(tx));
             SignInitialGlobalKeyPayload(
-                payload, owner_key, operator_key,
-                previous_key ? &*previous_key : nullptr);
+                payload, *pwallet, *dmn->pdmnState, operator_key,
+                previous_key ? &*previous_key : nullptr, prepare_only);
             SetTxPayload(tx, payload);
+
+            if (prepare_only) {
+                const auto prepared{MakeOperatorRegistrationRequest(tx, operator_key)};
+                auto checked{CheckOperatorRegistrationRequest(node, prepared)};
+                UniValue result{DescribeOperatorRegistration(checked)};
+                result.pushKV("request", prepared);
+                return result;
+            }
 
             const bool submit = request.params[4].isNull() ||
                                 request.params[4].get_bool();
@@ -1327,6 +1742,117 @@ static RPCHelpMan protx_register_operator_key()
             });
         },
     };
+}
+
+static RPCHelpMan protx_register_operator_key() { return MakeRegisterOperatorRPC(false); }
+static RPCHelpMan protx_register_operator_prepare() { return MakeRegisterOperatorRPC(true); }
+
+static RPCHelpMan protx_generate_owner_key()
+{
+    return RPCHelpMan{"protx_generate_owner_key",
+        "\nGenerates an independent SLH owner key in this wallet and returns only its public key. Back up the wallet after generation.\n",
+        {}, RPCResult{RPCResult::Type::STR_HEX, "", "32-byte SLH owner public key"},
+        RPCExamples{HelpExampleCli("protx_generate_owner_key", "")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            slhdsa::PublicKey public_key{};
+            std::string error;
+            if (!wallet->GenerateOwnerKey(public_key, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            return HexStr(public_key);
+        }};
+}
+
+static RPCHelpMan protx_update_owner()
+{
+    return RPCHelpMan{"protx_update_owner",
+        "\nMigrates an existing ECDSA owner to SLH, or rotates its SLH owner key. Requires the current owner key and the new owner private key in this wallet. Optionally enrolls the separate PQ voting key in the same transaction. Preserves payout and operator keys. Available from PQ preparation; active PQ owner and voting keys, plus the operator commitment, are required for rewards at activation.\n",
+        {{"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Masternode registration hash."},
+         {"ownerPublicKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Public key from protx_generate_owner_key. The existing owner key may be retained when enrolling a missing voting key."},
+         {"feeSourceAddress", RPCArg::Type::STR, RPCArg::Default{""}, "Fee source, or empty to use the existing payout address."},
+         {"votingPublicKey", RPCArg::Type::STR, RPCArg::Default{""}, "Public key from protx_generate_voting_key in the owner's or delegate's wallet. Empty preserves the current voting key. Before activation only initial voting enrollment is allowed."}},
+        RPCResult{RPCResult::Type::STR_HEX, "", "Owner update transaction hash"},
+        RPCExamples{HelpExampleCli("protx_update_owner", "<proTxHash> <ownerPublicKey> <feeSourceAddress> <votingPublicKey>")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            wallet->BlockUntilSyncedToCurrentChain();
+            auto& node{GetWalletNodeContext(*wallet)};
+            CProUpRegTx payload;
+            payload.nVersion = CProUpRegTx::PQ_VERSION;
+            payload.proTxHash = ParseHashV(request.params[0], "proTxHash");
+            payload.pqOwnerPublicKey = ParseVotingPublicKey(request.params[1].get_str());
+            CDeterministicMNCPtr dmn;
+            bool preparation{false};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip{node.chainman->ActiveTip()};
+                if (!tip) throw JSONRPCError(RPC_INTERNAL_ERROR, "Active chain tip is unavailable");
+                EnsurePQPreparationRPCActive(tip->nHeight);
+                preparation = Consensus::CheckPQLegacyReplay(
+                    Params().GetConsensus(), tip->nHeight + 1) != Consensus::PQLegacyReplayResult::RETIRED;
+                dmn = deterministicMNManager->GetListForBlock(tip).GetMN(payload.proTxHash);
+            }
+            if (!dmn) throw JSONRPCError(RPC_INVALID_PARAMETER, "Masternode not found at active tip");
+            const auto& state{*dmn->pdmnState};
+            if (!wallet->HasOwnerKey(payload.pqOwnerPublicKey)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "New owner private key is not in this wallet");
+            }
+            payload.ownerKeyVersion = state.pqOwnerKey.key_version;
+            payload.keyIDVoting = state.keyIDVoting;
+            payload.pqVotingPublicKey = state.pqVotingKey.public_key;
+            if (!request.params[3].isNull() && !request.params[3].get_str().empty()) {
+                payload.pqVotingPublicKey = ParseVotingPublicKey(request.params[3].get_str());
+                if (preparation && state.pqVotingKey.key_version != 0 &&
+                    payload.pqVotingPublicKey != state.pqVotingKey.public_key) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Before activation only initial PQ voting enrollment is allowed");
+                }
+            }
+            if (state.pqOwnerKey.public_key == payload.pqOwnerPublicKey &&
+                (state.pqVotingKey.key_version != 0 ||
+                 llmq::pq::IsNullVotingPublicKey(payload.pqVotingPublicKey))) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Owner key is already active and no initial voting enrollment was requested");
+            }
+            payload.scriptPayout = state.scriptPayout;
+            payload.vchSig.resize(state.pqOwnerKey.HasActiveKey() ? slhdsa::SIGNATURE_SIZE : 65);
+            CTxDestination fee_source;
+            if (!request.params[2].isNull() && !request.params[2].get_str().empty()) {
+                fee_source = DecodeDestination(request.params[2].get_str());
+                if (!IsValidDestination(fee_source)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid fee source address");
+                }
+            } else if (!ExtractDestination(state.scriptPayout, fee_source)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Masternode payout script has no usable fee address");
+            }
+            CMutableTransaction tx;
+            tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+            FundSpecialTx(*wallet, tx, payload, fee_source);
+            UpdateSpecialTxInputsHash(tx, payload);
+            std::string error;
+            if (!wallet->SignOwnerAuthorization(payload.pqOwnerPublicKey,
+                    GetProUpRegOwnerAuthorizationHash(Params().GetConsensus().hashGenesisBlock, payload),
+                    llmq::pq::PQ_OWNER_PROOF_CONTEXT, payload.pqOwnerProof, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            SignRegistrarOwner(*wallet, state, payload);
+            SetTxPayload(tx, payload);
+            return SignAndSendSpecialTx(request, *wallet, tx, true, [&]() {
+                LOCK(cs_main);
+                const auto* tip{node.chainman->ActiveTip()};
+                const auto current{tip ? deterministicMNManager->GetListForBlock(tip).GetMN(payload.proTxHash) : nullptr};
+                if (!current || current->pdmnState->pqOwnerKey != state.pqOwnerKey ||
+                    current->pdmnState->keyIDOwner != state.keyIDOwner ||
+                    current->pdmnState->keyIDVoting != state.keyIDVoting ||
+                    current->pdmnState->pqVotingKey != state.pqVotingKey ||
+                    current->pdmnState->scriptPayout != state.scriptPayout) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Owner or registrar state changed while signing; retry the update");
+                }
+            });
+        }};
 }
 
 static RPCHelpMan protx_generate_voting_key()
@@ -1862,8 +2388,10 @@ static RPCHelpMan protx_update_service()
         CMutableTransaction tx;
         tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
 
-        // make sure we get anough fees added
-        ptx.vchSig.resize(65);
+        // SYSCOIN: migrated ownership carries a full SLH signature.
+        ptx.ownerKeyVersion = dmn->pdmnState->pqOwnerKey.key_version;
+        ptx.vchSig.resize(dmn->pdmnState->pqOwnerKey.HasActiveKey()
+            ? slhdsa::SIGNATURE_SIZE : 65);
 
         CTxDestination feeSourceDest = payoutDest;
         if (!request.params[4].isNull()) {
@@ -1873,17 +2401,7 @@ static RPCHelpMan protx_update_service()
         }
         FundSpecialTx(*pwallet, tx, ptx, feeSourceDest);
         UpdateSpecialTxInputsHash(tx, ptx);
-        ptx.vchSig.clear();
-        const CTxDestination ownerDest = WitnessV0KeyHash(dmn->pdmnState->keyIDOwner);
-        CKey owner_key;
-        if (!pwallet->GetKey(dmn->pdmnState->keyIDOwner, owner_key)) {
-            throw std::runtime_error(strprintf("Private key for owner address %s not found in your wallet", EncodeDestination(ownerDest)));
-        }
-        std::vector<unsigned char> owner_sig;
-        if (!CHashSigner::SignHash(::SerializeHash(ptx), owner_key, owner_sig)) {
-            throw std::runtime_error("Failed to sign ProUpRegTx payload.");
-        }
-        ptx.vchSig = std::move(owner_sig);
+        SignRegistrarOwner(*pwallet, *dmn->pdmnState, ptx);
         SetTxPayload(tx, ptx);
 
         return SignAndSendSpecialTx(request, *pwallet, tx);
@@ -2023,6 +2541,14 @@ static bool CheckWalletOwnsScript(CWallet* pwallet, const CScript& script) {
     LOCK(pwallet->cs_wallet);
     return pwallet->IsMine(script) != ISMINE_NO;
 }
+static bool WalletHasMasternodeOwnerKey(CWallet* wallet, const CDeterministicMN& dmn)
+{
+    if (!wallet) return false;
+    return dmn.pdmnState->pqOwnerKey.HasActiveKey()
+        ? wallet->HasOwnerKey(dmn.pdmnState->pqOwnerKey.public_key)
+        : CheckWalletOwnsKey(wallet, dmn.pdmnState->keyIDOwner);
+}
+
 static bool WalletHasMasternodeVotingKey(CWallet* wallet, const CDeterministicMN& dmn, int height)
 {
     if (!wallet) return false;
@@ -2046,6 +2572,9 @@ UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int de
         o.pushKV("pqVotingPublicKey", HexStr(dmn.pdmnState->pqVotingKey.public_key));
         o.pushKV("pqVotingKeyVersion", dmn.pdmnState->pqVotingKey.key_version);
         o.pushKV("hasVotingKey", WalletHasMasternodeVotingKey(pwallet, dmn, height));
+        o.pushKV("pqOwnerPublicKey", HexStr(dmn.pdmnState->pqOwnerKey.public_key));
+        o.pushKV("pqOwnerKeyVersion", dmn.pdmnState->pqOwnerKey.key_version);
+        o.pushKV("hasOwnerKey", WalletHasMasternodeOwnerKey(pwallet, dmn));
         if(pwallet) {
             LOCK(pwallet->cs_wallet);
             const auto* address_book_entry = pwallet->FindAddressBookEntry(voteDest);
@@ -2067,7 +2596,7 @@ UniValue BuildDMNListEntry(CWallet* pwallet, const CDeterministicMN& dmn, int de
         o.pushKV("confirmations", confirmations);
         if (pwallet) {
             LOCK2(pwallet->cs_wallet, cs_main);
-            bool hasOwnerKey = CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner);
+            bool hasOwnerKey = WalletHasMasternodeOwnerKey(pwallet, dmn);
             bool hasVotingKey = WalletHasMasternodeVotingKey(pwallet, dmn, height);
 
             UniValue walletObj(UniValue::VOBJ);
@@ -2133,7 +2662,7 @@ static RPCHelpMan protx_list_wallet()
     CDeterministicMNList mnList = pwallet->chain().getMNList(height);
     mnList.ForEachMN(false, [&](const auto& dmn) {
         if (setOutpts.count(dmn.collateralOutpoint) ||
-            CheckWalletOwnsKey(pwallet, dmn.pdmnState->keyIDOwner) ||
+            WalletHasMasternodeOwnerKey(pwallet, dmn) ||
             WalletHasMasternodeVotingKey(pwallet, dmn, mnList.GetHeight()) ||
             CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptPayout) ||
             CheckWalletOwnsScript(pwallet, dmn.pdmnState->scriptOperatorPayout)) {
@@ -2184,6 +2713,12 @@ Span<const CRPCCommand> wallet::GetEvoWalletRPCCommands()
         {"evowallet", &protx_register_prepare},
         {"evowallet", &protx_register_submit},
         {"evowallet", &protx_generate_voting_key},
+        {"evowallet", &protx_generate_owner_key},
+        {"evowallet", &protx_update_owner},
+        {"evowallet", &protx_register_operator_prepare},
+        {"evowallet", &protx_decode_operator_request},
+        {"evowallet", &protx_register_operator_sign},
+        {"evowallet", &protx_register_operator_submit},
         {"evowallet", &protx_generate_operator_keypair},
         {"evowallet", &protx_register_operator_key},
         {"evowallet", &protx_rotate_operator_key},

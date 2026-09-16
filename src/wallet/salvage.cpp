@@ -154,19 +154,20 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
             DataStream key{row.first};
             std::string type;
             key >> type;
-            bool contains_pq{type == DBKeys::PQ_VOTING_KEY || type == DBKeys::PQ_VOTING_CRYPTED_KEY};
+            bool contains_pq{type == DBKeys::PQ_VOTING_KEY || type == DBKeys::PQ_VOTING_CRYPTED_KEY ||
+                             type == DBKeys::PQ_OWNER_KEY || type == DBKeys::PQ_OWNER_CRYPTED_KEY};
             if (type == DBKeys::FLAGS) {
                 DataStream value{row.second};
                 uint64_t flags;
                 value >> flags;
-                contains_pq = (flags & WALLET_FLAG_PQ_VOTING_KEYS) != 0;
+                contains_pq = (flags & (WALLET_FLAG_PQ_VOTING_KEYS | WALLET_FLAG_PQ_OWNER_KEYS)) != 0;
             }
             if (contains_pq) {
-                error = Untranslated("Salvage does not support wallets containing PQ voting keys. The original wallet was left unchanged; restore a full wallet backup instead.");
+                error = Untranslated("Salvage does not support wallets containing PQ voting keys or owner keys. The original wallet was left unchanged; restore a full wallet backup instead.");
                 return false;
             }
         } catch (const std::exception&) {
-            error = Untranslated("Salvage cannot determine whether malformed wallet records contain PQ voting keys. The original wallet was left unchanged.");
+            error = Untranslated("Salvage cannot determine whether malformed wallet records contain PQ voting keys or owner keys. The original wallet was left unchanged.");
             return false;
         }
     }

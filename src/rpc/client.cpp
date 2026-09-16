@@ -327,6 +327,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "protx_register_prepare", 1, "collateralIndex" },
     { "protx_register_prepare", 6, "operatorReward" },
     { "protx_register_operator_key", 4, "submit" }, // SYSCOIN: Parse PQ operator-key submission control as a boolean.
+    { "protx_register_operator_submit", 2, "submit" }, // SYSCOIN: Complete the provider/owner signing handoff.
     { "protx_rotate_operator_key", 4, "submit" }, // SYSCOIN: Parse PQ operator-key submission control as a boolean.
     { "protx_recovery_ready", 2, "group" },
     { "protx_recovery_ready", 4, "submit" },

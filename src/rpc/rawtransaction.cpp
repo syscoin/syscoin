@@ -164,6 +164,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
             // SYSCOIN BEGIN: Provider JSON separates historical and PQ keys.
             {RPCResult::Type::STR_HEX, "legacyPubKeyOperator", /*optional=*/true, "Historical operator public key"},
             {RPCResult::Type::STR_HEX, "pqVotingPublicKey", /*optional=*/true, "PQ proposal-funding voting public key"},
+            {RPCResult::Type::STR_HEX, "pqOwnerPublicKey", /*optional=*/true, "PQ owner public key"},
             // SYSCOIN END: Provider JSON separates historical and PQ keys.
             {RPCResult::Type::NUM, "operatorReward", "Operator reward"},
             {RPCResult::Type::STR_HEX, "inputsHash", "Inputs Hash"}
@@ -188,6 +189,8 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
             {RPCResult::Type::STR, "payoutAddress", /*optional=*/true, "Payout Address"},
             {RPCResult::Type::STR_HEX, "legacyPubKeyOperator", /*optional=*/true, "Historical operator public key"},
             {RPCResult::Type::STR_HEX, "pqVotingPublicKey", /*optional=*/true, "PQ proposal-funding voting public key"},
+            {RPCResult::Type::STR_HEX, "pqOwnerPublicKey", /*optional=*/true, "Replacement PQ owner public key, or zero to preserve ownership"},
+            {RPCResult::Type::NUM, "ownerKeyVersion", /*optional=*/true, "Authorizing PQ owner key version, or zero for the legacy owner"},
             // SYSCOIN END: Registrar JSON has voting keys, not an NEVM address.
             {RPCResult::Type::STR_HEX, "inputsHash", "Inputs Hash"}
         }},

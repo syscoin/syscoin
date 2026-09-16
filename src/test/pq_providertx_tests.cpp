@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <evo/pq_providertx.h>
+#include <crypto/slhdsa/slhdsa.h>
 
 #include <llmq/pq_global_auth.h>
 #include <streams.h>
@@ -174,6 +175,63 @@ BOOST_AUTO_TEST_CASE(global_transcript_binds_complete_candidate)
                                     genesis, changed.pro_tx_hash,
                                     changed.candidate,
                                     changed.transaction_inputs_hash));
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_registration_has_distinct_wire_version_and_no_legacy_fallback)
+{
+    const auto genesis = NonNullHash(31);
+    auto payload = ValidGlobal(GlobalKeyOperation::INITIAL);
+    const auto legacy_payload = payload;
+    payload.version = PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION;
+    payload.owner_authorization = {};
+    payload.owner_key_version = 2;
+    slhdsa::KeyGenerationSeed seed{};
+    seed.fill(0x71);
+    auto owner = slhdsa::GenerateSecretKey(seed);
+    BOOST_REQUIRE(owner);
+    OwnerKeyRecord owner_record;
+    GlobalPublicKey public_key{};
+    BOOST_REQUIRE(owner->GetPublicKey(public_key));
+    BOOST_REQUIRE(owner_record.UpdatePublicKey(public_key, 100));
+    owner_record.key_version = 2;
+    const auto digest = GetGlobalOwnerRegistrationAuthorizationHash(genesis, payload);
+    BOOST_REQUIRE(digest);
+    BOOST_REQUIRE(slhdsa::SignDeterministic(*owner,
+        std::span<const uint8_t>{digest->begin(), digest->size()},
+        std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(PQ_GLOBAL_OWNER_REGISTER_CONTEXT.data()),
+                                PQ_GLOBAL_OWNER_REGISTER_CONTEXT.size()},
+        payload.pq_owner_authorization));
+    BOOST_REQUIRE(payload.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION));
+    const auto encoded = Encode(payload);
+    BOOST_CHECK_EQUAL(encoded.size(), GlobalKeyTxPayload::PQ_OWNER_WIRE_SIZE);
+    GlobalKeyTxPayload decoded;
+    BOOST_REQUIRE(DecodeGlobalKeyTxPayload(encoded, decoded));
+    BOOST_CHECK(decoded == payload);
+    BOOST_CHECK(VerifyGlobalOwnerRegistrationAuthorization(genesis, payload, CKeyID{}, owner_record));
+    BOOST_CHECK(!VerifyGlobalOwnerRegistrationAuthorization(genesis, legacy_payload, CKeyID{}, owner_record));
+    BOOST_CHECK(!VerifyGlobalOwnerRegistrationAuthorization(genesis, payload, CKeyID{}, OwnerKeyRecord{}));
+    auto previous_version = owner_record;
+    --previous_version.key_version;
+    BOOST_CHECK(!VerifyGlobalOwnerRegistrationAuthorization(genesis, payload, CKeyID{}, previous_version));
+    BOOST_CHECK(!VerifyGlobalOwnerRegistrationAuthorization(NonNullHash(32), payload, CKeyID{}, owner_record));
+    auto changed = payload;
+    changed.candidate.child_key_commitment.root = NonNullHash(33);
+    BOOST_CHECK(!VerifyGlobalOwnerRegistrationAuthorization(genesis, changed, CKeyID{}, owner_record));
+    changed = payload;
+    changed.transaction_inputs_hash = NonNullHash(34);
+    BOOST_CHECK(!VerifyGlobalOwnerRegistrationAuthorization(genesis, changed, CKeyID{}, owner_record));
+    changed = payload;
+    changed.owner_authorization = legacy_payload.owner_authorization;
+    BOOST_CHECK(!changed.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION));
+    changed = payload;
+    changed.operation = GlobalKeyOperation::ROTATE;
+    BOOST_CHECK(!changed.IsTriviallyValid(PQ_GLOBAL_KEY_TX_VERSION));
+    auto truncated = encoded;
+    truncated.pop_back();
+    BOOST_CHECK(!DecodeGlobalKeyTxPayload(truncated, decoded));
+    auto extended = encoded;
+    extended.push_back(0);
+    BOOST_CHECK(!DecodeGlobalKeyTxPayload(extended, decoded));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

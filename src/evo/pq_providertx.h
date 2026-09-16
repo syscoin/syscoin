@@ -7,6 +7,7 @@
 
 #include <llmq/pq_chainlock_types.h>
 #include <llmq/pq_global_auth.h>
+#include <evo/pq_owner_key.h>
 
 #include <primitives/transaction.h>
 #include <pubkey.h>
@@ -25,6 +26,7 @@ namespace llmq::pq {
 
 inline constexpr int32_t PQ_GLOBAL_KEY_TX_VERSION{SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY};
 inline constexpr uint16_t PQ_GLOBAL_KEY_PAYLOAD_VERSION{1};
+inline constexpr uint16_t PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION{2};
 inline constexpr int32_t PQ_RECOVERY_READINESS_TX_VERSION{SYSCOIN_TX_VERSION_PQ_RECOVERY_READINESS};
 inline constexpr std::size_t COMPACT_ECDSA_SIGNATURE_SIZE{65};
 inline constexpr std::string_view PQ_GLOBAL_OWNER_REGISTER_DOMAIN{
@@ -53,6 +55,9 @@ struct GlobalKeyTxPayload {
         ChildKeyTreeCommitment::WIRE_SIZE + 32 +
         COMPACT_ECDSA_SIGNATURE_SIZE + GLOBAL_SIGNATURE_SIZE};
 
+    static constexpr std::size_t PQ_OWNER_WIRE_SIZE{
+        WIRE_SIZE - COMPACT_ECDSA_SIGNATURE_SIZE + sizeof(uint32_t) + GLOBAL_SIGNATURE_SIZE};
+
     uint16_t version{PQ_GLOBAL_KEY_PAYLOAD_VERSION};
     GlobalKeyOperation operation{GlobalKeyOperation::INITIAL};
     uint256 pro_tx_hash;
@@ -60,6 +65,9 @@ struct GlobalKeyTxPayload {
     uint256 transaction_inputs_hash;
     /** Required for INITIAL registration/recovery; verified against the owner. */
     CompactECDSAOwnerSignature owner_authorization{};
+    /** V2 INITIAL only: the enrolled parent owner version and SLH signature. */
+    uint32_t owner_key_version{0};
+    GlobalSignature pq_owner_authorization{};
     /** New-key PoP for INITIAL/recovery, current-key auth for ROTATE. */
     GlobalSignature authorization{};
 
@@ -70,8 +78,15 @@ struct GlobalKeyTxPayload {
         });
         uint8_t operation{static_cast<uint8_t>(obj.operation)};
         READWRITE(obj.version, operation, obj.pro_tx_hash, obj.candidate,
-                  obj.transaction_inputs_hash, obj.owner_authorization,
-                  obj.authorization);
+                  obj.transaction_inputs_hash);
+        if (obj.version == PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION) {
+            READWRITE(obj.owner_key_version, obj.pq_owner_authorization);
+            SER_READ(obj, obj.owner_authorization = {});
+        } else {
+            READWRITE(obj.owner_authorization);
+            SER_READ(obj, obj.owner_key_version = 0; obj.pq_owner_authorization = {});
+        }
+        READWRITE(obj.authorization);
         SER_READ(obj, obj.operation = static_cast<GlobalKeyOperation>(operation));
         SER_READ(obj, if (!obj.IsTriviallyValid(SPECIALTX_TYPE)) {
             throw std::ios_base::failure("non-canonical PQ global-key payload");
@@ -83,11 +98,11 @@ struct GlobalKeyTxPayload {
 };
 
 /**
- * Digest for the compact ECDSA signature in an INITIAL tx86.
+ * Digest for the ECDSA (V1) or enrolled PQ owner (V2) signature in an INITIAL tx86.
  *
  * The signature bytes are excluded to avoid recursion. Consensus must first
  * check transaction_inputs_hash against CalcTxInputsHash, then verify this
- * digest against keyIDOwner from the previous deterministic-MN snapshot.
+ * digest against the owner authority from the previous deterministic-MN snapshot.
  */
 [[nodiscard]] std::optional<uint256>
 GetGlobalOwnerRegistrationAuthorizationHash(
@@ -97,8 +112,15 @@ GetGlobalOwnerRegistrationAuthorizationHash(
     const uint256& genesis_hash,
     const GlobalKeyTxPayload& payload,
     const CKeyID& previous_owner_key_id);
+/** Selects exactly one owner algorithm from the parent DMN state. */
+[[nodiscard]] bool VerifyGlobalOwnerRegistrationAuthorization(
+    const uint256& genesis_hash,
+    const GlobalKeyTxPayload& payload,
+    const CKeyID& previous_owner_key_id,
+    const OwnerKeyRecord& previous_owner);
 
 static_assert(GlobalKeyTxPayload::WIRE_SIZE == 8'112);
+static_assert(GlobalKeyTxPayload::PQ_OWNER_WIRE_SIZE == 15'907);
 
 struct RecoveryReadinessTxPayload {
     static constexpr int32_t SPECIALTX_TYPE{PQ_RECOVERY_READINESS_TX_VERSION};

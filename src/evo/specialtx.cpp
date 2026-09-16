@@ -26,12 +26,12 @@ bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const 
     try {
         switch (tx.nVersion) {
         case SYSCOIN_TX_VERSION_MN_REGISTER:
-            return CheckProRegTx(tx, pindexPrev, state, view, fJustCheck, check_sigs);
+            return CheckProRegTx(tx, pindexPrev, state, view, fJustCheck, check_sigs, validation_context);
         case SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE:
             return CheckProUpServTx(tx, pindexPrev, state, fJustCheck,
                                     check_sigs, validation_context);
         case SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR:
-            return CheckProUpRegTx(tx, pindexPrev, state, view, fJustCheck, check_sigs);
+            return CheckProUpRegTx(tx, pindexPrev, state, view, fJustCheck, check_sigs, validation_context);
         case SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE:
             return CheckProUpRevTx(tx, pindexPrev, state, fJustCheck,
                                    check_sigs, validation_context);

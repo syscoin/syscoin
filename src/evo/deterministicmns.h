@@ -417,7 +417,7 @@ private:
     template <typename T>
     [[nodiscard]] bool AddUniqueProperty(const CDeterministicMN& dmn, const T& v)
     {
-        static const T nullValue;
+        static const T nullValue{};
         if (v == nullValue) {
             return false;
         }
@@ -437,7 +437,7 @@ private:
     template <typename T>
     [[nodiscard]] bool DeleteUniqueProperty(const CDeterministicMN& dmn, const T& oldValue)
     {
-        static const T nullValue;
+        static const T nullValue{};
         if (oldValue == nullValue) {
             return false;
         }
@@ -460,7 +460,7 @@ private:
         if (oldValue == newValue) {
             return true;
         }
-        static const T nullValue;
+        static const T nullValue{};
 
         if (oldValue != nullValue && !DeleteUniqueProperty(dmn, oldValue)) {
             return false;
@@ -613,7 +613,8 @@ public:
 class CDeterministicMNListInverse
 {
 public:
-    static constexpr uint16_t VERSION{1};
+    static constexpr uint16_t LEGACY_VERSION{1};
+    static constexpr uint16_t VERSION{2};
     static constexpr size_t MAX_CHANGES{
         CDeterministicMNListDiff::MAX_CHANGES};
 

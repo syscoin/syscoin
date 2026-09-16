@@ -294,7 +294,7 @@ llmq::pq::PQRegistryCallbacks MakePQRegistryCallbacks(
             return dmn != nullptr && actual_authorization_hash &&
                    *actual_authorization_hash == expected_authorization_hash &&
                    llmq::pq::VerifyGlobalOwnerRegistrationAuthorization(
-                       genesis_hash, payload, dmn->pdmnState->keyIDOwner);
+                       genesis_hash, payload, dmn->pdmnState->keyIDOwner, dmn->pdmnState->pqOwnerKey);
         };
     return callbacks;
 }
@@ -563,7 +563,7 @@ bool ReconstructParentFromInverse(
 
 bool CDeterministicMNListInverse::IsStructurallyValid() const
 {
-    if (version != VERSION || genesis_hash.IsNull() ||
+    if ((version != VERSION && version != LEGACY_VERSION) || genesis_hash.IsNull() ||
         coverage_base_height < 0 ||
         coverage_base_height > parent_height ||
         parent_history_commitment.IsNull() || history_commitment.IsNull() ||
@@ -592,23 +592,23 @@ bool CDeterministicMNListInverse::IsStructurallyValid() const
     for (const auto& dmn : inverse_diff.addedMNs) {
         if (dmn == nullptr || dmn->pdmnState == nullptr ||
             dmn->proTxHash.IsNull() ||
+            (version == LEGACY_VERSION && dmn->pdmnState->pqOwnerKey.key_version != 0) ||
             dmn->GetInternalId() >= parent_total_registered_count ||
             !changed_ids.emplace(dmn->GetInternalId()).second ||
             !added_hashes.emplace(dmn->proTxHash).second) {
             return false;
         }
     }
-    // The first-release V1 schema includes independent voting-key state.
-    // Later fields must not silently acquire disk meaning under this version.
-    static constexpr uint32_t INVERSE_STATE_DIFF_FIELDS{
-        (static_cast<uint32_t>(
-             CDeterministicMNStateDiff::Field_pqVotingKey)
-         << 1) -
-        1};
+    // SYSCOIN: Old inverse entries retain their original field vocabulary;
+    // V2 explicitly adds owner enrollment/rotation to reversible history.
+    const uint32_t inverse_state_diff_fields{
+        (static_cast<uint32_t>(version == LEGACY_VERSION
+             ? CDeterministicMNStateDiff::Field_pqVotingKey
+             : CDeterministicMNStateDiff::Field_pqOwnerKey) << 1) - 1};
     for (const auto& [internal_id, state_diff] : inverse_diff.updatedMNs) {
         if (internal_id >= parent_total_registered_count ||
             state_diff.fields == 0 ||
-            (state_diff.fields & ~INVERSE_STATE_DIFF_FIELDS) != 0 ||
+            (state_diff.fields & ~inverse_state_diff_fields) != 0 ||
             !changed_ids.emplace(internal_id).second) {
             return false;
         }
@@ -2040,7 +2040,12 @@ static void ForEachPaymentEligibleMN(
         // membership-set semantics here also prevents a malformed duplicate
         // from duplicating projected payees.
         if (it != pq_payment_eligible->begin() && *it == *(it - 1)) continue;
-        if (const auto dmn{list.GetValidMN(*it)}) callback(dmn);
+        // SYSCOIN: At activation owner and voting PQ authority plus the
+        // operator's frozen child root are required for reward eligibility.
+        // This does not alter the finality/recovery roster or punish the node.
+        if (const auto dmn{list.GetValidMN(*it)};
+            dmn && dmn->pdmnState->pqOwnerKey.HasActiveKey() &&
+            dmn->pdmnState->pqVotingKey.HasActiveKey()) callback(dmn);
     }
 }
 
@@ -2507,10 +2512,14 @@ void CDeterministicMNList::AddMN(const CDeterministicMNCPtr& dmn, bool fBumpTota
         throw(std::runtime_error(strprintf("%s: Can't add a masternode %s with a duplicate address=%s", __func__,
                 dmn->proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort())));
     }
-    if (!AddUniqueProperty(*dmn, dmn->pdmnState->keyIDOwner)) {
+    if (!dmn->pdmnState->keyIDOwner.IsNull() && !AddUniqueProperty(*dmn, dmn->pdmnState->keyIDOwner)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't add a masternode %s with a duplicate keyIDOwner=%s", __func__,
                 dmn->proTxHash.ToString(), EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDOwner)))));
+    }
+    if (dmn->pdmnState->pqOwnerKey.HasActiveKey() && !AddUniqueProperty(*dmn, dmn->pdmnState->pqOwnerKey.public_key)) {
+        mnUniquePropertyMap = mnUniquePropertyMapSaved;
+        throw std::runtime_error("duplicate PQ owner public key");
     }
     if (dmn->pdmnState->pubKeyOperator.IsValid() && !AddUniqueProperty(*dmn, dmn->pdmnState->pubKeyOperator)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
@@ -2585,6 +2594,10 @@ void CDeterministicMNList::UpdateMN(const uint256& proTxHash, const std::shared_
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't update a masternode %s with a duplicate keyIDOwner=%s", __func__,
                 entryProTxHash.ToString(), EncodeDestination(WitnessV0KeyHash(pdmnState->keyIDOwner)))));
+    }
+    if (!UpdateUniqueProperty(*dmn, oldState->pqOwnerKey.public_key, pdmnState->pqOwnerKey.public_key)) {
+        mnUniquePropertyMap = mnUniquePropertyMapSaved;
+        throw std::runtime_error("duplicate PQ owner public key");
     }
     if (!UpdateUniqueProperty(*dmn, oldState->pubKeyOperator, pdmnState->pubKeyOperator)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
@@ -2662,10 +2675,14 @@ void CDeterministicMNList::RemoveMN(const uint256& proTxHash)
         throw(std::runtime_error(strprintf("%s: Can't delete a masternode %s with a address=%s", __func__,
                 proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort())));
     }
-    if (!DeleteUniqueProperty(*dmn, dmn->pdmnState->keyIDOwner)) {
+    if (!dmn->pdmnState->keyIDOwner.IsNull() && !DeleteUniqueProperty(*dmn, dmn->pdmnState->keyIDOwner)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
         throw(std::runtime_error(strprintf("%s: Can't delete a masternode %s with a keyIDOwner=%s", __func__,
                 proTxHash.ToString(), EncodeDestination(WitnessV0KeyHash(dmn->pdmnState->keyIDOwner)))));
+    }
+    if (dmn->pdmnState->pqOwnerKey.HasActiveKey() && !DeleteUniqueProperty(*dmn, dmn->pdmnState->pqOwnerKey.public_key)) {
+        mnUniquePropertyMap = mnUniquePropertyMapSaved;
+        throw std::runtime_error("missing PQ owner public key");
     }
     if (dmn->pdmnState->pubKeyOperator.IsValid() && !DeleteUniqueProperty(*dmn, dmn->pdmnState->pubKeyOperator)) {
         mnUniquePropertyMap = mnUniquePropertyMapSaved;
@@ -3249,6 +3266,25 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
         }
     }
 
+    // SYSCOIN: Registrar signatures resolve against the parent owner. A
+    // second registrar in the same block must not spend that old authority
+    // after an earlier transaction enrolls or rotates ownership.
+    std::unordered_map<uint256, size_t, StaticSaltedHasher> registrar_counts;
+    std::unordered_set<uint256, StaticSaltedHasher> owner_transitions;
+    for (const auto& transaction : block.vtx) {
+        if (!transaction || transaction->nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) continue;
+        CProUpRegTx registrar;
+        if (!GetTxPayload(*transaction, registrar)) continue;
+        ++registrar_counts[registrar.proTxHash];
+        if (registrar.nVersion == CProUpRegTx::PQ_VERSION &&
+            !llmq::pq::IsNullOwnerPublicKey(registrar.pqOwnerPublicKey)) owner_transitions.emplace(registrar.proTxHash);
+    }
+    for (const auto& pro_tx_hash : owner_transitions) {
+        if (registrar_counts[pro_tx_hash] != 1) {
+            return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-owner-transition-conflict");
+        }
+    }
+
     // for all other tx's MN register/update tx handling
     for (int i = 1; i < (int)block.vtx.size(); i++) {
         const CTransaction& tx = *block.vtx[i];
@@ -3290,7 +3326,8 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                 if (newList.HasUniqueProperty(proTx.addr)) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-addr");
                 }
-                if (newList.HasUniqueProperty(proTx.keyIDOwner) ||
+                if ((!proTx.keyIDOwner.IsNull() && newList.HasUniqueProperty(proTx.keyIDOwner)) ||
+                    (proTx.nVersion == CProRegTx::PQ_VERSION && newList.HasUniqueProperty(proTx.pqOwnerPublicKey)) ||
                     (proTx.nVersion <= CProRegTx::BASIC_BLS_VERSION &&
                      newList.HasUniqueProperty(proTx.pubKeyOperator))) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-key");
@@ -3303,6 +3340,10 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     (llmq::pq::IsNullVotingPublicKey(proTx.pqVotingPublicKey) ||
                      !dmnState->pqVotingKey.UpdatePublicKey(proTx.pqVotingPublicKey, nHeight))) {
                     return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-pq-voting-key");
+                }
+                if (proTx.nVersion == CProRegTx::PQ_VERSION &&
+                    !dmnState->pqOwnerKey.UpdatePublicKey(proTx.pqOwnerPublicKey, nHeight)) {
+                    return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-pq-owner-key");
                 }
                 // if using external collateral,  height from when collateral was created
                 if(!proTx.collateralOutpoint.hash.IsNull())
@@ -3377,7 +3418,9 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                                                   operator_state->HasActiveGlobalKey() &&
                                                   pq_revocations.count(proTx.proTxHash) == 0;
                     }
-                    if (has_active_operator_key && !newState->keyIDVoting.IsNull() && !newState->keyIDOwner.IsNull()) {
+                    if (has_active_operator_key &&
+                        (newState->pqOwnerKey.HasActiveKey() || !newState->keyIDOwner.IsNull()) &&
+                        (proTx.nVersion == CProUpServTx::PQ_VERSION || !newState->keyIDVoting.IsNull())) {
                         newState->Revive(nHeight);
                         LogPrint(BCLog::MNLIST, "CDeterministicMNManager::%s -- MN %s revived at height %d\n",
                                 __func__, proTx.proTxHash.ToString(), nHeight);
@@ -3420,9 +3463,20 @@ bool CDeterministicMNManager::BuildNewListFromBlock(const CBlock& block, const C
                     newState->pubKeyOperator = proTx.pubKeyOperator;
                 }
                 if (proTx.nVersion == CProUpRegTx::PQ_VERSION) {
-                    newState->nVersion = proTx.nVersion;
+                    // Preparation owner enrollment must not rewrite the
+                    // legacy BLS scheme/version or reset operator service.
+                    if (nHeight >= Params().GetConsensus().nPQActivationHeight) newState->nVersion = proTx.nVersion;
                     if (!newState->pqVotingKey.UpdatePublicKey(proTx.pqVotingPublicKey, nHeight)) {
                         return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-pq-voting-key");
+                    }
+                    if (!llmq::pq::IsNullOwnerPublicKey(proTx.pqOwnerPublicKey) &&
+                        newList.HasUniqueProperty(proTx.pqOwnerPublicKey) &&
+                        newList.GetUniquePropertyMN(proTx.pqOwnerPublicKey)->proTxHash != proTx.proTxHash) {
+                        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-dup-owner-key");
+                    }
+                    if (!llmq::pq::IsNullOwnerPublicKey(proTx.pqOwnerPublicKey) &&
+                        !newState->pqOwnerKey.UpdatePublicKey(proTx.pqOwnerPublicKey, nHeight)) {
+                        return _state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-protx-pq-owner-key");
                     }
                 }
 

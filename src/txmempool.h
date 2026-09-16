@@ -479,6 +479,10 @@ private:
     std::map<CService, uint256> mapProTxAddresses;
     std::map<std::vector<unsigned char>, uint256> mapProTxNEVMAddresses;
     std::map<CKeyID, uint256> mapProTxPubKeyIDs;
+    // SYSCOIN: Independent owner keys and branch-bound registrar transitions.
+    std::map<std::array<uint8_t, 32>, uint256> mapPQOwnerKeys;
+    std::map<uint256, uint256> mapPQOwnerTransitions;
+    std::multimap<uint256, uint256> mapProTxRegistrarRefs;
     std::map<COutPoint, uint256> mapProTxCollaterals;
 
     std::optional<size_t> FindPackageProviderTxConflict(

@@ -1323,9 +1323,12 @@ class DashTestFramework(AuxPoWMiningMixin, SyscoinTestFramework):
         operatorReward = idx
         submit = (idx % 4) < 2
         activation_height = self.pq_activation_height()
+        pq_registration = (activation_height is not None and
+                           self.nodes[0].getblockcount() + 1 >= activation_height)
+        if pq_registration:
+            ownerAddr = self.nodes[0].protx_generate_owner_key()
         voting_credential = (
-            pqVotingPublicKey if activation_height is not None and
-            self.nodes[0].getblockcount() + 1 >= activation_height else votingAddr)
+            pqVotingPublicKey if pq_registration else votingAddr)
         if register_fund:
             # self.nodes[0].lockunspent(True, [{'txid': txid, 'vout': collateral_vout}])
             protx_result = self.nodes[0].protx_register_fund(address, ipAndPort, ownerAddr, "", voting_credential, operatorReward, rewardsAddr, address, submit)
@@ -1359,6 +1362,13 @@ class DashTestFramework(AuxPoWMiningMixin, SyscoinTestFramework):
             proTxHash, operator_keys["operatorKey"],
             operator_keys["chainlockSeed"], address)
         self.generate(self.nodes[0], 1)
+        if not pq_registration:
+            # Prepare owner authority independently of the operator root so
+            # this fixture remains payment-eligible at PQ activation.
+            self.nodes[0].protx_update_owner(
+                proTxHash, self.nodes[0].protx_generate_owner_key(), address,
+                pqVotingPublicKey)
+            self.generate(self.nodes[0], 1)
         operatorPayoutAddress = (
             self.nodes[0].getnewaddress() if operatorReward > 0 else "")
         activation_height = self.pq_activation_height()

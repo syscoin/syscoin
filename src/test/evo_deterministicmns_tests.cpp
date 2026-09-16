@@ -897,6 +897,31 @@ BOOST_AUTO_TEST_CASE(payment_probation_is_reflected_in_projected_payees)
     }};
     const auto pq_payment_eligible{sorted_hashes(
         {members[1]->proTxHash, members[2]->proTxHash})};
+    // Root-bearing operators alone are insufficient after activation. Even
+    // audit liveness fallback must not pay an unmigrated ECDSA owner.
+    BOOST_CHECK(!list.GetMNPayee(&all_view, &pq_payment_eligible));
+    BOOST_CHECK(list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), &all_view, &pq_payment_eligible).empty());
+    BOOST_CHECK_EQUAL(list.GetProjectedMNPayees().size(), 3U);
+    for (size_t i = 0; i < members.size(); ++i) {
+        auto state = std::make_shared<CDeterministicMNState>(*members[i]->pdmnState);
+        llmq::pq::GlobalPublicKey owner{};
+        owner.fill(static_cast<uint8_t>(i + 1));
+        BOOST_REQUIRE(state->pqOwnerKey.UpdatePublicKey(owner, list.GetHeight()));
+        list.UpdateMN(members[i]->proTxHash, state);
+    }
+    // An SLH owner without independent PQ voting authority remains excluded,
+    // including from the fallback when every member is on probation.
+    BOOST_CHECK(!list.GetMNPayee(&all_view, &pq_payment_eligible));
+    BOOST_CHECK(list.GetProjectedMNPayees(
+        std::numeric_limits<int>::max(), &all_view, &pq_payment_eligible).empty());
+    for (const auto& member : members) {
+        auto state = std::make_shared<CDeterministicMNState>(*list.GetMN(member->proTxHash)->pdmnState);
+        llmq::pq::GlobalPublicKey voting = state->pqOwnerKey.public_key;
+        voting.back() = 1;
+        BOOST_REQUIRE(state->pqVotingKey.UpdatePublicKey(voting, list.GetHeight()));
+        list.UpdateMN(member->proTxHash, state);
+    }
     BOOST_REQUIRE(list.GetMNPayee(&all_view, &pq_payment_eligible));
     BOOST_CHECK(list.GetMNPayee(&all_view, &pq_payment_eligible)->proTxHash ==
                 members[1]->proTxHash);
@@ -1399,6 +1424,17 @@ BOOST_AUTO_TEST_CASE(payment_projection_stops_at_frozen_epoch_boundary)
     std::array<CDeterministicMNCPtr, 3> members{
         MakeLegacyReplayMN(50, 30), MakeLegacyReplayMN(51, 31),
         MakeLegacyReplayMN(52, 32)};
+    for (std::size_t index = 0; index < members.size(); ++index) {
+        auto member = std::make_shared<CDeterministicMN>(*members[index]);
+        auto state = std::make_shared<CDeterministicMNState>(*member->pdmnState);
+        llmq::pq::GlobalPublicKey owner{};
+        owner.fill(static_cast<uint8_t>(index + 0x60));
+        BOOST_REQUIRE(state->pqOwnerKey.UpdatePublicKey(owner, preparation_height));
+        owner.back() = 1;
+        BOOST_REQUIRE(state->pqVotingKey.UpdatePublicKey(owner, preparation_height));
+        member->pdmnState = std::move(state);
+        members[index] = std::move(member);
+    }
     std::vector<llmq::pq::OperatorKeyState> operator_states;
     for (std::size_t index{0}; index < members.size(); ++index) {
         llmq::pq::GlobalKeyRecord key;
@@ -1683,10 +1719,24 @@ static void CheckEmptyPQPaymentRegistration(bool start_empty)
     auto& manager{*deterministicMNManager};
     CKey owner_key;
     owner_key.MakeNewKey(/*fCompressed=*/true);
+    slhdsa::KeyGenerationSeed owner_seed{};
+    owner_seed.fill(0x5a);
+    auto pq_owner_key = slhdsa::GenerateSecretKey(owner_seed);
+    BOOST_REQUIRE(pq_owner_key);
+    llmq::pq::GlobalPublicKey pq_owner_public{};
+    BOOST_REQUIRE(pq_owner_key->GetPublicKey(pq_owner_public));
+    const auto sign_owner = [&](const uint256& digest, std::string_view context,
+                                llmq::pq::GlobalSignature& signature) {
+        return slhdsa::SignDeterministic(*pq_owner_key,
+            std::span<const uint8_t>{digest.begin(), digest.size()},
+            std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(context.data()), context.size()},
+            signature);
+    };
     const uint256 base_hash{MakeSnapshotKey(preparation_height - 1)};
     CDeterministicMNList base_list{base_hash, preparation_height - 1, 0};
     uint256 pro_tx_hash;
     CTransactionRef provider_registration_tx;
+    CTransactionRef owner_enrollment_tx;
     if (start_empty) {
         CMutableTransaction provider_registration;
         provider_registration.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
@@ -1701,9 +1751,13 @@ static void CheckEmptyPQPaymentRegistration(bool start_empty)
         provider.keyIDOwner = owner_key.GetPubKey().GetID();
         provider.keyIDVoting = MakeAnchorKeyID(0x76);
         provider.pqVotingPublicKey.fill(0x77);
+        provider.pqOwnerPublicKey = pq_owner_public;
         provider.scriptPayout = payout;
         provider.inputsHash = CalcTxInputsHash(
             CTransaction{provider_registration});
+        BOOST_REQUIRE(sign_owner(GetProRegOwnerAuthorizationHash(
+            consensus.hashGenesisBlock, provider), llmq::pq::PQ_OWNER_PROOF_CONTEXT,
+            provider.pqOwnerProof));
         SetTxPayload(provider_registration, provider);
         provider_registration_tx = MakeTransactionRef(
             std::move(provider_registration));
@@ -1717,6 +1771,23 @@ static void CheckEmptyPQPaymentRegistration(bool start_empty)
         member->pdmnState = std::move(member_state);
         pro_tx_hash = member->proTxHash;
         base_list.AddMN(member);
+        CMutableTransaction enrollment;
+        enrollment.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR;
+        enrollment.vin.emplace_back(COutPoint{MakeSnapshotKey(94'004), 0});
+        enrollment.vout.emplace_back(1, CScript{} << OP_TRUE);
+        CProUpRegTx update;
+        update.nVersion = CProUpRegTx::PQ_VERSION;
+        update.proTxHash = pro_tx_hash;
+        update.keyIDVoting = member->pdmnState->keyIDVoting;
+        update.scriptPayout = member->pdmnState->scriptPayout;
+        update.pqOwnerPublicKey = pq_owner_public;
+        update.pqVotingPublicKey.fill(0x77);
+        update.inputsHash = CalcTxInputsHash(CTransaction{enrollment});
+        const auto digest = GetProUpRegOwnerAuthorizationHash(consensus.hashGenesisBlock, update);
+        BOOST_REQUIRE(sign_owner(digest, llmq::pq::PQ_OWNER_PROOF_CONTEXT, update.pqOwnerProof));
+        BOOST_REQUIRE(CHashSigner::SignHash(digest, owner_key, update.vchSig));
+        SetTxPayload(enrollment, update);
+        owner_enrollment_tx = MakeTransactionRef(std::move(enrollment));
     }
     BOOST_CHECK_EQUAL(base_list.GetAllMNsCount(), start_empty ? 0U : 1U);
     BOOST_CHECK_EQUAL(base_list.GetTotalRegisteredCount(), start_empty ? 0U : 1U);
@@ -1747,6 +1818,8 @@ static void CheckEmptyPQPaymentRegistration(bool start_empty)
     registration.vin.emplace_back(COutPoint{MakeSnapshotKey(94'001), 0});
     registration.vout.emplace_back(1, CScript{} << OP_TRUE);
     llmq::pq::GlobalKeyTxPayload payload;
+    payload.version = llmq::pq::PQ_GLOBAL_KEY_PQ_OWNER_PAYLOAD_VERSION;
+    payload.owner_key_version = 1;
     payload.operation = llmq::pq::GlobalKeyOperation::INITIAL;
     payload.pro_tx_hash = pro_tx_hash;
     payload.candidate.key_version = 1;
@@ -1760,13 +1833,8 @@ static void CheckEmptyPQPaymentRegistration(bool start_empty)
         llmq::pq::GetGlobalOwnerRegistrationAuthorizationHash(
             consensus.hashGenesisBlock, payload)};
     BOOST_REQUIRE(owner_digest);
-    std::vector<unsigned char> owner_signature;
-    BOOST_REQUIRE(CHashSigner::SignHash(
-        *owner_digest, owner_key, owner_signature));
-    BOOST_REQUIRE_EQUAL(owner_signature.size(),
-                        llmq::pq::COMPACT_ECDSA_SIGNATURE_SIZE);
-    std::copy(owner_signature.begin(), owner_signature.end(),
-              payload.owner_authorization.begin());
+    BOOST_REQUIRE(sign_owner(*owner_digest,
+        llmq::pq::PQ_GLOBAL_OWNER_REGISTER_CONTEXT, payload.pq_owner_authorization));
     const auto registration_digest{
         llmq::pq::GetGlobalRegistrationAuthorizationHash(
             consensus.hashGenesisBlock, pro_tx_hash,
@@ -1801,6 +1869,9 @@ static void CheckEmptyPQPaymentRegistration(bool start_empty)
             : &indices[static_cast<size_t>(offset - 1)]};
         auto& block{blocks[static_cast<size_t>(offset)]};
         block = MakeProviderMutationBlock({});
+        if (!start_empty && height == preparation_height) {
+            block.vtx.emplace_back(owner_enrollment_tx);
+        }
         if (start_empty && height == provider_registration_height) {
             block.vtx.emplace_back(provider_registration_tx);
             TxValidationState provider_state;
@@ -2186,10 +2257,49 @@ BOOST_AUTO_TEST_CASE(pq_voting_authority_commits_rotation_revocation_and_undo)
     BOOST_CHECK(list.GetOrComputePQLegacyStateHash(genesis_hash) == legacy_state);
 }
 
+BOOST_AUTO_TEST_CASE(pq_owner_authority_commits_rotation_and_restores_exact_undo)
+{
+    const uint256 genesis_hash{MakeSnapshotKey(60'125)};
+    CDeterministicMNList list{MakeNontrivialAnchorSnapshot(MakeSnapshotKey(60'126), 4323, false)};
+    const auto legacy_hash = list.GetOrComputePQLegacyStateHash(genesis_hash);
+    const auto member = list.GetMNByInternalId(9);
+    BOOST_REQUIRE(member);
+    auto migrated = std::make_shared<CDeterministicMNState>(*member->pdmnState);
+    llmq::pq::GlobalPublicKey key{};
+    key.fill(0x85);
+    BOOST_REQUIRE(migrated->pqOwnerKey.UpdatePublicKey(key, list.GetHeight()));
+    list.UpdateMN(member->proTxHash, migrated);
+    const auto first_hash = list.GetOrComputePQLegacyStateHash(genesis_hash);
+    BOOST_CHECK(first_hash != legacy_hash);
+    BOOST_CHECK(!migrated->pqOwnerKey.UpdatePublicKey({}, list.GetHeight() + 1));
+    auto rotated = std::make_shared<CDeterministicMNState>(*migrated);
+    key.front() ^= 1;
+    BOOST_REQUIRE(rotated->pqOwnerKey.UpdatePublicKey(key, list.GetHeight() + 1));
+    key.front() ^= 1;
+    BOOST_REQUIRE(rotated->pqOwnerKey.UpdatePublicKey(key, list.GetHeight() + 2));
+    list.UpdateMN(member->proTxHash, rotated);
+    BOOST_CHECK(rotated->pqOwnerKey.public_key == migrated->pqOwnerKey.public_key);
+    BOOST_CHECK_EQUAL(rotated->pqOwnerKey.key_version, 3U);
+    BOOST_CHECK(list.GetOrComputePQLegacyStateHash(genesis_hash) != first_hash);
+    CDataStream encoded{SER_DISK, PROTOCOL_VERSION};
+    encoded << list;
+    CDeterministicMNList restored;
+    encoded >> restored;
+    BOOST_CHECK(restored.GetMN(member->proTxHash)->pdmnState->pqOwnerKey == rotated->pqOwnerKey);
+    BOOST_CHECK(restored.GetOrComputePQLegacyStateHash(genesis_hash) == list.GetOrComputePQLegacyStateHash(genesis_hash));
+    CDeterministicMNStateDiff inverse{*rotated, *member->pdmnState};
+    auto undone = std::make_shared<CDeterministicMNState>(*rotated);
+    inverse.ApplyToState(*undone);
+    restored.UpdateMN(member->proTxHash, undone);
+    BOOST_CHECK_EQUAL(undone->pqOwnerKey.key_version, 0U);
+    BOOST_CHECK(restored.GetOrComputePQLegacyStateHash(genesis_hash) == legacy_hash);
+}
+
 BOOST_AUTO_TEST_CASE(inverse_journal_v1_rejects_unknown_versions_and_fields)
 {
-    BOOST_CHECK_EQUAL(CDeterministicMNListInverse::VERSION, 1U);
+    BOOST_CHECK_EQUAL(CDeterministicMNListInverse::VERSION, 2U);
     CDeterministicMNListInverse inverse;
+    inverse.version = CDeterministicMNListInverse::LEGACY_VERSION;
     inverse.genesis_hash = MakeSnapshotKey(61'000);
     inverse.coverage_base_height = 10;
     inverse.parent_history_commitment = MakeSnapshotKey(61'001);
@@ -2242,9 +2352,29 @@ BOOST_AUTO_TEST_CASE(inverse_journal_v1_rejects_unknown_versions_and_fields)
                 voting_diff.state.pqVotingKey);
     BOOST_CHECK(::SerializeHash(decoded) == ::SerializeHash(inverse));
 
+    // V2 records carry ownership undo; V1 remains readable but cannot claim
+    // to contain a field it never authenticated.
+    auto owner_record = inverse;
+    owner_record.version = CDeterministicMNListInverse::VERSION;
+    auto& owner_diff = owner_record.inverse_diff.updatedMNs.at(0);
+    owner_diff.fields |= CDeterministicMNStateDiff::Field_pqOwnerKey;
+    llmq::pq::GlobalPublicKey owner_key{};
+    owner_key.fill(0x92);
+    BOOST_REQUIRE(owner_diff.state.pqOwnerKey.UpdatePublicKey(owner_key, 10));
+    seal(owner_record);
+    BOOST_REQUIRE(owner_record.IsStructurallyValid());
+    CDataStream owner_encoded{SER_DISK, PROTOCOL_VERSION};
+    owner_encoded << owner_record;
+    owner_encoded >> decoded;
+    BOOST_CHECK_EQUAL(decoded.version, 2U);
+    BOOST_CHECK(decoded.inverse_diff.updatedMNs.at(0).state.pqOwnerKey == owner_diff.state.pqOwnerKey);
+    owner_record.version = CDeterministicMNListInverse::LEGACY_VERSION;
+    seal(owner_record);
+    BOOST_CHECK(!owner_record.IsStructurallyValid());
+
     // Recompute each commitment so rejection proves the schema gate, rather
     // than merely detecting a stale hash after an in-memory mutation.
-    for (uint16_t version : std::array<uint16_t, 4>{0, 2, 3, 0xffff}) {
+    for (uint16_t version : std::array<uint16_t, 3>{0, 3, 0xffff}) {
         auto unsupported{inverse};
         unsupported.version = version;
         seal(unsupported);
@@ -2367,7 +2497,7 @@ BOOST_FIXTURE_TEST_CASE(
             }
             CDeterministicMNManager::InverseJournalEntryStatsForTesting stats;
             BOOST_REQUIRE(manager.GetInverseJournalEntryStatsForTesting(chain.hashes[offset], stats));
-            BOOST_CHECK_EQUAL(stats.version, 1U);
+            BOOST_CHECK_EQUAL(stats.version, CDeterministicMNListInverse::VERSION);
             expected_hashes[offset] = current.GetOrComputePQLegacyStateHash(consensus.hashGenesisBlock);
             expected_authorities[offset] = current.GetOrComputePQGovernanceAuthorityHash(consensus.hashGenesisBlock);
         }

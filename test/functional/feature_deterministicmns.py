@@ -310,12 +310,13 @@ class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
         operator_keys = node.protx_generate_operator_keypair()
         mn.fundsAddr = node.getnewaddress()
         mn.ownerAddr = node.getnewaddress()
-        # SYSCOIN BEGIN: Match voting credentials to the next block's profile.
-        mn.votingCredential = (
-            node.protx_generate_voting_key()
-            if node.getblockcount() + 1 >= self.PQ_BTCC_CANDIDATE_ORIGIN
-            else mn.ownerAddr)
-        # SYSCOIN END: Match voting credentials to the next block's profile.
+        # SYSCOIN BEGIN: Match owner and voting credentials to the next block's profile.
+        if node.getblockcount() + 1 >= self.PQ_BTCC_CANDIDATE_ORIGIN:
+            mn.ownerAddr = node.protx_generate_owner_key()
+            mn.votingCredential = node.protx_generate_voting_key()
+        else:
+            mn.votingCredential = mn.ownerAddr
+        # SYSCOIN END: Match owner and voting credentials to the next block's profile.
         mn.operatorKey = operator_keys['operatorKey']
         mn.chainlockSeed = operator_keys['chainlockSeed']
 
@@ -374,6 +375,10 @@ class DIP3Test(AuxPoWMiningMixin, SyscoinTestFramework):
             coveragedir=node.coverage_dir)
         registration_rpc.protx_register_operator_key(
             mn.protx_hash, mn.operatorKey, mn.chainlockSeed, mn.fundsAddr)
+        self.generate(node, 1, sync_fun=self.no_op)
+        node.protx_update_owner(
+            mn.protx_hash, node.protx_generate_owner_key(), mn.fundsAddr,
+            node.protx_generate_voting_key())
         self.generate(node, 1, sync_fun=self.no_op)
 
     def activate_pq_profile(self):

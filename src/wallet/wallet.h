@@ -46,6 +46,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -160,7 +161,8 @@ static constexpr uint64_t KNOWN_WALLET_FLAGS =
     |   WALLET_FLAG_DISABLE_PRIVATE_KEYS
     |   WALLET_FLAG_DESCRIPTORS
     |   WALLET_FLAG_EXTERNAL_SIGNER
-    |   WALLET_FLAG_PQ_VOTING_KEYS;
+    |   WALLET_FLAG_PQ_VOTING_KEYS
+    |   WALLET_FLAG_PQ_OWNER_KEYS;
 
 static constexpr uint64_t MUTABLE_WALLET_FLAGS =
         WALLET_FLAG_AVOID_REUSE;
@@ -173,7 +175,8 @@ static const std::map<std::string,WalletFlags> WALLET_FLAG_MAP{
     {"disable_private_keys", WALLET_FLAG_DISABLE_PRIVATE_KEYS},
     {"descriptor_wallet", WALLET_FLAG_DESCRIPTORS},
     {"external_signer", WALLET_FLAG_EXTERNAL_SIGNER},
-    {"pq_voting_keys", WALLET_FLAG_PQ_VOTING_KEYS}
+    {"pq_voting_keys", WALLET_FLAG_PQ_VOTING_KEYS},
+    {"pq_owner_keys", WALLET_FLAG_PQ_OWNER_KEYS}
 };
 
 /** A wrapper to reserve an address from a wallet
@@ -313,6 +316,10 @@ private:
 
     bool CheckVotingDecryptionKey(const CKeyingMaterial& master_key) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     // SYSCOIN END: Store and decrypt independent SLH-DSA voting keys.
+    // SYSCOIN: Owner authority is separate from delegated proposal voting.
+    std::map<slhdsa::PublicKey, CKeyingMaterial> m_owner_keys GUARDED_BY(cs_wallet);
+    std::map<slhdsa::PublicKey, std::vector<unsigned char>> m_crypted_owner_keys GUARDED_BY(cs_wallet);
+    bool CheckOwnerDecryptionKey(const CKeyingMaterial& master_key) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     bool Unlock(const CKeyingMaterial& vMasterKeyIn, bool accept_no_keys = false);
 
@@ -913,6 +920,19 @@ public:
                                  slhdsa::Signature& signature, std::string& error) const;
     bool LoadVotingKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     bool LoadCryptedVotingKey(const slhdsa::PublicKey& public_key, const std::vector<unsigned char>& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /** Independent owner authority; never derived from a voting or spending key. */
+    bool GenerateOwnerKey(slhdsa::PublicKey& public_key, std::string& error);
+    bool HasOwnerKey(const slhdsa::PublicKey& public_key) const;
+    bool ExportOwnerKeys(std::map<slhdsa::PublicKey, CKeyingMaterial>& keys, std::string& error) const;
+    bool ImportOwnerKeys(const std::map<slhdsa::PublicKey, CKeyingMaterial>& keys, std::string& error);
+    /** Import both roles atomically after validating the entire PQ dump. */
+    bool ImportPQKeys(const std::map<slhdsa::PublicKey, CKeyingMaterial>& voting_keys,
+                      const std::map<slhdsa::PublicKey, CKeyingMaterial>& owner_keys, std::string& error);
+    /** Only the three consensus owner-signing contexts are accepted. */
+    bool SignOwnerAuthorization(const slhdsa::PublicKey& public_key, const uint256& authorization_hash,
+                                std::string_view context, slhdsa::Signature& signature, std::string& error) const;
+    bool LoadOwnerKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool LoadCryptedOwnerKey(const slhdsa::PublicKey& public_key, const std::vector<unsigned char>& secret) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     /**
      * Blocks until the wallet state is up-to-date to /at least/ the current
      * chain at the time this function is entered
