@@ -10027,6 +10027,13 @@ uint256 CChainLocksHandler::GetPaymentAuditReplaySourceToken() const
         writer << durable.best->logical_id << durable.best->witness_id
                << durable.best->statement;
     }
+    const auto imported{GetPoWHistoricalSyncAuthorization()};
+    writer << static_cast<bool>(imported);
+    if (imported) {
+        writer << imported->record_identity << imported->base.metadata.logical_id
+               << imported->base.metadata.witness_id
+               << pq::GetHistoricalSyncBoundaryHash(m_genesis_hash, *m_config, imported->boundary);
+    }
     return writer.GetHash();
 }
 
@@ -10089,6 +10096,10 @@ bool CChainLocksHandler::IsPaymentAuditReplayValidationCurrent() const
            runtime.frontier.IsComplete(*through) &&
            (!runtime.checkpoint_floor || IsPaymentAuditPrefixAuthenticated(*floor)) &&
            (!runtime.seal_floor || IsPaymentAuditReplaySealFloorValid(*runtime.seal_floor, *floor)) &&
+           (!runtime.historical_floor ||
+               (runtime.historical_floor == GetPoWHistoricalSyncAuthorization() &&
+                IsPaymentAuditReplayFloorStatementValid(
+                    runtime.historical_floor->base.metadata.statement, *floor))) &&
            (!runtime.audit_floor || IsPaymentAuditReplayFloorStatementValid(
                runtime.audit_floor->m_statement.seal_statement, *floor));
 }
@@ -10101,7 +10112,8 @@ bool CChainLocksHandler::IsPaymentAuditReplayAuthenticated(
     const auto& runtime{m_payment_audit_replay_validation};
     return IsPaymentAuditReplayValidationCurrent() &&
            m_chainman.ActiveChain()[index.nHeight] == &index &&
-           (index.nHeight >= runtime.floor_height || runtime.seal_floor || runtime.audit_floor) &&
+           (index.nHeight >= runtime.floor_height || runtime.seal_floor ||
+            runtime.historical_floor || runtime.audit_floor) &&
            index.nHeight <= runtime.frontier.ValidatedThroughHeight();
 }
 
@@ -10224,6 +10236,19 @@ void CChainLocksHandler::AdvancePaymentAuditPresealReplayValidation(
             checkpoint_floor = true;
         }
     }
+    std::shared_ptr<const HistoricalSyncAuthorization> historical_floor;
+    if (const auto imported{GetPoWHistoricalSyncAuthorization()}) {
+        const auto& statement{imported->base.metadata.statement};
+        const CBlockIndex* covered{chain[statement.height]};
+        // B commits this payment prefix even when its full audits were pruned.
+        // Authorize replay only through B's signed target, never the later E.
+        if (usable(covered) && covered->nHeight > floor->nHeight &&
+            IsPaymentAuditReplayFloorStatementValid(statement, *covered)) {
+            floor = covered;
+            historical_floor = imported;
+            checkpoint_floor = false;
+        }
+    }
     std::optional<pq::VerifiedRosterAuthorizationBaseView> seal_floor;
     VerifiedPaymentAuditReceiptTransitionPtr audit_floor;
     bool audit_floor_historical{false};
@@ -10250,6 +10275,7 @@ void CChainLocksHandler::AdvancePaymentAuditPresealReplayValidation(
         if (seal_floor) {
             floor = seal_index;
             checkpoint_floor = false;
+            historical_floor.reset();
         }
     }
     if (exact_seal && seal_index->nHeight > floor->nHeight) {
@@ -10274,6 +10300,7 @@ void CChainLocksHandler::AdvancePaymentAuditPresealReplayValidation(
             audit_floor_historical = historical;
             floor = seal_index;
             checkpoint_floor = false;
+            historical_floor.reset();
         }
     }
     runtime.source_token = source;
@@ -10281,6 +10308,7 @@ void CChainLocksHandler::AdvancePaymentAuditPresealReplayValidation(
     runtime.floor_hash = floor->GetBlockHash();
     runtime.checkpoint_floor = checkpoint_floor;
     runtime.seal_floor = std::move(seal_floor);
+    runtime.historical_floor = std::move(historical_floor);
     if (audit_floor_historical) runtime.historical_receipt = audit_floor;
     runtime.audit_floor = std::move(audit_floor);
     runtime.audit_floor_historical = audit_floor_historical;

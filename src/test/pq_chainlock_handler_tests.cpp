@@ -3209,6 +3209,9 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
     std::vector<scheduled_wots::PublicKey> signing_public_keys;
     const bool signed_terminal;
     const bool invalid_terminal_signature;
+    const bool signed_historical_base;
+    const bool historical_base_before_terminal;
+    llmq::pq::FinalChainLock historical_base;
     const int32_t tip_height;
     std::size_t roster_lookups{0};
     const uint256 genesis{m_node.chainman->GetConsensus().hashGenesisBlock};
@@ -3224,11 +3227,15 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         ~ActiveDIP() { consensus.DIP0003Height = previous; }
     };
 
-    explicit LatePaymentAuditPresealSetup(bool sign_terminal = false, bool invalid_signature = false)
+    explicit LatePaymentAuditPresealSetup(bool sign_terminal = false, bool invalid_signature = false,
+                                         bool sign_historical_base = false,
+                                         bool base_before_terminal = false)
         : TestingSetup{ChainType::REGTEST, {"-nevmstartheight=2825"}},
-          chain(static_cast<std::size_t>((sign_terminal ? 3'420 : TIP_HEIGHT) + 1)),
+          chain(static_cast<std::size_t>((sign_historical_base ? 3'440 : sign_terminal ? 3'420 : TIP_HEIGHT) + 1)),
           signed_terminal{sign_terminal}, invalid_terminal_signature{invalid_signature},
-          tip_height{sign_terminal ? 3'420 : TIP_HEIGHT}
+          signed_historical_base{sign_historical_base},
+          historical_base_before_terminal{base_before_terminal},
+          tip_height{sign_historical_base ? 3'440 : sign_terminal ? 3'420 : TIP_HEIGHT}
     {
         fNEVMConnection = false;
         CreateHandler();
@@ -3261,9 +3268,22 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
                     btcc = MakeBTCCReceipt(epoch.anchor_height);
                 }
             }
+            if (signed_historical_base && !historical_base_before_terminal &&
+                height == CARRIERS.back() + llmq::pq::PQ_BTCC_NEVM_LAG) {
+                btcc = MakeBTCCReceipt(CARRIERS.back());
+                btcc.chainlock_logical_id = historical_base.GetLogicalId(genesis);
+                BOOST_REQUIRE(btcc.accepted_cursor == historical_base.statement.accepted_btcc_cursor);
+            }
             llmq::pq::PaymentAuditReceipt payment;
             for (std::size_t i{0}; i < CARRIERS.size(); ++i) {
                 if (height == CARRIERS[i]) payment = PrepareAudit(i, epochs[i]);
+            }
+            if (signed_historical_base && historical_base_before_terminal && height == CARRIERS.back()) {
+                const int32_t base_height{height - static_cast<int32_t>(llmq::pq::PQ_BTCC_NEVM_LAG)};
+                PrepareHistoricalBase(base_height);
+                btcc = MakeBTCCReceipt(base_height);
+                btcc.chainlock_logical_id = historical_base.GetLogicalId(genesis);
+                BOOST_REQUIRE(btcc.accepted_cursor == historical_base.statement.accepted_btcc_cursor);
             }
             CBlock block;
             block.SetBaseVersion(4, m_node.chainman->GetConsensus().nAuxpowChainId);
@@ -3330,6 +3350,9 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             // native NEVM diff reader; no registration validation is implied.
             BOOST_REQUIRE(deterministicMNManager->m_evoDb->WriteThrough(
                 index->GetBlockHash(), CDeterministicMNList{index->GetBlockHash(), height, 0}, false));
+            if (signed_historical_base && !historical_base_before_terminal && height == CARRIERS.back()) {
+                PrepareHistoricalBase(height);
+            }
             if (height >= FIRST_CARRIER) replay_hashes.push_back(block.GetHash());
         }
         BOOST_REQUIRE(m_node.chainman->m_blockman.FlushChainstateBlockFile(tip_height));
@@ -3462,6 +3485,71 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             }
         }
         BOOST_REQUIRE_EQUAL(offset, PAYMENT_AUDIT_SIGNATURE_COUNT);
+    }
+
+    void PrepareHistoricalBase(int32_t height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        using namespace llmq::pq;
+        historical_base = MakeCatchupChainLock(height, height - PQ_CL_PERIOD,
+            chain[height - PQ_CL_PERIOD]->GetBlockHash(), 1'250'200);
+        auto& statement{historical_base.statement};
+        statement = audits.back().statement.seal_statement;
+        statement.height = height;
+        statement.block_hash = chain[height]->GetBlockHash();
+        statement.previous_chainlock_height = height - PQ_CL_PERIOD;
+        statement.previous_chainlock_hash = chain[statement.previous_chainlock_height]->GetBlockHash();
+        statement.previous_btcc_cursor = btcc_state.cursor;
+        statement.accepted_btcc_cursor = MakeBTCCReceipt(height).accepted_cursor;
+        statement.btcc_advance = BTCCAdvance::ADVANCE;
+        statement.btcc_receipt_state = btcc_state;
+        statement.payment_audit_receipt_state = payment_state;
+        statement.payment_probation_state_hash = probation_hash;
+        // Durable historical import also retains its normal recovery
+        // population. Bind the source beacon to an actual branch ancestor;
+        // the audit-only fixture's synthetic beacon anchor is beyond this tip.
+        statement.roster_beacons.active.seeds.back().anchor_cursor =
+            audits.back().statement.commitment.seed.anchor.accepted_cursor;
+        statement.roster_beacons.active.recovery_authority_source.normal_beacon =
+            statement.roster_beacons.active.seeds.back();
+        const auto base{Access::SelectedObjectiveRosterBase(*handler, *chain[height])};
+        BOOST_REQUIRE(base);
+        statement.roster_authorization_base = *base;
+        QuorumBuildError error{QuorumBuildError::NONE};
+        const auto verified{signing_roster_cache->GetVerifiedActiveNoPublish(
+            height, *chain[height], statement.roster_beacons.active, &error)};
+        BOOST_REQUIRE_MESSAGE(verified, static_cast<int>(error));
+        const auto& rosters{verified->Rosters()};
+        const auto recovery_universe{signing_roster_cache->GetOrCaptureRecoveryUniverse(
+            statement.roster_beacons.active.recovery_authority_source, *chain[height], &error)};
+        BOOST_REQUIRE_MESSAGE(recovery_universe, static_cast<int>(error));
+        std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) descriptors[slot] = rosters[slot].descriptor;
+        statement.quorum_context_hash = GetQuorumContextHash(genesis, height, statement.block_hash, descriptors);
+        std::size_t offset{0};
+        for (std::size_t slot{0}; slot < REQUIRED_QUORUMS; ++slot) {
+            const auto& roster{rosters[slot]};
+            const auto leaf{ChainLockLeafIndex(config.chainlock_schedule, roster.descriptor.epoch, height)};
+            BOOST_REQUIRE(leaf);
+            for (uint16_t member{0}; member < QUORUM_THRESHOLD; ++member) {
+                const auto& frozen{roster.members[member]};
+                std::size_t tag{0};
+                while (tag < signing_keys.size() && NonNullHash(1'220'000 + tag) != frozen.pro_tx_hash) ++tag;
+                BOOST_REQUIRE_LT(tag, signing_keys.size());
+                const auto child{SignedChildAuthorization(tag, roster.descriptor.epoch)};
+                BOOST_REQUIRE(frozen.child_root && *frozen.child_root == child.record);
+                auto& witness{historical_base.signatures.at(offset++)};
+                witness.key_proof = child.proof;
+                const auto transcript{BuildChainLockShareTranscript(
+                    historical_base, roster.descriptor, member, frozen.pro_tx_hash)};
+                const auto hash{GetChainLockShareHash(genesis, transcript)};
+                scheduled_wots::Message message;
+                std::copy(hash.begin(), hash.end(), message.begin());
+                BOOST_REQUIRE(scheduled_wots::SignDeterministic(
+                    *signing_keys[tag], *leaf, message, witness.signature));
+            }
+        }
+        BOOST_REQUIRE_EQUAL(offset, FINAL_SIGNATURE_COUNT);
+        BOOST_REQUIRE(historical_base.IsStructurallyValid());
     }
 
     llmq::pq::QuorumSnapshotState Snapshot(const CBlockIndex& index) const
@@ -4250,6 +4338,135 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
         CheckNoHistoricalOrdinaryAuthority();
     }
 
+    void CheckHistoricalBaseReplaysWithoutAuditArchives()
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        BOOST_REQUIRE(signed_historical_base);
+        // This fixture starts at a connected receipt boundary with no local
+        // audit packages or durable winner. It verifies all B signatures;
+        // provider pruning and cold block synchronization are separate tests.
+        ReplayUntilMissing(0);
+        CheckNoOrdinaryAuditArchives();
+        BOOST_CHECK_EQUAL(engine->count, 0U);
+        BOOST_CHECK_EQUAL(engine->flushes, 0U);
+        std::optional<llmq::pq::HistoricalSyncBoundary> boundary;
+        for (std::size_t attempt{0}; attempt < 32 && !boundary; ++attempt) {
+            boundary = Access::SelectHistoricalSyncBoundary(*handler);
+        }
+        BOOST_REQUIRE(boundary);
+        BOOST_REQUIRE_EQUAL(boundary->receipt.chainlock_target_height, CARRIERS.back());
+        BOOST_REQUIRE_EQUAL(boundary->coverage_height, 3'430);
+        BOOST_REQUIRE(boundary->receipt.chainlock_logical_id == historical_base.GetLogicalId(genesis));
+        BOOST_REQUIRE(Access::ValidateHistoricalSyncBoundary(*handler, *boundary, historical_base));
+        BlockValidationState imported;
+        BOOST_REQUIRE_MESSAGE(handler->ProcessNewChainLock(-1, historical_base, imported), imported.ToString());
+        BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+        BOOST_REQUIRE(Access::Persistence(*handler).LoadHistoricalSyncBootstrap());
+        BOOST_CHECK(Access::HasNoFinalityWinner(*handler));
+        CheckNoOrdinaryAuditArchives();
+        BlockValidationState redelivered;
+        BOOST_REQUIRE_MESSAGE(handler->ProcessNewChainLock(-1, historical_base, redelivered), redelivered.ToString());
+        BOOST_CHECK(Access::HasNoFinalityWinner(*handler));
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(!handler->IsPaymentAuditPresealActive());
+            BOOST_CHECK(handler->HasNEVMReplayObligation());
+            BOOST_CHECK(!m_node.chainman->PrepareNEVMBlockProduction());
+            BOOST_CHECK(Access::Persistence(*handler).LoadPaymentAuditPresealState() == markers);
+        }
+        BOOST_CHECK(!Access::IsNEVMReadyForLocalSigning(*handler, tip_height, chain.back()->GetBlockHash()));
+
+        // Signed B covers the compact payment receipt at its own target.
+        // Its null suffix must validate without asking for a pruned audit.
+        // Engine failure still retains the obligation and signing barrier.
+        engine->flush_available = false;
+        Replay();
+        BOOST_CHECK_EQUAL(engine->count, 0U);
+        BOOST_CHECK(handler->HasNEVMReplayObligation());
+        BOOST_CHECK(Access::Persistence(*handler).LoadPaymentAuditPresealState() == markers);
+        BOOST_CHECK(!Access::IsNEVMReadyForLocalSigning(*handler, tip_height, chain.back()->GetBlockHash()));
+        BOOST_REQUIRE_EQUAL(Access::PaymentReplayValidatedHeight(*handler), tip_height);
+        BOOST_CHECK(!Access::PaymentReplayDependency(*handler));
+        BOOST_CHECK(Access::PaymentReplayAuthenticated(*handler, *chain[FIRST_CARRIER]));
+        BOOST_CHECK_GT(engine->flushes, 0U);
+        for (auto field : {&CBlockIndex::pqPaymentAuditReceiptStateHash,
+                           &CBlockIndex::pqPaymentProbationStateHash}) {
+            {
+                uint256& root{chain[historical_base.statement.height]->*field};
+                struct RestoreRoot {
+                    uint256& root;
+                    uint256 saved;
+                    ~RestoreRoot() { LOCK(::cs_main); root = saved; }
+                } restore{root, WITH_LOCK(::cs_main, return std::exchange(root, NonNullHash(1'250'201)))};
+                // A retained signature cannot bless a different indexed
+                // accumulator or probation state, even with unchanged tip E.
+                BOOST_CHECK(!Access::PaymentReplayAuthenticated(*handler, *chain[FIRST_CARRIER]));
+                const auto flushes{engine->flushes};
+                Replay();
+                BOOST_CHECK_LT(Access::PaymentReplayValidatedHeight(*handler), FIRST_CARRIER);
+                BOOST_CHECK(!Access::PaymentReplayAuthenticated(*handler, *chain[FIRST_CARRIER]));
+                BOOST_CHECK_EQUAL(engine->flushes, flushes);
+                BOOST_CHECK_EQUAL(engine->count, 0U);
+                BOOST_CHECK(Access::Persistence(*handler).LoadPaymentAuditPresealState() == markers);
+            }
+            Replay();
+            BOOST_REQUIRE_EQUAL(Access::PaymentReplayValidatedHeight(*handler), tip_height);
+            BOOST_CHECK(Access::PaymentReplayAuthenticated(*handler, *chain[FIRST_CARRIER]));
+        }
+        engine->flush_available = true;
+        CompleteReplay();
+        BOOST_CHECK(Access::IsNEVMReadyForLocalSigning(*handler, tip_height, chain.back()->GetBlockHash()));
+        CheckNoOrdinaryAuditArchives();
+        BOOST_CHECK(Access::HasHistoricalSyncAuthorization(*handler));
+    }
+
+    void CheckHistoricalBaseRequiresLaterAudit() EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        BOOST_REQUIRE(signed_historical_base && historical_base_before_terminal);
+        ReplayUntilMissing(0);
+        std::optional<llmq::pq::HistoricalSyncBoundary> boundary;
+        for (std::size_t attempt{0}; attempt < 32 && !boundary; ++attempt) {
+            boundary = Access::SelectHistoricalSyncBoundary(*handler);
+        }
+        BOOST_REQUIRE(boundary);
+        BOOST_REQUIRE_EQUAL(historical_base.statement.height, 3'395);
+        BOOST_REQUIRE_EQUAL(boundary->coverage_height, 3'430);
+        BOOST_REQUIRE(boundary->receipt.chainlock_logical_id == historical_base.GetLogicalId(genesis));
+        BOOST_REQUIRE(historical_base.statement.payment_audit_receipt_state.cursor.audit_logical_id ==
+            receipts[1].audit_logical_id);
+        BOOST_REQUIRE(Access::ValidateHistoricalSyncBoundary(*handler, *boundary, historical_base));
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(handler->ProcessNewChainLock(-1, historical_base, state), state.ToString());
+        BOOST_REQUIRE(Access::HasHistoricalSyncAuthorization(*handler));
+        CheckNoOrdinaryAuditArchives();
+        Replay();
+        // E includes the later receipt, but B's signatures precede it.
+        // The available engine must not receive this unproved suffix.
+        BOOST_CHECK_EQUAL(Access::PaymentReplayValidatedHeight(*handler), CARRIERS.back() - 1);
+        BOOST_CHECK(Access::PaymentReplayDependency(*handler) == receipts.back());
+        BOOST_CHECK(Access::PaymentReplayAuthenticated(*handler, *chain[CARRIERS[1]]));
+        BOOST_CHECK(!Access::PaymentReplayAuthenticated(*handler, *chain[CARRIERS.back()]));
+        BOOST_CHECK_EQUAL(engine->flushes, 0U);
+        BOOST_CHECK_EQUAL(engine->count, 0U);
+        BOOST_CHECK(Access::Persistence(*handler).LoadPaymentAuditPresealState() == markers);
+        BOOST_CHECK(!Access::IsNEVMReadyForLocalSigning(*handler, tip_height, chain.back()->GetBlockHash()));
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(!handler->IsPaymentAuditPresealActive());
+            BOOST_CHECK(handler->HasNEVMReplayObligation());
+            handler->NotePendingPaymentAuditReceiptCertificate(receipts.back(), *chain[CARRIERS.back()]);
+        }
+        // Supplying the separately signed terminal audit releases only the
+        // missing suffix; it does not install B or the seal as local finality.
+        const auto context{Access::PaymentAuditHistoricalContext(*handler, receipts.back().audit_witness_id)};
+        BOOST_REQUIRE(context);
+        const auto accepted{Access::TryHistoricalPaymentAudit(*handler, audits.back(), *context)};
+        BOOST_REQUIRE(accepted && *accepted);
+        CompleteReplay();
+        CheckNoOrdinaryAuditArchives();
+        BOOST_CHECK(Access::IsNEVMReadyForLocalSigning(*handler, tip_height, chain.back()->GetBlockHash()));
+    }
+
     auto RequestHistoricalReplay()
     {
         ReplayUntilMissing(0);
@@ -4814,6 +5031,14 @@ struct InvalidSignedLatePaymentAuditPresealSetup : LatePaymentAuditPresealSetup 
     InvalidSignedLatePaymentAuditPresealSetup() : LatePaymentAuditPresealSetup{true, true} {}
 };
 
+struct SignedHistoricalBasePaymentAuditPresealSetup : LatePaymentAuditPresealSetup {
+    SignedHistoricalBasePaymentAuditPresealSetup() : LatePaymentAuditPresealSetup{true, false, true} {}
+};
+
+struct EarlierSignedHistoricalBasePaymentAuditPresealSetup : LatePaymentAuditPresealSetup {
+    EarlierSignedHistoricalBasePaymentAuditPresealSetup() : LatePaymentAuditPresealSetup{true, false, true, true} {}
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_chainlock_handler_tests, BasicTestingSetup)
@@ -4863,6 +5088,26 @@ BOOST_FIXTURE_TEST_CASE(payment_preseal_signed_historical_terminal_replays_witho
     }
     CheckHistoricalSignedReplay();
     CheckRecoveredAuditProviderHandoff();
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_preseal_signed_historical_base_replays_without_audit_archives,
+                        SignedHistoricalBasePaymentAuditPresealSetup)
+{
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(m_node.chainman->IsBaseBlockSyncComplete());
+    }
+    CheckHistoricalBaseReplaysWithoutAuditArchives();
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_preseal_historical_base_does_not_cover_later_audit,
+                        EarlierSignedHistoricalBasePaymentAuditPresealSetup)
+{
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(m_node.chainman->IsBaseBlockSyncComplete());
+    }
+    CheckHistoricalBaseRequiresLaterAudit();
 }
 
 BOOST_FIXTURE_TEST_CASE(payment_preseal_historical_terminal_rejects_matching_invalid_signature,

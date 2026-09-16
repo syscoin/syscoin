@@ -1574,6 +1574,7 @@ private:
 
     // Full historical verification authorizes replay only. It does not
     // create finality or authorize archive/probation garbage collection.
+    struct HistoricalSyncAuthorization;
     struct PaymentAuditReplayValidationRuntime {
         BoundedActiveRangeFrontier frontier;
         uint256 source_token;
@@ -1581,6 +1582,7 @@ private:
         uint256 floor_hash;
         bool checkpoint_floor{false};
         std::optional<pq::VerifiedRosterAuthorizationBaseView> seal_floor;
+        std::shared_ptr<const HistoricalSyncAuthorization> historical_floor;
         VerifiedPaymentAuditReceiptTransitionPtr audit_floor;
         bool audit_floor_historical{false};
         VerifiedPaymentAuditReceiptTransitionPtr historical_receipt;
