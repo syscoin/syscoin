@@ -8,6 +8,7 @@
 #include <uint256.h>
 #include <util/string.h>
 
+#include <fstream>
 #include <memory>
 
 #include <boost/test/unit_test.hpp>
@@ -23,6 +24,33 @@ static bool is_null_key(const std::vector<unsigned char>& key) {
 }
 
 BOOST_FIXTURE_TEST_SUITE(dbwrapper_tests, BasicTestingSetup)
+
+// SYSCOIN: sanitizer coverage for resources allocated before construction fails.
+BOOST_AUTO_TEST_CASE(dbwrapper_constructor_failure_cleanup)
+{
+    const fs::path path{m_args.GetDataDirBase() / "dbwrapper_constructor_failure"};
+    const DBParams params{.path = path, .cache_bytes = 1 << 20};
+    fs::create_directories(path.parent_path());
+    {
+        std::ofstream file{path};
+        BOOST_REQUIRE(file.is_open());
+    }
+    BOOST_CHECK_THROW(CDBWrapper{params}, fs::filesystem_error);
+    BOOST_REQUIRE(fs::remove(path));
+
+    {
+        CDBWrapper db{params};
+        BOOST_REQUIRE(db.Write(uint8_t{'k'}, uint256{1}));
+        // A failed LevelDB open must clean up its options without closing
+        // the first wrapper's database or retaining its lock afterward.
+        BOOST_CHECK_THROW(CDBWrapper{params}, dbwrapper_error);
+        BOOST_CHECK(db.Write(uint8_t{'k'}, uint256{2}));
+    }
+    CDBWrapper reopened{params};
+    uint256 value;
+    BOOST_REQUIRE(reopened.Read(uint8_t{'k'}, value));
+    BOOST_CHECK(value == uint256{2});
+}
 
 BOOST_AUTO_TEST_CASE(dbwrapper)
 {

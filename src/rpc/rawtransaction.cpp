@@ -158,7 +158,7 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
             {RPCResult::Type::STR_HEX, "collateralHash", "Collateral Hash"},
             {RPCResult::Type::NUM, "collateralIndex", "Collateral Index"},
             {RPCResult::Type::STR, "service", "Service IP"},
-            {RPCResult::Type::STR, "ownerAddress", "Owner Address"},
+            {RPCResult::Type::STR, "ownerAddress", /*optional=*/true, "Legacy owner address; absent for a PQ-only owner"},
             {RPCResult::Type::STR, "votingAddress", "Voting Address"},
             {RPCResult::Type::STR, "payoutAddress", /*optional=*/true, "Payout Address"},
             // SYSCOIN BEGIN: Provider JSON separates historical and PQ keys.

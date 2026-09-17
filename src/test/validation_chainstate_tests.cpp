@@ -4632,6 +4632,15 @@ static void CheckGovernanceFutureVotes(TestChain100Setup& fixture,
     if (payment_epoch) {
         member_state->scriptPayout = GetScriptForDestination(
             WitnessV0KeyHash(fixture.coinbaseKey.GetPubKey()));
+        // This admitted-state fixture needs all three PQ roles enrolled to
+        // exercise real payment selection after activation. Owner and voting
+        // signatures are outside these operator/governance read-failure tests.
+        GlobalPublicKey owner_key{};
+        GlobalPublicKey voting_key{};
+        owner_key[0] = 2;
+        voting_key[0] = 3;
+        BOOST_REQUIRE(member_state->pqOwnerKey.UpdatePublicKey(owner_key, preparation_height));
+        BOOST_REQUIRE(member_state->pqVotingKey.UpdatePublicKey(voting_key, preparation_height));
     }
     member_state->nRegisteredHeight = preparation_height - 1;
     // SYSCOIN: model collateral created with registration, as BuildNewList

@@ -128,12 +128,19 @@ BOOST_AUTO_TEST_CASE(rpc_provider_payload_documentation)
         const auto decoded{CallRPC("decoderawtransaction " + EncodeHexTx(CTransaction(tx)))};
         BOOST_REQUIRE(decoded.exists(field));
         BOOST_CHECK_EQUAL(decoded[field]["version"].getInt<int>(), payload.nVersion);
+        return decoded[field];
     };
     for (uint16_t version : {1, 2, 3}) {
         CProRegTx registration;
         registration.nVersion = version;
         registration.pqVotingPublicKey.fill(0x51);
-        check(registration, "proRegTx");
+        registration.pqOwnerPublicKey.fill(0x52);
+        // Historical registrations carry an ECDSA owner; PQ registrations
+        // expose their public key without inventing a legacy owner address.
+        if (version <= CProRegTx::BASIC_BLS_VERSION) registration.keyIDOwner.begin()[0] = 1;
+        const auto decoded{check(registration, "proRegTx")};
+        BOOST_CHECK_EQUAL(decoded.exists("ownerAddress"), version <= CProRegTx::BASIC_BLS_VERSION);
+        BOOST_CHECK_EQUAL(decoded.exists("pqOwnerPublicKey"), version == CProRegTx::PQ_VERSION);
         CProUpRegTx registrar;
         registrar.nVersion = version;
         registrar.pqVotingPublicKey.fill(0x61);
