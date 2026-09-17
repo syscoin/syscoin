@@ -312,7 +312,20 @@ jobs:
       - name: Run unit tests
         # SYSCOIN: Boost combines colon-separated selectors and exclusions.
         # run: src\test_syscoin.exe -l test_suite
-        run: src\test_syscoin.exe -l test_suite --run_test="${{ matrix.unit_filter }}"
+        run: |
+          src\test_syscoin.exe -l test_suite --run_test="${{ matrix.unit_filter }}"
+          $unitTestExitCode = $LASTEXITCODE
+          if ($unitTestExitCode -ne 0) {
+            # SYSCOIN: Abrupt native exits can bypass Boost's failure report.
+            # Preserve the last fixture/child logs without masking the exit.
+            Get-ChildItem -LiteralPath "$env:TEMP\test_common_Syscoin Core" -Recurse -File -Filter debug.log -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 4 | ForEach-Object {
+                Write-Output "::group::Unit-test debug log: $($_.FullName)"
+                Get-Content -LiteralPath $_.FullName -Tail 100 -ErrorAction Continue
+                Write-Output "::endgroup::"
+              }
+          }
+          exit $unitTestExitCode
 
       - name: Smoke-test external Bitcoin header command
         if: matrix.shard == 'remaining'

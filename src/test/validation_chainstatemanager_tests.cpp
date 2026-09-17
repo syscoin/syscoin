@@ -8099,25 +8099,29 @@ struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
         BOOST_REQUIRE(!crash_path.empty());
         // Only this separate manifest is synchronized here. In particular,
         // neither budget lookup nor any orderly shutdown can flush B(S).
-        CDBWrapper manifest{DBParams{.path = crash_path / "manifest", .cache_bytes = 1U << 20}};
-        CDBBatch batch{manifest};
-        batch.Write(std::string{"fixture_root"}, fs::PathToString(m_path_root));
-        batch.Write(std::string{"datadir"}, fs::PathToString(chainman.m_options.datadir));
-        batch.Write(std::string{"coins_path"}, WITH_LOCK(::cs_main,
-            return fs::PathToString(*state.CoinsDB().StoragePath())));
-        const auto write_block = [&](const std::string& key, const CBlock& block) {
-            CDataStream bytes{SER_DISK, CLIENT_VERSION};
-            bytes << block;
-            batch.Write(key, std::vector<uint8_t>{
-                UCharCast(bytes.data()), UCharCast(bytes.data() + bytes.size())});
-        };
-        write_block("superblock", *superblock);
-        write_block("child", *child);
-        batch.Write(std::string{"height"}, parent->nHeight);
-        batch.Write(std::string{"budget_before_parent_sync"}, budget_before_parent_sync);
-        batch.Write(std::string{"engine_count"}, nevm->durable_pair->count);
-        batch.Write(std::string{"engine_hash"}, nevm->durable_pair->hash);
-        BOOST_REQUIRE(manifest.WriteBatch(batch, /*fSync=*/true));
+        {
+            // Close only the handoff DB before exiting, as in the BTCC crash
+            // fixture. Its Windows locks are not part of the durability test.
+            CDBWrapper manifest{DBParams{.path = crash_path / "manifest", .cache_bytes = 1U << 20}};
+            CDBBatch batch{manifest};
+            batch.Write(std::string{"fixture_root"}, fs::PathToString(m_path_root));
+            batch.Write(std::string{"datadir"}, fs::PathToString(chainman.m_options.datadir));
+            batch.Write(std::string{"coins_path"}, WITH_LOCK(::cs_main,
+                return fs::PathToString(*state.CoinsDB().StoragePath())));
+            const auto write_block = [&](const std::string& key, const CBlock& block) {
+                CDataStream bytes{SER_DISK, CLIENT_VERSION};
+                bytes << block;
+                batch.Write(key, std::vector<uint8_t>{
+                    UCharCast(bytes.data()), UCharCast(bytes.data() + bytes.size())});
+            };
+            write_block("superblock", *superblock);
+            write_block("child", *child);
+            batch.Write(std::string{"height"}, parent->nHeight);
+            batch.Write(std::string{"budget_before_parent_sync"}, budget_before_parent_sync);
+            batch.Write(std::string{"engine_count"}, nevm->durable_pair->count);
+            batch.Write(std::string{"engine_hash"}, nevm->durable_pair->hash);
+            BOOST_REQUIRE(manifest.WriteBatch(batch, /*fSync=*/true));
+        }
         std::_Exit(73);
     }
 
@@ -8134,6 +8138,7 @@ struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
         const std::vector<std::string> args{
             "--run_test=validation_chainstatemanager_tests/nevm_surviving_budget_crash_child",
             "--", "NEVM_SURVIVING_BUDGET_CHILD", fs::PathToString(crash_path)};
+        BOOST_TEST_MESSAGE("Launching surviving-budget crash child; manifest: " << fs::PathToString(crash_path));
         bp::child child{bp::exe = boost::unit_test::framework::master_test_suite().argv[0], bp::args = args};
         const auto deadline{std::chrono::steady_clock::now() + std::chrono::minutes{2}};
         while (child.running() && std::chrono::steady_clock::now() < deadline) {
@@ -8142,6 +8147,7 @@ struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
         const bool timed_out{child.running()};
         if (timed_out) child.terminate();
         child.wait();
+        BOOST_TEST_MESSAGE("Surviving-budget crash child exited: " << child.exit_code());
         BOOST_REQUIRE_MESSAGE(!timed_out, "Owned surviving-budget crash child timed out");
         BOOST_REQUIRE_EQUAL(child.exit_code(), 73);
         CDBWrapper manifest{DBParams{.path = crash_path / "manifest", .cache_bytes = 1U << 20}};
@@ -8170,6 +8176,7 @@ struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
         const fs::path child_root{fs::u8path(fixture_root)};
         BOOST_REQUIRE(child_root != m_path_root);
         BOOST_REQUIRE(child_root.parent_path() == m_path_root.parent_path());
+        BOOST_TEST_MESSAGE("Reopening surviving-budget databases: " << fixture_root);
         BOOST_CHECK(budget_before_parent_sync);
         const uint256 parent_hash{superblock.GetHash()};
         BOOST_CHECK(engine_hash == parent_hash);
@@ -8232,6 +8239,7 @@ struct NEVMSurvivingBudgetSetup : NEVMSuperblockBudgetRollbackSetup {
                 /*fJustCheck=*/true, /*check_superblock=*/false));
             BOOST_CHECK(error.find("exceeded superblock max value") != std::string::npos);
         }
+        BOOST_TEST_MESSAGE("Removing surviving-budget crash fixture: " << fixture_root);
         fs::remove_all(child_root);
 #endif
     }
