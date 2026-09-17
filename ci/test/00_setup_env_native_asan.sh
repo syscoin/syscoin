@@ -32,6 +32,13 @@ export CCACHE_MAXSIZE=300M
 # SYSCOIN: The full-dimension ChainLocks functional prevents this lane from
 # completing under AddressSanitizer; native macOS retains the test.
 export TEST_RUNNER_EXTRA="--exclude interface_zmq_nevm,rpc_bind,feature_bind_extra,feature_proxy,feature_pq_chainlocks"
+# SYSCOIN: Keep the three ASan functional jobs disjoint without changing the
+# local default. 06_script_b.sh expands these options into a bash command;
+# quote the regex so its parentheses and alternations remain one argument.
+if [[ -n "${TEST_RUNNER_FILTER}" ]]; then
+  printf -v asan_test_filter_arg '%q' "${TEST_RUNNER_FILTER}"
+  export TEST_RUNNER_EXTRA="${TEST_RUNNER_EXTRA} --filter=${asan_test_filter_arg}"
+fi
 export SYSCOIN_CONFIG="--enable-c++20 --enable-usdt --enable-zmq --with-incompatible-bdb --with-gui=qt5 \
 CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER' \
 --with-sanitizers=address,float-divide-by-zero,integer,undefined \
