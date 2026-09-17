@@ -5,6 +5,7 @@
 """Exercise the real external Bitcoin-header command runner on every platform."""
 
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -36,11 +37,12 @@ if mode == "timeout":
     # A leaked descendant keeps both captured pipes open after its parent is
     # terminated. The finite lifetime also bounds a failing regression test.
     descendant = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(20)"],
+        [sys.executable, "-c", "import sys, time; time.sleep(float(sys.argv[1]))",
+         str(state["descendant_lifetime"])],
         stdout=sys.stdout, stderr=sys.stderr)
     Path(state["descendant_marker"]).write_text(
         str(descendant.pid), encoding="utf8")
-    time.sleep(20)
+    time.sleep(state["descendant_lifetime"])
 
 print(json.dumps(state["chaininfo"]))
 '''
@@ -52,10 +54,17 @@ class BTCHeaderExternalCommandTest(SyscoinTestFramework):
         self.setup_clean_chain = True
         self.wallet_names = []
         self.supports_cli = False
+        # Honor slow CI runners without exceeding the backend's 60-second
+        # command limit. Scale the pipe check and descendant lifetime together
+        # so a leaked pipe still fails before the descendant exits naturally.
+        timeout_factor = min(20, max(1, self.options.timeout_factor))
+        self.command_timeout = math.ceil(3 * timeout_factor)
+        self.pipe_close_timeout = 10 * timeout_factor
+        self.descendant_lifetime = 20 * timeout_factor
         self.extra_args = [[
             "-btcheadermanaged=0",
             "-btcheaderwatchdog=0",
-            "-btcheadercmdtimeout=3",
+            f"-btcheadercmdtimeout={self.command_timeout}",
         ]]
 
     def add_options(self, parser):
@@ -81,6 +90,7 @@ class BTCHeaderExternalCommandTest(SyscoinTestFramework):
         self.state = {
             "mode": "ready",
             "descendant_marker": str(self.descendant_marker),
+            "descendant_lifetime": self.descendant_lifetime,
             "chaininfo": {
                 "chain": "regtest",
                 "initialblockdownload": False,
@@ -106,10 +116,10 @@ class BTCHeaderExternalCommandTest(SyscoinTestFramework):
 
     def assert_ready(self):
         status = self.nodes[0].syscoinbtcheaderstatus()
+        assert status["ready"], status
         assert_equal(status["managed"], False)
         assert_equal(status["process_running"], True)
         assert_equal(status["policy_healthy"], True)
-        assert_equal(status["ready"], True)
         assert_equal(status["chaininfo"], self.state["chaininfo"])
         assert "reason" not in status, status
 
@@ -140,9 +150,9 @@ class BTCHeaderExternalCommandTest(SyscoinTestFramework):
         elapsed = time.monotonic() - started
         assert self.descendant_marker.exists(), "Backend did not spawn its descendant"
         assert int(self.descendant_marker.read_text(encoding="utf8")) > 0
-        # This allowance exceeds the three-second command deadline but stays
-        # below the descendant's 20-second fallback lifetime, even on Windows CI.
-        assert elapsed < 10, f"Timed-out backend retained captured pipes for {elapsed:.2f}s"
+        # Allow scheduling overhead beyond the command deadline, but fail
+        # before the descendant's fallback lifetime could close leaked pipes.
+        assert elapsed < self.pipe_close_timeout, f"Timed-out backend retained captured pipes for {elapsed:.2f}s"
 
         self.log.info("Check command recovery without restarting or mining")
         self.state["chaininfo"].update(
