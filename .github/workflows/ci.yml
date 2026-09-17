@@ -66,21 +66,7 @@ jobs:
           # and the ^ prefix is used to exclude these parents and all their
           # ancestors from the rev-list output as described in:
           # https://git-scm.com/docs/git-rev-list
-          test_base=$(git rev-list -n$((${{ env.MAX_COUNT }} + 1)) --reverse HEAD ^$(git rev-list -n1 --merges HEAD)^@ | head -1)
-          # SYSCOIN: PR609's intermediate PQ-owner commits have an RPC schema
-          # regression repaired by 8e4f50ca87. Start with that repaired commit
-          # while it is in the historical window; keep full PR-head coverage
-          # below and leave other PRs' historical ranges unchanged.
-          rpc_schema_repair=8e4f50ca879bfefa0a21b9c5d232bfc7161d40a6
-          if [[ "${{ github.event.pull_request.number }}" == 609 ]] &&
-              git merge-base --is-ancestor "$rpc_schema_repair" HEAD; then
-            repair_base=$(git rev-parse "$rpc_schema_repair^")
-            if git merge-base --is-ancestor "$test_base" "$repair_base"; then
-              echo "Starting historical checks at RPC schema repair $rpc_schema_repair"
-              test_base=$repair_base
-            fi
-          fi
-          echo "TEST_BASE=$test_base" >> "$GITHUB_ENV"
+          echo "TEST_BASE=$(git rev-list -n$((${{ env.MAX_COUNT }} + 1)) --reverse HEAD ^$(git rev-list -n1 --merges HEAD)^@ | head -1)" >> "$GITHUB_ENV"
       - run: |
           # SYSCOIN: Chrome is unused here; its runner-provided APT source can
           # have mismatched indexes. Remove both legacy and deb822 sources.
