@@ -47,8 +47,15 @@ class PQOwnerKeyTest(PQOperatorLifecycleTest):
             owner_address, "", owner_address, 0,
             self.controller.getnewaddress(), funds_address)
         self.generate(node, 1)
+        info = node.protx_info(protx_hash)
+        collateral = {"txid": info["collateralHash"], "vout": info["collateralIndex"]}
+        # The controller wallet is loaded by RPC after the activation reindex,
+        # after startup's automatic collateral-lock pass. Persist the fixture
+        # lock so later fee funding cannot spend this registration's collateral.
+        assert self.controller.lockunspent(False, [collateral], True)
         return {
             "protx_hash": protx_hash,
+            "collateral": collateral,
             "operator_key": keys["operatorKey"],
             "chainlock_seed": keys["chainlockSeed"],
             "fee_address": fee_address,
@@ -216,6 +223,8 @@ class PQOwnerKeyTest(PQOperatorLifecycleTest):
         self.migrate(legacy_mn, enroll_voting=False)
         self.activate_pq()
         self.wallets()
+        for mn in (legacy_mn, pq_mn):
+            assert mn["collateral"] in self.controller.listlockunspent()
         self.generate(node, 1)
         assert_equal(self.state(legacy_mn)["pqOwnerKeyVersion"], 1)
         assert "pqVotingPublicKey" not in self.state(legacy_mn)
