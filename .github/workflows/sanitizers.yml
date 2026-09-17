@@ -58,13 +58,15 @@ jobs:
             timeout: 240
             run_unit_tests: 'false'
             run_functional_tests: 'true'
-            test_filter: '^(feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key|feature_pq_voting_key|feature_btcheader_external_policy|rpc_mnauth|rpc_masternode)\.py'
+            # Keep this group to one wave of four long fixtures. Voting,
+            # header policy and MN RPC tests run in the shorter remaining job.
+            test_filter: '^(feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key)\.py'
           - name: ASan + LSan + UBSan (functional remaining)
             file_env: ./ci/test/00_setup_env_native_asan.sh
             timeout: 240
             run_unit_tests: 'false'
             run_functional_tests: 'true'
-            test_filter: '^(?!(feature_governance|feature_governance_dynamic|feature_governance_objects|feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key|feature_pq_voting_key|feature_btcheader_external_policy|rpc_mnauth|rpc_masternode)\.py)'
+            test_filter: '^(?!(feature_governance|feature_governance_dynamic|feature_governance_objects|feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key)\.py)'
           - name: TSan (native)
             file_env: ./ci/test/00_setup_env_native_tsan.sh
             timeout: 180
