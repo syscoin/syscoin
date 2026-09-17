@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Syscoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Catch up after real PQ authorization-certificate eviction.
+"""Recover after a partition, PQ authorization-certificate eviction, and an outage.
 
 The branch-bound snapshot helper supplies the same 400-member test population
 as feature_pq_chainlocks.py. It does not supply accepted authorization state.
@@ -210,6 +210,42 @@ class PQPrunedSyncTest(PQChainLocksTest):
         receiver.setmocktime(int(time.time()) + 180)
         self.disconnect_nodes(index, 0)
         self.connect_nodes(index, 0)
+
+    def assert_partition_recovery(self, initial):
+        source, receiver = self.nodes[0], self.nodes[1]
+        common_height = FIRST_ELIGIBLE_TARGET_HEIGHT + SIGN_LAG
+        assert_equal(source.getblockcount(), common_height)
+        assert_equal(receiver.getbestblockhash(), source.getbestblockhash())
+        for node in (source, receiver):
+            self.assert_exact_winner(node, initial, FIRST_ELIGIBLE_TARGET_HEIGHT)
+            force_finish_mnsync(node)
+
+        self.log.info("Partition after honest activation; mine competing branches without new certificates")
+        self.disconnect_nodes(1, 0)
+        source_blocks = self.generatetoaddress(
+            source, 1, source.get_deterministic_priv_key().address, sync_fun=self.no_op)
+        receiver_blocks = self.generatetoaddress(
+            receiver, 2, receiver.get_deterministic_priv_key().address, sync_fun=self.no_op)
+        assert source.getblockhash(common_height + 1) != receiver.getblockhash(common_height + 1)
+        assert_equal(source.getbestblockhash(), source_blocks[-1])
+        assert_equal(receiver.getbestblockhash(), receiver_blocks[-1])
+        assert int(receiver.getblockheader(receiver_blocks[-1])["chainwork"], 16) > \
+            int(source.getblockheader(source_blocks[-1])["chainwork"], 16)
+        for node in (source, receiver):
+            self.assert_exact_winner(node, initial, FIRST_ELIGIBLE_TARGET_HEIGHT)
+
+        self.log.info("Restore peering; converge on greater work and continue mining without new finality")
+        self.connect_nodes(1, 0)
+        self.sync_blocks([source, receiver], timeout=180)
+        assert_equal(source.getbestblockhash(), receiver_blocks[-1])
+        # Reuse this history for the outage test, stopping before its first
+        # receipt carrier so the existing certificate schedule is unchanged.
+        self.generatetoaddress(
+            source, 2, source.get_deterministic_priv_key().address, sync_fun=self.no_op)
+        self.sync_blocks([source, receiver], timeout=180)
+        assert_equal(source.getblockcount(), common_height + 4)
+        for node in (source, receiver):
+            self.assert_exact_winner(node, initial, FIRST_ELIGIBLE_TARGET_HEIGHT)
 
     @staticmethod
     def best_id(node):
@@ -977,6 +1013,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
             self.wait_until(lambda: self.best_id(node) == "%064x" % normal["logical_hash"],
                             timeout=120)
             self.assert_exact_winner(node, normal, target)
+            assert_equal(node.getbestblockhash(), self.nodes[0].getbestblockhash())
 
     def run_scenario(self):
         _, predecessor = self.configure_private_migration()
@@ -987,6 +1024,7 @@ class PQPrunedSyncTest(PQChainLocksTest):
         self.start_receiver(1, receiver_args)
         self.wait_until(lambda: self.best_id(self.nodes[1]) == "%064x" % initial["logical_hash"],
                         timeout=120)
+        self.assert_partition_recovery(initial)
         self.stop_node(1)
 
         # Wait until the first receipt is visible at the authorization lookback.
