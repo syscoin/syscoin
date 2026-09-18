@@ -123,10 +123,19 @@ class PQVotingKeyTest(DashTestFramework):
         collateral = owner.gobject_prepare("0", 1, proposal_time, data)
         self.generate(owner, 6)
         self.bump_mocktime(6)
+        # Let SendMessages schedule the next inventory tick before submitting,
+        # so this wait also covers a proposal queued between relay ticks.
+        with owner.assert_debug_log(["received: pong"]):
+            owner.ping()
         self.proposal = owner.gobject_submit("0", 1, proposal_time, data, collateral)
-        for node in self.nodes:
-            self.wait_until(
-                lambda node=node: self.proposal in node.gobject_list(), timeout=120)
+
+        def proposal_relayed():
+            # Governance inventory uses the randomized transaction relay timer.
+            # Keep its mock clock advancing while waiting for the announcement.
+            self._throttled_bump_mocktime("pq_voting_proposal_sync", step=1)
+            return all(self.proposal in node.gobject_list() for node in self.nodes)
+
+        self.wait_until(proposal_relayed, timeout=120)
 
         self.log.info("An operator key alone cannot cast an owner's funding vote")
         assert_raises_rpc_error(
