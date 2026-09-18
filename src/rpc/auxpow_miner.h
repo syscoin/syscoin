@@ -64,7 +64,8 @@ private:
   /* Some data about when the current block (pblock) was constructed.  */
   unsigned txUpdatedLast;
   const CBlockIndex* pindexPrev = nullptr;
-  uint64_t startTime;
+  // SYSCOIN: Match GetTime() so a backward clock cannot wrap the cache age.
+  int64_t startTime{0};
 
   /**
    * Constructs a new current block if necessary (checking the current state to

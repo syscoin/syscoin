@@ -1089,6 +1089,16 @@ BOOST_FIXTURE_TEST_CASE (auxpow_miner_blockRegeneration, TestChain100Setup)
     mempool.addUnchecked (entry.FromTx (mtx));
   }
 
+  // SYSCOIN: A backward wall/mock clock does not mean the cache has aged.
+  // Keep the pending mempool change until more than 60 seconds have elapsed
+  // since construction, including after the clock returns to that timestamp.
+  for (const int64_t now : {baseTime + 39, baseTime + 100})
+    {
+      SetMockTime(now);
+      pblock = miner.getCurrentBlock(*m_node.chainman, mempool, scriptPubKey, target);
+      BOOST_CHECK(pblock == pblock2 && pblock->GetHash() == hash2);
+    }
+
   /* We should still get back the cached block, for now.  */
   SetMockTime (baseTime + 160);
   pblock = miner.getCurrentBlock (*m_node.chainman, mempool, scriptPubKey, target);
