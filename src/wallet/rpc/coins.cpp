@@ -551,8 +551,10 @@ RPCHelpMan listunspent()
                             {RPCResult::Type::BOOL, "safe", "Whether this output is considered safe to spend. Unconfirmed transactions\n"
                                                             "from outside keys and unconfirmed replacement transactions are considered unsafe\n"
                                                             "and are not eligible for spending by fundrawtransaction and sendtoaddress."},
+                            // SYSCOIN BEGIN: Include optional asset details in listunspent results.
                             {RPCResult::Type::NUM, "asset_guid",  /*optional=*/true, "Asset GUID if exists"},
                             {RPCResult::Type::STR_AMOUNT, "asset_amount",  /*optional=*/true, "Asset amount if exists"},
+                            // SYSCOIN END: Include optional asset details in listunspent results.
                         }},
                     }
                 },

@@ -41,6 +41,7 @@ struct CBlockTemplate
     std::vector<unsigned char> vchCoinbaseCommitmentExtra; // coinbase opreturn commitment for quorums goes after any witness commitment
     std::vector<CTxOut> voutMasternodePayments; // masternode payment
     std::vector<CTxOut> voutSuperblockPayments; // superblock payment
+    uint256 hashSuperblockPayments; // policy and outputs used during assembly
 };
 
 // Container for tracking updates to ancestor feerate as we include (parent)
@@ -169,8 +170,11 @@ public:
     explicit BlockAssembler(Chainstate& chainstate, const CTxMemPool* mempool);
     explicit BlockAssembler(Chainstate& chainstate, const CTxMemPool* mempool, const Options& options);
 
-    /** Construct a new block template with coinbase to scriptPubKeyIn */
-    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript& scriptPubKeyIn);
+    /** Construct a new block template with coinbase to scriptPubKeyIn. */
+    std::unique_ptr<CBlockTemplate> CreateNewBlock(
+        const CScript& scriptPubKeyIn,
+        // SYSCOIN: selected Bitcoin parent prevhash for scheduled AuxPoW work.
+        const std::optional<uint256>& auxpow_btc_prev = std::nullopt);
 
     inline static std::optional<int64_t> m_last_block_num_txs{};
     inline static std::optional<int64_t> m_last_block_weight{};
@@ -209,6 +213,12 @@ private:
 void IncrementExtraNonce(CBlock* pblock, const CBlockIndex* pindexPrev, unsigned int& nExtraNonce);
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev);
 bool ProcessBlockFound(const CBlock* pblock, const CChainParams& chainParams);
+
+// SYSCOIN BEGIN: A quarantined public node may validate blocks but must never
+// originate a candidate block through any template or generate RPC path.
+[[nodiscard]] bool ShouldCreateBlockTemplate(
+    bool pq_participation_allowed) noexcept;
+// SYSCOIN END: Public PQ activation block-production gate.
 
 // SYSCOIN
 /** Update an old GenerateCoinbaseCommitment from CreateNewBlock after the block txs have changed */

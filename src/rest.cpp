@@ -241,7 +241,8 @@ static bool rest_headers(const std::any& context,
     case RESTResponseFormat::BINARY: {
         CDataStream ssHeader(SER_NETWORK, PROTOCOL_VERSION);
         for (const CBlockIndex *pindex : headers) {
-            ssHeader << pindex->GetBlockHeader(chainman);
+            // SYSCOIN: Reconstruct AuxPoW headers through block storage only.
+            ssHeader << pindex->GetBlockHeader(chainman.m_blockman);
         }
 
         std::string binaryHeader = ssHeader.str();
@@ -253,7 +254,8 @@ static bool rest_headers(const std::any& context,
     case RESTResponseFormat::HEX: {
         CDataStream ssHeader(SER_NETWORK, PROTOCOL_VERSION);
         for (const CBlockIndex *pindex : headers) {
-            ssHeader << pindex->GetBlockHeader(chainman);
+            // SYSCOIN: Reconstruct AuxPoW headers through block storage only.
+            ssHeader << pindex->GetBlockHeader(chainman.m_blockman);
         }
 
         std::string strHex = HexStr(ssHeader) + "\n";
@@ -716,9 +718,10 @@ static bool rest_tx(const std::any& context, HTTPRequest* req, const std::string
     }
     // SYSCOIN
     else{
+        // SYSCOIN: Protect the cache lookup and corresponding active-chain height.
+        LOCK(cs_main);
         uint32_t nBlockHeight;
         if(pblockindexdb->ReadBlockHeight(hash, nBlockHeight)) {
-            LOCK(cs_main);
             blockindex = node->chainman->ActiveChain()[nBlockHeight];
         }
     }

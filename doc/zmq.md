@@ -31,6 +31,9 @@ Because ZeroMQ is message oriented, subscribers receive transactions
 and blocks all-at-once and do not need to implement any sort of
 buffering or reassembly.
 
+The separate NEVM engine request/reply protocol is documented in
+[NEVM connect results](nevm-zmq.md).
+
 ## Prerequisites
 
 The ZeroMQ feature in Syscoin Core requires the ZeroMQ API >= 4.0.0

@@ -30,7 +30,6 @@ deadlock:src/qt/test/*
 # https://github.com/bitcoin/bitcoin/pull/27658#issuecomment-1547639621
 deadlock:libdb
 race:libzmq
-race:CBLSWorker::GenerateContributions
 race:ctpl::thread_pool::push
 race:masternodeSync
 race:CDeterministicMNManager:GetListForBlock

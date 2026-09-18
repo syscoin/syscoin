@@ -12,6 +12,17 @@
 #include <streams.h>
 #include <common/args.h>
 #include <logging.h>
+
+#include <cstdint>
+#include <limits>
+
+// SYSCOIN: Bound inherited flat-file caches before allocation while still
+// permitting independently configured cache sizes.
+[[nodiscard]] inline constexpr bool FlatDatabaseFileSizeAllowed(
+    uintmax_t file_size, uint64_t max_file_size) noexcept
+{
+    return file_size >= sizeof(uint256) && file_size <= max_file_size;
+}
 /**
 *   Generic Dumping and Loading
 *   ---------------------------
@@ -29,12 +40,14 @@ private:
         IncorrectHash,
         IncorrectMagicMessage,
         IncorrectMagicNumber,
-        IncorrectFormat
+        IncorrectFormat,
+        FileTooLarge,
     };
 
     fs::path pathDB;
     std::string strFilename;
     std::string strMagicMessage;
+    uint64_t maxFileSize;
 
     bool CoreWrite(const T& objToSave)
     {
@@ -42,13 +55,15 @@ private:
 
         int64_t nStart = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
 
-        // serialize, checksum data up to that point, then append checksum
-        CDataStream ssObj(SER_DISK, CLIENT_VERSION);
-        ssObj << strMagicMessage; // specific magic message for this type of object
-        ssObj << Params().MessageStart(); // network specific magic number
-        ssObj << objToSave;
-        uint256 hash = Hash(ssObj);
-        ssObj << hash;
+        CSizeComputer sizeComputer{CLIENT_VERSION, SER_DISK};
+        sizeComputer << strMagicMessage << Params().MessageStart()
+                     << objToSave;
+        const uint64_t dataSize{sizeComputer.size()};
+        if (dataSize > maxFileSize ||
+            sizeof(uint256) > maxFileSize - dataSize) {
+            return error("%s: Refusing to write oversized file %s",
+                         __func__, pathDB.u8string());
+        }
 
         // open output file, and associate with CAutoFile
         FILE *file = fopen(pathDB.u8string().c_str(), "wb");
@@ -56,9 +71,14 @@ private:
         if (fileout.IsNull())
             return error("%s: Failed to open file %s", __func__, pathDB.u8string());
 
-        // Write and commit header, data
+        // SYSCOIN: Stream directly to disk so a large but valid cache is never
+        // copied into a second whole-file allocation just to calculate its hash.
         try {
-            fileout << ssObj;
+            HashedSourceWriter<CAutoFile> writer{
+                fileout, SER_DISK, CLIENT_VERSION};
+            writer << strMagicMessage << Params().MessageStart()
+                   << objToSave;
+            fileout << writer.GetHash();
         }
         catch (std::exception &e) {
             return error("%s: Serialize or I/O error - %s", __func__, e.what());
@@ -85,43 +105,35 @@ private:
             return FileError;
         }
 
-        // use file size to size memory buffer
-        int fileSize = fs::file_size(pathDB);
-        int dataSize = fileSize - sizeof(uint256);
-        // Don't try to resize to a negative number if file is small
-        if (dataSize < 0)
-            dataSize = 0;
-        std::vector<unsigned char> vchData;
-        vchData.resize(dataSize);
-        uint256 hashIn;
-
-        // read data and checksum from file
+        uintmax_t fileSize{0};
         try {
-            filein.read(MakeWritableByteSpan(vchData));
-            filein >> hashIn;
+            fileSize = fs::file_size(pathDB);
+        } catch (const std::exception& e) {
+            error("%s: Failed to stat file %s: %s", __func__,
+                  pathDB.u8string(), e.what());
+            return FileError;
         }
-        catch (std::exception &e) {
-            error("%s: Deserialize or I/O error - %s", __func__, e.what());
+        if (fileSize < sizeof(uint256)) {
+            error("%s: File %s is too small", __func__, pathDB.u8string());
             return HashReadError;
         }
-        filein.fclose();
-
-        CDataStream ssObj(vchData, SER_DISK, CLIENT_VERSION);
-
-        // verify stored checksum matches input data
-        uint256 hashTmp = Hash(ssObj);
-        if (hashIn != hashTmp)
-        {
-            error("%s: Checksum mismatch, data corrupted", __func__);
-            return IncorrectHash;
+        // SYSCOIN: Reject oversized cache files before allocating their payload.
+        if (!FlatDatabaseFileSizeAllowed(fileSize, maxFileSize)) {
+            error("%s: File %s exceeds its configured size limit",
+                  __func__, pathDB.u8string());
+            return FileTooLarge;
         }
-
 
         MessageStartChars pchMsgTmp;
         std::string strMagicMessageTmp;
+        uint256 hashIn;
+        // SYSCOIN: Hash the bounded payload while deserializing and require
+        // checksum EOF so appended data cannot be accepted.
         try {
+            HashVerifier<CAutoFile> verifier{
+                filein, SER_DISK, CLIENT_VERSION};
             // de-serialize file header (file specific magic message) and ..
-            ssObj >> strMagicMessageTmp;
+            verifier >> strMagicMessageTmp;
 
             // ... verify the message matches predefined one
             if (strMagicMessage != strMagicMessageTmp)
@@ -132,7 +144,7 @@ private:
 
 
             // de-serialize file header (network specific magic number) and ..
-            ssObj >> pchMsgTmp;
+            verifier >> pchMsgTmp;
 
             // ... verify the network matches ours
             if (pchMsgTmp != Params().MessageStart())
@@ -142,13 +154,25 @@ private:
             }
 
             // de-serialize data into T object
-            ssObj >> objToLoad;
+            verifier >> objToLoad;
+            filein >> hashIn;
+            if (std::fgetc(file) != EOF) {
+                objToLoad.Clear();
+                error("%s: Trailing data after checksum", __func__);
+                return IncorrectFormat;
+            }
+            if (hashIn != verifier.GetHash()) {
+                objToLoad.Clear();
+                error("%s: Checksum mismatch, data corrupted", __func__);
+                return IncorrectHash;
+            }
         }
         catch (std::exception &e) {
             objToLoad.Clear();
             error("%s: Deserialize or I/O error - %s", __func__, e.what());
             return IncorrectFormat;
         }
+        filein.fclose();
 
         LogPrintf("Loaded info from %s  %dms\n", strFilename, TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()) - nStart);
         LogPrintf("     %s\n", objToLoad.ToString());
@@ -178,11 +202,14 @@ private:
     }
 
 public:
-    CFlatDB(std::string strFilenameIn, std::string strMagicMessageIn)
+    CFlatDB(std::string strFilenameIn, std::string strMagicMessageIn,
+            uint64_t maxFileSizeIn =
+                std::numeric_limits<uint64_t>::max())
     {
         pathDB = gArgs.GetDataDirNet() / fs::u8path(strFilenameIn);
         strFilename = strFilenameIn;
         strMagicMessage = strMagicMessageIn;
+        maxFileSize = maxFileSizeIn;
     }
 
     bool Load(T& objToLoad)
@@ -200,7 +227,7 @@ public:
         int64_t nStart = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
 
         LogPrintf("Writing info to %s...\n", strFilename);
-        CoreWrite(objToSave);
+        if (!CoreWrite(objToSave)) return false;
         LogPrintf("%s dump finished  %dms\n", strFilename, TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()) - nStart);
 
         return true;

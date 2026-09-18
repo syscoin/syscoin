@@ -83,6 +83,8 @@
                   Replace="@ENABLE_ZMQ_TRUE@" By=""></ReplaceInFile>
     <ReplaceInFile FilePath="$(ConfigIniOut)"
                   Replace="@ENABLE_EXTERNAL_SIGNER_TRUE@" By=""></ReplaceInFile>
+    <ReplaceInFile FilePath="$(ConfigIniOut)"
+                  Replace="@ENABLE_BTC_HEADER_COMMAND_TRUE@" By=""></ReplaceInFile>
   </Target>
   <Import Project="..\common.vcxproj" />
 </Project>

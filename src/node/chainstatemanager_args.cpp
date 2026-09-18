@@ -16,6 +16,7 @@
 #include <util/translation.h>
 #include <validation.h>
 
+#include <algorithm> // SYSCOIN: Preserve the initial Geth timeout's zero clamp.
 #include <chrono>
 #include <string>
 
@@ -40,6 +41,10 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     // SYSCOIN
     auto value{args.GetArgs("-gethcommandline")};
     if (!value.empty()) opts.geth_commandline = value;
+
+    if (auto timeout{args.GetIntArg("-gethstartuptimeout")}) {
+        opts.geth_startup_timeout = std::chrono::seconds{std::max<int64_t>(0, *timeout)};
+    }
 
     if (auto value{args.GetBoolArg("-reindex")}) opts.reindex = *value;
     else if (auto value{args.GetBoolArg("-reindex-chainstate")}) opts.reindex = *value;

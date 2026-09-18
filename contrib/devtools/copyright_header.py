@@ -40,7 +40,6 @@ EXCLUDE_DIRS = [
     # git subtrees
     "src/crc32c/",
     "src/crypto/ctaes/",
-    "src/dashbls/",
     "src/immer/",
     "src/leveldb/",
     "src/minisketch",

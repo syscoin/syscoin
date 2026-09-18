@@ -23,7 +23,10 @@ namespace Consensus {
  * @param[out] txfee Set to the transaction fee if successful.
  * Preconditions: tx.IsCoinBase() is false.
  */
+// SYSCOIN BEGIN: Extend Bitcoin's input-validation API with asset totals.
+// [[nodiscard]] bool CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee);
 [[nodiscard]] bool CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee, CAssetsMap &mapAssetIn, CAssetsMap &mapAssetOut);
+// SYSCOIN END: Extend the input-validation API with asset totals.
 } // namespace Consensus
 
 /** Auxiliary functions for transaction validation (ideally should not be exposed) */

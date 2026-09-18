@@ -77,6 +77,10 @@ class LEVELDB_EXPORT DB {
   // Note: consider setting options.sync = true.
   virtual Status Write(const WriteOptions& options, WriteBatch* updates) = 0;
 
+  // SYSCOIN: Make all prior successful writes durable, including writes in
+  // rotated logs. Implementations without this barrier return NotSupported.
+  virtual Status Sync();
+
   // If the database contains an entry for "key" store the
   // corresponding value in *value and return OK.
   //

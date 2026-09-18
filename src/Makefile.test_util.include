@@ -8,6 +8,7 @@ EXTRA_LIBRARIES += \
   $(LIBTEST_UTIL)
 
 TEST_UTIL_H = \
+  test/util/auxpow_miner.h \
   test/util/blockfilter.h \
   test/util/chainstate.h \
   test/util/coins.h \
@@ -16,7 +17,9 @@ TEST_UTIL_H = \
   test/util/logging.h \
   test/util/mining.h \
   test/util/net.h \
+  test/util/nevm_mint.h \
   test/util/poolresourcetester.h \
+  test/util/pq_registry_read_error.h \
   test/util/random.h \
   test/util/script.h \
   test/util/setup_common.h \

@@ -10,22 +10,45 @@
 #include <netmessagemaker.h>
 #include <node/interface_ui.h>
 #include <evo/deterministicmns.h>
-#include <llmq/quorums_btccheckpoints.h>
 #include <llmq/quorums_chainlocks.h>
 #include <shutdown.h>
 #include <util/translation.h>
 #include <timedata.h>
 #include <net.h>
+#include <net_processing.h>
 #include <node/mempool_persist_args.h>
 #include <common/args.h>
+#include <algorithm>
+#include <limits>
+#include <tuple>
 using node::ShouldSyncMempool;
 class CMasternodeSync;
 CMasternodeSync masternodeSync;
+
+static constexpr int64_t GOVERNANCE_PAGE_RESOURCE_RETRY_SECONDS{
+    static_cast<int64_t>(
+        (GovernancePageBuildRateLimiter::TOKEN_CAPACITY +
+         GovernancePageBuildRateLimiter::REFILL_BYTES_PER_SECOND - 1) /
+        GovernancePageBuildRateLimiter::REFILL_BYTES_PER_SECOND) + 1};
 
 CMasternodeSync::CMasternodeSync() :
     nTimeAssetSyncStarted(GetTime()),
     nTimeLastBumped(GetTime())
 {
+    const int64_t now{GetTime()};
+    m_last_process_tick.store(now);
+    m_last_maintenance_tick.store(now);
+}
+
+void CMasternodeSync::SetSyncMode(int mode)
+{
+    LOCK(m_governance_page_mutex);
+    if (nCurrentAsset.load() == mode) return;
+
+    nCurrentAsset = mode;
+    m_governance_page_generation.fetch_add(1);
+    m_governance_page_sync = GovernancePageSyncState{};
+    m_governance_page_sync.reset_tracker_session = true;
 }
 
 void CMasternodeSync::Reset(bool fForce, bool fNotifyReset)
@@ -36,12 +59,20 @@ void CMasternodeSync::Reset(bool fForce, bool fNotifyReset)
             return;
         }
     }
-    nCurrentAsset = MASTERNODE_SYNC_BLOCKCHAIN;
-    nTriedPeerCount = 0;
     nTimeAssetSyncStarted = GetTime();
     nTimeLastBumped = GetTime();
     nTimeLastUpdateBlockTip = 0;
     fReachedBestHeader = false;
+    m_next_governance_page_attempt = 0;
+    {
+        LOCK(m_governance_page_mutex);
+        nCurrentAsset = MASTERNODE_SYNC_BLOCKCHAIN;
+        m_governance_page_generation.fetch_add(1);
+        m_governance_page_sync = GovernancePageSyncState{};
+        // EndPageSession preserves ordinary in-flight relay work, so every
+        // reset can safely drain the page tracker even while locally parked.
+        m_governance_page_sync.reset_tracker_session = true;
+    }
     if (fNotifyReset) {
         uiInterface.NotifyAdditionalDataSyncProgressChanged(-1);
     }
@@ -72,6 +103,7 @@ void CMasternodeSync::SwitchToNextAsset(CConnman& connman)
         case(MASTERNODE_SYNC_BLOCKCHAIN):
             LogPrintf("CMasternodeSync::SwitchToNextAsset -- Completed %s in %llds\n", GetAssetName(), GetTime() - GetAssetStartTime());
             SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+            m_next_governance_page_attempt = 0;
             LogPrintf("CMasternodeSync::SwitchToNextAsset -- Starting %s\n", GetAssetName());
             break;
         case(MASTERNODE_SYNC_GOVERNANCE):
@@ -82,11 +114,13 @@ void CMasternodeSync::SwitchToNextAsset(CConnman& connman)
             connman.ForEachNode(AllNodes, [](CNode* pnode) {
                 netfulfilledman->AddFulfilledRequest(pnode->addr, "full-sync");
             });
+            if (m_next_governance_page_resync.load() <= GetTime()) {
+                m_next_governance_page_resync = GetTime() + 30;
+            }
             LogPrintf("CMasternodeSync::SwitchToNextAsset -- Sync has finished\n");
 
             break;
     }
-    nTriedPeerCount = 0;
     nTimeAssetSyncStarted = GetTime();
     BumpAssetLastTime("CMasternodeSync::SwitchToNextAsset");
 }
@@ -101,56 +135,871 @@ bilingual_str CMasternodeSync::GetSyncStatus()
     }
 }
 
-void CMasternodeSync::ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStream& vRecv) const
+int CMasternodeSync::GetAttempt() const
 {
-    if (strCommand == NetMsgType::SYNCSTATUSCOUNT) { //Sync status count
-
-        //do not care about stats if sync process finished or failed
-        if(IsSynced()) return;
-
-        int nItemID;
-        int nCount;
-        vRecv >> nItemID >> nCount;
-
-        LogPrint(BCLog::MNSYNC, "SYNCSTATUSCOUNT -- got inventory count: nItemID=%d  nCount=%d  peer=%d\n", nItemID, nCount, pfrom->GetId());
-    }
+    LOCK(m_governance_page_mutex);
+    return m_governance_page_sync.phase == GovernancePagePhase::IDLE
+        ? 0 : static_cast<int>(m_governance_page_sync.source_index + 1);
 }
 
-void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
+bool CMasternodeSync::IsGovernancePagePumpEligible(
+    GovernancePagePumpContext context, uint64_t generation) const
+{
+    if (generation != m_governance_page_generation.load()) return false;
+    if (context == GovernancePagePumpContext::INITIAL_SYNC) {
+        return GetAssetID() == MASTERNODE_SYNC_GOVERNANCE;
+    }
+    return IsSynced() &&
+           GetTime() >= m_next_governance_page_resync.load();
+}
+
+bool CMasternodeSync::DrainGovernancePageReset(PeerManager& peerman)
+{
+    bool drain{false};
+    {
+        LOCK(m_governance_page_mutex);
+        if (m_governance_page_sync.reset_tracker_session) {
+            m_governance_page_sync = GovernancePageSyncState{};
+            drain = true;
+        }
+    }
+    if (drain) peerman.EndGovernancePageSession();
+    return drain;
+}
+
+void CMasternodeSync::CancelGovernancePageSession(PeerManager& peerman)
+{
+    {
+        LOCK(m_governance_page_mutex);
+        m_governance_page_sync = GovernancePageSyncState{};
+    }
+    // This is unconditional because the reset generation, rather than a
+    // potentially stale local lease bit, is the cancellation authority.
+    peerman.EndGovernancePageSession();
+}
+
+void CMasternodeSync::ProcessGovernancePage(
+    CNode* pfrom, const CGovernancePageResponse& response,
+    PeerManager& peerman)
+{
+    if (pfrom == nullptr || !CanUseGovernancePageProtocol(*pfrom)) {
+        return;
+    }
+    if (!peerman.IsGovernancePageRequested(pfrom->GetId(), response)) {
+        (void)peerman.RejectGovernancePage(pfrom->GetId(), response);
+        return;
+    }
+
+    std::vector<CInv> missing;
+    bool valid{true};
+    bool locally_cancelled{false};
+    {
+        LOCK(m_governance_page_mutex);
+        auto& state{m_governance_page_sync};
+        auto& scope{state.scope};
+        if (state.reset_tracker_session ||
+            state.phase == GovernancePagePhase::IDLE) {
+            valid = false;
+            locally_cancelled = true;
+        } else if (
+            state.source_index >= state.sources.size() ||
+            state.sources[state.source_index] != pfrom->GetId() ||
+            state.pending_response ||
+            response.scope_hash != scope.scope_hash) {
+            valid = false;
+        } else if (response.status == GOVERNANCE_PAGE_OK) {
+            const uint64_t prospective_count{
+                static_cast<uint64_t>(scope.seen_count) +
+                response.inventory.size()};
+            if ((scope.established &&
+                 (response.view_id != scope.view_id ||
+                  response.total_count != scope.total_count)) ||
+                (!scope.established && !scope.cursor.IsNull()) ||
+                prospective_count > response.total_count ||
+                response.done !=
+                    (prospective_count == response.total_count) ||
+                (!scope.transcript.empty() &&
+                 !response.inventory.empty() &&
+                 !(scope.transcript.back().hash <
+                   response.inventory.front().hash))) {
+                valid = false;
+            }
+            if (valid && response.done) {
+                std::vector<CInv> transcript{scope.transcript};
+                transcript.insert(transcript.end(),
+                                  response.inventory.begin(),
+                                  response.inventory.end());
+                const auto view{ComputeGovernancePageViewHash(
+                    scope.scope_hash, transcript)};
+                valid = view && *view == response.view_id;
+            }
+            if (valid) {
+                for (const CInv& inv : response.inventory) {
+                    const bool have{
+                        inv.type == MSG_GOVERNANCE_OBJECT
+                            ? governance->HaveObjectForPage(inv.hash)
+                            : governance->HaveVoteForPage(
+                                  scope.scope_hash, inv.hash)};
+                    if (!have) missing.push_back(inv);
+                }
+            }
+        }
+        if (valid) state.pending_response = response;
+    }
+
+    if (!valid) {
+        if (locally_cancelled) return;
+        (void)peerman.RejectGovernancePage(pfrom->GetId(), response);
+        return;
+    }
+    if (!peerman.ReceiveGovernancePage(
+            pfrom->GetId(), response, missing)) {
+        LOCK(m_governance_page_mutex);
+        m_governance_page_sync.pending_response.reset();
+        return;
+    }
+    // The scheduler is the sole owner of page-state advancement and asset
+    // transitions. A message-handler pump could race a terminal transition,
+    // start a replacement tracker lease, and then strand it after FINISHED.
+}
+
+void CMasternodeSync::ResetGovernanceScope(const uint256& scope_hash)
+{
+    AssertLockHeld(m_governance_page_mutex);
+    auto& state{m_governance_page_sync};
+    state.scope.Reset(scope_hash);
+    state.scope.restarts = 0;
+    state.scope.resource_retries = 0;
+    state.pending_response.reset();
+}
+
+bool CMasternodeSync::RestartGovernanceScopeView()
+{
+    AssertLockHeld(m_governance_page_mutex);
+    auto& state{m_governance_page_sync};
+    auto& scope{state.scope};
+    ++scope.restarts;
+    const uint256 scope_hash{scope.scope_hash};
+    scope.Reset(scope_hash);
+    state.pending_response.reset();
+    return scope.restarts <= MAX_GOVERNANCE_VIEW_RESTARTS;
+}
+
+bool CMasternodeSync::ParkGovernancePageSessionUntil(
+    std::chrono::microseconds retry_not_before)
+{
+    AssertLockHeld(m_governance_page_mutex);
+    auto& state{m_governance_page_sync};
+    state.scope.retry_not_before = retry_not_before;
+    const bool release_tracker_session{state.tracker_session_active};
+    state.tracker_session_active = false;
+    state.tracker_source = -1;
+    return release_tracker_session;
+}
+
+CMasternodeSync::GovernanceScopeRetryAction
+CMasternodeSync::ScheduleGovernanceScopeRetry(
+    std::chrono::microseconds now)
+{
+    AssertLockHeld(m_governance_page_mutex);
+    auto& state{m_governance_page_sync};
+    auto& scope{state.scope};
+    const std::size_t resource_retries{
+        scope.resource_retries == std::numeric_limits<std::size_t>::max()
+            ? scope.resource_retries
+            : scope.resource_retries + 1};
+    const uint256 scope_hash{scope.scope_hash};
+    // Resource backpressure rewinds the view without consuming or resetting
+    // the independent budget for repeated view changes by this source.
+    scope.Reset(scope_hash);
+    state.pending_response.reset();
+    scope.resource_retries = resource_retries;
+    if (resource_retries <= MAX_GOVERNANCE_RESOURCE_RETRIES) {
+        return GovernanceScopeRetryAction::RETRY;
+    }
+    if (resource_retries > MAX_GOVERNANCE_RESOURCE_RETRIES + 1) {
+        return GovernanceScopeRetryAction::ADVANCE;
+    }
+
+    // One full refill retry lets an honestly depleted server recover without
+    // letting canonical TEMP replies hold initial sync active indefinitely.
+    (void)ParkGovernancePageSessionUntil(
+        now + std::chrono::seconds{GOVERNANCE_PAGE_RESOURCE_RETRY_SECONDS});
+    return GovernanceScopeRetryAction::PARK;
+}
+
+bool CMasternodeSync::ScheduleGovernancePageSessionAdmissionRetry(
+    std::chrono::microseconds now)
+{
+    AssertLockHeld(m_governance_page_mutex);
+    auto& state{m_governance_page_sync};
+    if (state.tracker_session_admission_retries >=
+        MAX_GOVERNANCE_PAGE_SESSION_ADMISSION_RETRIES) {
+        state.tracker_session_admission_retries = 0;
+        return false;
+    }
+    ++state.tracker_session_admission_retries;
+    state.scope.retry_not_before = now + std::chrono::seconds{1};
+    return true;
+}
+
+void CMasternodeSync::AdvanceGovernanceScope(
+    GovernancePageSourceOutcome outcome, bool& restart_state,
+    bool& complete, bool& temporarily_unavailable,
+    bool& unserviceable)
+{
+    AssertLockHeld(m_governance_page_mutex);
+    auto& state{m_governance_page_sync};
+    state.tracker_session_admission_retries = 0;
+    const bool successful{
+        outcome == GovernancePageSourceOutcome::SUCCESS};
+    if (successful) ++state.successful_sources_for_scope;
+    if (!successful) {
+        ++state.failed_sources_for_scope;
+        if (outcome ==
+            GovernancePageSourceOutcome::SCOPE_TOO_LARGE) {
+            ++state.scope_too_large_sources_for_scope;
+        }
+    }
+    if (state.phase == GovernancePagePhase::OBJECTS) {
+        if (successful) {
+            for (const CInv& inv : state.scope.transcript) {
+                state.object_union.insert(inv.hash);
+            }
+            state.successful_object_sources.push_back(
+                state.sources[state.source_index]);
+        }
+        ++state.source_index;
+        if (state.source_index >= state.sources.size()) {
+            if (state.successful_sources_for_scope == 0) {
+                unserviceable =
+                    state.scope_too_large_sources_for_scope ==
+                        state.sources.size() &&
+                    state.failed_sources_for_scope ==
+                        state.sources.size();
+                temporarily_unavailable = !unserviceable;
+                restart_state = true;
+                return;
+            }
+            const auto local_objects{
+                governance->GetGovernancePageObjectHashes()};
+            if (local_objects.status != GOVERNANCE_PAGE_OK) {
+                unserviceable =
+                    local_objects.status ==
+                    GOVERNANCE_PAGE_SCOPE_TOO_LARGE;
+                temporarily_unavailable = !unserviceable;
+                restart_state = true;
+                return;
+            }
+            state.object_union.insert(
+                local_objects.hashes.begin(), local_objects.hashes.end());
+            // A server only permits vote scopes after that connection has
+            // completed its object phase. Keeping failed object sources here
+            // would turn every vote scope into a full transfer timeout.
+            state.sources = std::move(state.successful_object_sources);
+            state.successful_object_sources.clear();
+            state.vote_scopes.assign(
+                state.object_union.begin(), state.object_union.end());
+            state.phase = GovernancePagePhase::VOTES;
+            state.source_index = 0;
+            state.vote_scope_index = 0;
+            state.successful_sources_for_scope = 0;
+            state.failed_sources_for_scope = 0;
+            state.scope_too_large_sources_for_scope = 0;
+            if (state.vote_scopes.empty()) {
+                if (!state.reconciliation_pass) {
+                    state.reconciliation_pass = true;
+                    state.reconciliation_context_epoch =
+                        governance->GetPQGovernanceValidationContextEpoch();
+                    state.phase = GovernancePagePhase::OBJECTS;
+                    state.sources = state.cohort_sources;
+                    state.source_index = 0;
+                    ResetGovernanceScope(uint256{});
+                } else {
+                    const auto current_epoch{
+                        governance->
+                            GetPQGovernanceValidationContextEpoch()};
+                    if (!state.reconciliation_context_epoch ||
+                        current_epoch !=
+                            state.reconciliation_context_epoch) {
+                        restart_state = true;
+                    } else {
+                        complete = true;
+                    }
+                }
+                return;
+            }
+            ResetGovernanceScope(state.vote_scopes.front());
+            return;
+        }
+        ResetGovernanceScope(uint256{});
+        return;
+    }
+
+    ++state.source_index;
+    if (state.source_index >= state.sources.size()) {
+        if (state.successful_sources_for_scope == 0) {
+            unserviceable =
+                state.scope_too_large_sources_for_scope ==
+                    state.sources.size() &&
+                state.failed_sources_for_scope ==
+                    state.sources.size();
+            temporarily_unavailable = !unserviceable;
+            restart_state = true;
+            return;
+        }
+        state.source_index = 0;
+        state.successful_sources_for_scope = 0;
+        state.failed_sources_for_scope = 0;
+        state.scope_too_large_sources_for_scope = 0;
+        ++state.vote_scope_index;
+        if (state.vote_scope_index >= state.vote_scopes.size()) {
+            if (!state.reconciliation_pass) {
+                state.reconciliation_pass = true;
+                state.reconciliation_context_epoch =
+                    governance->GetPQGovernanceValidationContextEpoch();
+                state.phase = GovernancePagePhase::OBJECTS;
+                state.sources = state.cohort_sources;
+                state.source_index = 0;
+                state.successful_sources_for_scope = 0;
+                state.failed_sources_for_scope = 0;
+                state.scope_too_large_sources_for_scope = 0;
+                ResetGovernanceScope(uint256{});
+            } else {
+                const auto current_epoch{
+                    governance->GetPQGovernanceValidationContextEpoch()};
+                if (!state.reconciliation_context_epoch ||
+                    current_epoch !=
+                        state.reconciliation_context_epoch) {
+                    restart_state = true;
+                } else {
+                    complete = true;
+                }
+            }
+            return;
+        }
+    }
+    ResetGovernanceScope(state.vote_scopes[state.vote_scope_index]);
+}
+
+std::vector<CMasternodeSync::GovernancePageCandidate>
+CMasternodeSync::CaptureGovernancePageCandidates(
+    const std::vector<CNode*>& candidates)
+{
+    std::vector<GovernancePageCandidate> captured;
+    captured.reserve(candidates.size());
+    for (CNode* node : candidates) {
+        // MNAUTH can finish during selection. Freeze one identity for both
+        // ranking and deduplication; live session admission still rechecks it.
+        const uint256 pro_tx{node->GetVerifiedProRegTxHash()};
+        const bool authenticated{!pro_tx.IsNull()};
+        const bool outbound{node->IsOutboundOrBlockRelayConn()};
+        const int rank{outbound ? (authenticated ? 3 : 2)
+                                : (authenticated ? 1 : 0)};
+        captured.push_back(
+            {node, pro_tx, node->nKeyedNetGroup, node->GetId(), rank});
+    }
+    return captured;
+}
+
+std::vector<CNode*> CMasternodeSync::DeduplicateGovernancePageCandidates(
+    std::vector<GovernancePageCandidate> candidates)
+{
+    std::sort(candidates.begin(), candidates.end(),
+              [](const GovernancePageCandidate& lhs,
+                 const GovernancePageCandidate& rhs) {
+                  return std::tuple{lhs.rank, lhs.netgroup, lhs.node_id} >
+                         std::tuple{rhs.rank, rhs.netgroup, rhs.node_id};
+              });
+    std::set<std::tuple<uint8_t, uint256, uint64_t, NodeId>> identities;
+    std::vector<CNode*> unique_candidates;
+    unique_candidates.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        const auto identity{!candidate.pro_tx.IsNull()
+            ? std::tuple<uint8_t, uint256, uint64_t, NodeId>{
+                  0, candidate.pro_tx, 0, -1}
+            : candidate.netgroup != 0
+                ? std::tuple<uint8_t, uint256, uint64_t, NodeId>{
+                      1, {}, candidate.netgroup, -1}
+                : std::tuple<uint8_t, uint256, uint64_t, NodeId>{
+                      2, {}, 0, candidate.node_id}};
+        if (identities.insert(identity).second) {
+            unique_candidates.push_back(candidate.node);
+        }
+    }
+    return unique_candidates;
+}
+
+CNode* CMasternodeSync::FindGovernancePageSource(
+    const std::vector<CNode*>& eligible_nodes, int64_t id)
+{
+    const auto it{std::find_if(
+        eligible_nodes.begin(), eligible_nodes.end(),
+        [&](const CNode* node) { return node->GetId() == id; })};
+    return it == eligible_nodes.end() ? nullptr : *it;
+}
+
+CMasternodeSync::GovernancePagePumpResult
+CMasternodeSync::NoUsableGovernancePageCandidateResult(
+    bool has_capable_peer)
+{
+    return has_capable_peer
+        ? GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE
+        : GovernancePagePumpResult::NO_CAPABLE_PEERS;
+}
+
+CMasternodeSync::GovernancePagePumpResult
+CMasternodeSync::PumpGovernancePages(
+    CConnman& connman, PeerManager& peerman,
+    GovernancePagePumpContext context, uint64_t generation)
+{
+    if (DrainGovernancePageReset(peerman)) {
+        return GovernancePagePumpResult::CANCELLED;
+    }
+    if (!IsGovernancePagePumpEligible(context, generation)) {
+        CancelGovernancePageSession(peerman);
+        return GovernancePagePumpResult::CANCELLED;
+    }
+
+    const CConnman::NodesSnapshot snap{
+        connman, /*filter=*/FullyConnectedOnly};
+    bool has_capable_peer{false};
+    std::vector<CNode*> eligible_nodes;
+    eligible_nodes.reserve(snap.Nodes().size());
+    for (CNode* node : snap.Nodes()) {
+        if (!CanUseGovernancePageProtocol(*node) ||
+            (fMasternodeMode && node->IsInboundConn())) {
+            continue;
+        }
+        // Distinguish missing peers from temporary source cooldowns so each
+        // condition retains its bounded retry interval.
+        has_capable_peer = true;
+        if (!peerman.CanUseGovernancePageSource(*node)) continue;
+        eligible_nodes.push_back(node);
+    }
+    auto candidates{DeduplicateGovernancePageCandidates(
+        CaptureGovernancePageCandidates(eligible_nodes))};
+    if (candidates.empty()) {
+        {
+            LOCK(m_governance_page_mutex);
+            m_governance_page_sync = GovernancePageSyncState{};
+        }
+        // This also drains a reset which raced candidate discovery. Ordinary
+        // in-flight relay work is deliberately preserved by EndPageSession.
+        peerman.EndGovernancePageSession();
+        if (!IsGovernancePagePumpEligible(context, generation)) {
+            return GovernancePagePumpResult::CANCELLED;
+        }
+        return NoUsableGovernancePageCandidateResult(has_capable_peer);
+    }
+
+    const auto find_node = [&](NodeId id) -> CNode* {
+        // Deduplication bounds cohort admission. Once admitted, retain the
+        // exact connection while it remains eligible; a later same-netgroup
+        // connection must not replace its representative mid-traversal.
+        return FindGovernancePageSource(eligible_nodes, id);
+    };
+
+    const auto result{peerman.TakeGovernancePageResult()};
+    bool progress{false};
+    bool complete{false};
+    bool restart_state{false};
+    bool temporarily_unavailable{false};
+    bool unserviceable{false};
+    bool finish_tracker_session{false};
+    bool cancelled{false};
+    std::optional<NodeId> failed_page_source;
+    {
+        LOCK(m_governance_page_mutex);
+        auto& state{m_governance_page_sync};
+        if (state.reset_tracker_session ||
+            !IsGovernancePagePumpEligible(context, generation)) {
+            state = GovernancePageSyncState{};
+            cancelled = true;
+        }
+
+        if (!cancelled && result &&
+            state.phase != GovernancePagePhase::IDLE) {
+            progress = true;
+            state.FinishMetadataRequest();
+            const auto pending{state.pending_response};
+            state.pending_response.reset();
+            if (!result->success || !pending || !result->response ||
+                *pending != *result->response) {
+                AdvanceGovernanceScope(
+                    GovernancePageSourceOutcome::FAILED,
+                    restart_state, complete, temporarily_unavailable,
+                    unserviceable);
+            } else if (pending->status == GOVERNANCE_PAGE_OK) {
+                auto& scope{state.scope};
+                if (!scope.established) {
+                    scope.established = true;
+                    scope.view_id = pending->view_id;
+                    scope.total_count = pending->total_count;
+                }
+                scope.transcript.insert(
+                    scope.transcript.end(), pending->inventory.begin(),
+                    pending->inventory.end());
+                scope.seen_count += pending->inventory.size();
+                scope.cursor = pending->next_cursor;
+                if (pending->done) {
+                    AdvanceGovernanceScope(
+                        GovernancePageSourceOutcome::SUCCESS,
+                        restart_state, complete,
+                        temporarily_unavailable, unserviceable);
+                }
+            } else if (
+                pending->status ==
+                    GOVERNANCE_PAGE_TEMPORARILY_UNAVAILABLE) {
+                const bool tracker_session_was_active{
+                    state.tracker_session_active};
+                const auto action{ScheduleGovernanceScopeRetry(
+                    GetTime<std::chrono::microseconds>())};
+                if (action == GovernanceScopeRetryAction::PARK) {
+                    finish_tracker_session |=
+                        tracker_session_was_active;
+                } else if (
+                    action == GovernanceScopeRetryAction::ADVANCE) {
+                    AdvanceGovernanceScope(
+                        GovernancePageSourceOutcome::
+                            TEMPORARILY_UNAVAILABLE,
+                        restart_state, complete,
+                        temporarily_unavailable, unserviceable);
+                }
+            } else if (
+                pending->status == GOVERNANCE_PAGE_SCOPE_TOO_LARGE) {
+                AdvanceGovernanceScope(
+                    GovernancePageSourceOutcome::SCOPE_TOO_LARGE,
+                    restart_state, complete, temporarily_unavailable,
+                    unserviceable);
+            } else {
+                if (!RestartGovernanceScopeView()) {
+                    failed_page_source = result->source.peer;
+                    AdvanceGovernanceScope(
+                        GovernancePageSourceOutcome::FAILED,
+                        restart_state, complete,
+                        temporarily_unavailable, unserviceable);
+                }
+            }
+        }
+
+        if (!cancelled && restart_state) {
+            finish_tracker_session |= state.tracker_session_active;
+            state = GovernancePageSyncState{};
+        }
+        if (!cancelled && complete) {
+            finish_tracker_session |= state.tracker_session_active;
+            state = GovernancePageSyncState{};
+        }
+    }
+    if (cancelled) {
+        peerman.EndGovernancePageSession();
+        return GovernancePagePumpResult::CANCELLED;
+    }
+    if (failed_page_source) {
+        (void)peerman.FailGovernancePageSource(*failed_page_source);
+    }
+    if (finish_tracker_session) peerman.EndGovernancePageSession();
+    if (restart_state) {
+        if (unserviceable) {
+            return GovernancePagePumpResult::UNSERVICEABLE;
+        }
+        return temporarily_unavailable
+            ? GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE
+            : GovernancePagePumpResult::ACTIVE;
+    }
+    if (complete) {
+        return GovernancePagePumpResult::COMPLETE;
+    }
+    if (temporarily_unavailable) {
+        return GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE;
+    }
+    if (progress) BumpAssetLastTime("CMasternodeSync::GovernancePage");
+
+    {
+        LOCK(m_governance_page_mutex);
+        auto& state{m_governance_page_sync};
+        if (state.reset_tracker_session ||
+            !IsGovernancePagePumpEligible(context, generation)) {
+            state = GovernancePageSyncState{};
+            cancelled = true;
+        }
+        if (!cancelled && state.phase == GovernancePagePhase::IDLE) {
+            CNode* first{nullptr};
+            const std::size_t source_count{std::min(
+                MAX_GOVERNANCE_PAGE_SOURCES, candidates.size())};
+            const std::size_t start{
+                m_governance_page_source_window % candidates.size()};
+            m_governance_page_source_window =
+                (start + source_count) % candidates.size();
+            for (std::size_t offset{0}; offset < candidates.size();
+                 ++offset) {
+                CNode* node{
+                    candidates[(start + offset) % candidates.size()]};
+                if (first == nullptr) {
+                    if (!peerman.BeginGovernancePageSession(*node)) {
+                        continue;
+                    }
+                    first = node;
+                    state.tracker_session_active = true;
+                    state.tracker_source = node->GetId();
+                }
+                state.sources.push_back(node->GetId());
+                state.cohort_sources.push_back(node->GetId());
+                if (state.sources.size() >= source_count) {
+                    break;
+                }
+            }
+            if (first == nullptr) {
+                return GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE;
+            }
+            state.phase = GovernancePagePhase::OBJECTS;
+            state.source_index = 0;
+            state.successful_sources_for_scope = 0;
+            ResetGovernanceScope(uint256{});
+        }
+
+        const auto now{GetTime<std::chrono::microseconds>()};
+        if (cancelled) {
+            // The tracker drain must happen after releasing the page mutex.
+        } else if (state.metadata_request_outstanding ||
+            state.pending_response ||
+            state.source_index >= state.sources.size()) {
+            return GovernancePagePumpResult::ACTIVE;
+        } else if (state.scope.retry_not_before > now) {
+            return GovernancePagePumpResult::ACTIVE;
+        } else {
+        CNode* source{find_node(state.sources[state.source_index])};
+        if (source == nullptr) {
+            AdvanceGovernanceScope(
+                GovernancePageSourceOutcome::TEMPORARILY_UNAVAILABLE,
+                restart_state, complete, temporarily_unavailable,
+                unserviceable);
+        } else {
+            if (!state.tracker_session_active) {
+                if (!peerman.BeginGovernancePageSession(*source)) {
+                    // Give an ordinary in-flight request one scheduler
+                    // heartbeat to finish. A cooldown or persistent admission
+                    // conflict must then rotate sources instead of pinning the
+                    // exact traversal to this peer indefinitely.
+                    if (!ScheduleGovernancePageSessionAdmissionRetry(now)) {
+                        AdvanceGovernanceScope(
+                            GovernancePageSourceOutcome::
+                                TEMPORARILY_UNAVAILABLE,
+                            restart_state, complete,
+                            temporarily_unavailable, unserviceable);
+                    }
+                    source = nullptr;
+                } else {
+                    state.tracker_session_active = true;
+                    state.tracker_source = source->GetId();
+                }
+            } else if (state.tracker_source != source->GetId()) {
+                if (!peerman.SetGovernancePageSessionSource(*source)) {
+                    AdvanceGovernanceScope(
+                        GovernancePageSourceOutcome::
+                            TEMPORARILY_UNAVAILABLE,
+                        restart_state, complete,
+                        temporarily_unavailable, unserviceable);
+                    source = nullptr;
+                } else {
+                    state.tracker_source = source->GetId();
+                }
+            }
+
+            if (source != nullptr) {
+                state.scope.retry_not_before =
+                    std::chrono::microseconds{0};
+                CGovernancePageRequest request;
+                request.scope_hash = state.scope.scope_hash;
+                request.cursor = state.scope.cursor;
+                request.view_id = state.scope.view_id;
+                if (m_next_governance_page_nonce == 0 ||
+                    m_next_governance_page_nonce ==
+                        std::numeric_limits<uint64_t>::max()) {
+                    state.reset_tracker_session = true;
+                    state.phase = GovernancePagePhase::IDLE;
+                    return GovernancePagePumpResult::ACTIVE;
+                }
+                request.nonce = m_next_governance_page_nonce++;
+                if (!state.TryBeginMetadataRequest()) {
+                    return GovernancePagePumpResult::ACTIVE;
+                }
+                if (peerman.RequestGovernancePage(
+                        *source, request,
+                        now + GOVERNANCE_PAGE_RESPONSE_TIMEOUT +
+                            GOVERNANCE_PAGE_TRANSFER_TIMEOUT)) {
+                    state.tracker_session_admission_retries = 0;
+                    BumpAssetLastTime(
+                        "CMasternodeSync::RequestGovernancePage");
+                } else {
+                    state.FinishMetadataRequest();
+                    // BeginPageSession can succeed while an ordinary request
+                    // from another source is still in flight. Bound that same
+                    // admission conflict across successful lease acquisition;
+                    // otherwise continuous relay could starve exact sync.
+                    const bool retry{
+                        ScheduleGovernancePageSessionAdmissionRetry(now)};
+                    finish_tracker_session |=
+                        ParkGovernancePageSessionUntil(
+                            now + std::chrono::seconds{1});
+                    if (!retry) {
+                        AdvanceGovernanceScope(
+                            GovernancePageSourceOutcome::
+                                TEMPORARILY_UNAVAILABLE,
+                            restart_state, complete,
+                            temporarily_unavailable, unserviceable);
+                    }
+                }
+            }
+        }
+        if (restart_state) {
+            finish_tracker_session |= state.tracker_session_active;
+            state = GovernancePageSyncState{};
+        }
+        if (complete) {
+            finish_tracker_session |= state.tracker_session_active;
+            state = GovernancePageSyncState{};
+        }
+        }
+    }
+    if (cancelled) {
+        peerman.EndGovernancePageSession();
+        return GovernancePagePumpResult::CANCELLED;
+    }
+    if (finish_tracker_session) peerman.EndGovernancePageSession();
+    if (restart_state) {
+        if (unserviceable) {
+            return GovernancePagePumpResult::UNSERVICEABLE;
+        }
+        return temporarily_unavailable
+            ? GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE
+            : GovernancePagePumpResult::ACTIVE;
+    }
+    if (complete) {
+        return GovernancePagePumpResult::COMPLETE;
+    }
+    if (temporarily_unavailable) {
+        return GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE;
+    }
+    return GovernancePagePumpResult::ACTIVE;
+}
+
+void CMasternodeSync::ProcessTick(CConnman& connman, PeerManager& peerman,
+                                 ChainstateManager& chainman)
 {
     static int nTick = 0;
     nTick++;
 
+    (void)DrainGovernancePageReset(peerman);
+
     const static int64_t nSyncStart = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
     const static std::string strAllow = strprintf("allow-sync-%lld", nSyncStart);
     const int nMode = GetAssetID();
-    // reset the sync process if the last call to this function was more than 60 minutes ago (client was in sleep mode)
-    static int64_t nTimeLastProcess = GetTime();
-    if(GetTime() - nTimeLastProcess > 60*60 && !fMasternodeMode) {
+    const int64_t now{GetTime()};
+    const int64_t previous_process{
+        m_last_process_tick.exchange(now)};
+    // Detect an actual scheduler sleep, not a long-running page traversal.
+    if(now >= previous_process &&
+       now - previous_process > 60*60 && !fMasternodeMode) {
         LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- WARNING: no actions for too long, restarting sync...\n");
         Reset(true);
-        nTimeLastProcess = GetTime();
         return;
     }
 
-    if(GetTime() - nTimeLastProcess < MASTERNODE_SYNC_TICK_SECONDS) {
+    if (fRegTest) {
+        // Regtest skips the normal blockchain quiet period, but governance
+        // collateral still requires the complete active chain. Read current
+        // readiness because Reset clears the cached best-header flag even
+        // when no new block notification will arrive. IBD's tip-age check
+        // must not suppress spork sync on an idle regtest chain.
+        const bool chain_ready{WITH_LOCK(cs_main,
+            return chainman.ActiveTip() != nullptr &&
+                   chainman.ActiveTip() == chainman.m_best_header)};
+        if (!chain_ready) {
+            CancelGovernancePageSession(peerman);
+            return;
+        }
+    }
+
+    if (GetAssetID() == MASTERNODE_SYNC_GOVERNANCE) {
+        if (now < m_next_governance_page_attempt.load()) return;
+        constexpr auto context{GovernancePagePumpContext::INITIAL_SYNC};
+        const uint64_t generation{m_governance_page_generation.load()};
+        const auto page_result{
+            PumpGovernancePages(connman, peerman, context, generation)};
+        if (page_result == GovernancePagePumpResult::CANCELLED) return;
+        if (!IsGovernancePagePumpEligible(context, generation)) {
+            CancelGovernancePageSession(peerman);
+            return;
+        }
+        if (page_result == GovernancePagePumpResult::COMPLETE) {
+            m_next_governance_page_resync = now + 5 * 60;
+            SwitchToNextAsset(connman);
+            return;
+        }
+        if (page_result == GovernancePagePumpResult::ACTIVE) return;
+        if (page_result == GovernancePagePumpResult::UNSERVICEABLE) {
+            m_next_governance_page_attempt = now + 5 * 60;
+            LogPrintf("CMasternodeSync::ProcessTick -- governance page scope exceeds the bounded service contract\n");
+            return;
+        }
+        if (page_result == GovernancePagePumpResult::TEMPORARILY_UNAVAILABLE) {
+            m_next_governance_page_attempt =
+                now + GOVERNANCE_PAGE_RESOURCE_RETRY_SECONDS;
+            return;
+        }
+        // Governance sync requires an exact paged traversal. Remain in this
+        // stage until a capable source becomes available.
+        m_next_governance_page_attempt = now + 30;
+        return;
+    } else if (IsSynced() &&
+               GetTime() >= m_next_governance_page_resync.load()) {
+        constexpr auto context{
+            GovernancePagePumpContext::PERIODIC_RESYNC};
+        const uint64_t generation{
+            m_governance_page_generation.load()};
+        const auto page_result{PumpGovernancePages(
+            connman, peerman, context, generation)};
+        if (page_result == GovernancePagePumpResult::CANCELLED) {
+            return;
+        }
+        if (!IsGovernancePagePumpEligible(context, generation)) {
+            CancelGovernancePageSession(peerman);
+            return;
+        }
+        if (page_result == GovernancePagePumpResult::COMPLETE) {
+            m_next_governance_page_resync = GetTime() + 5 * 60;
+        } else if (page_result ==
+                   GovernancePagePumpResult::UNSERVICEABLE) {
+            m_next_governance_page_resync = now + 5 * 60;
+        } else if (page_result ==
+                       GovernancePagePumpResult::NO_CAPABLE_PEERS ||
+                   page_result == GovernancePagePumpResult::
+                       TEMPORARILY_UNAVAILABLE) {
+            m_next_governance_page_resync =
+                now + GOVERNANCE_PAGE_RESOURCE_RETRY_SECONDS;
+        }
+    }
+
+    const int64_t previous_maintenance{
+        m_last_maintenance_tick.load()};
+    if (now >= previous_maintenance &&
+        now - previous_maintenance < MASTERNODE_SYNC_TICK_SECONDS) {
         // too early, nothing to do here
         return;
     }
 
-    nTimeLastProcess = GetTime();
+    m_last_maintenance_tick.store(now);
     const CConnman::NodesSnapshot snap{connman, /* filter = */ FullyConnectedOnly};
-    const bool fBTCCConfigured = IsBTCCDeploymentConfigured(Params().GetConsensus());
-    // Gradually request the rest of the votes after sync finished and make sure
-    // we recover latest CLSIG/BTCCSIG after startup if local state is still empty.
+    // Recover the latest CLSIG after startup if local state is still empty.
     if(IsSynced()) {
-        governance->RequestGovernanceObjectVotes(snap.Nodes(), connman, peerman);
         static int64_t nTimeLastSigSyncRequest = 0;
         const int64_t nNow = GetTime<std::chrono::seconds>().count();
-        const bool fNeedCLSIG = llmq::chainLocksHandler && llmq::chainLocksHandler->GetBestChainLock().IsNull();
-        const bool fNeedBTCCSIG = fBTCCConfigured && llmq::btcCheckpointsHandler &&
-                                  llmq::btcCheckpointsHandler->GetBestBTCCheckpoint().IsNull();
-        if ((fNeedCLSIG || fNeedBTCCSIG) && nNow - nTimeLastSigSyncRequest >= MASTERNODE_SYNC_TIMEOUT_SECONDS) {
+        const bool fNeedCLSIG = llmq::chainLocksHandler &&
+                                !llmq::chainLocksHandler->GetBestChainLock();
+        if (fNeedCLSIG &&
+            nNow - nTimeLastSigSyncRequest >= MASTERNODE_SYNC_TIMEOUT_SECONDS) {
             size_t nRequested = 0;
             for (auto& pnode : snap.Nodes()) {
                 if (!pnode->CanRelay() || pnode->IsInboundConn() || pnode->nVersion < PROTOCOL_VERSION) {
@@ -160,17 +1009,13 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                 if (fNeedCLSIG) {
                     connman.PushMessage(pnode, msgMaker.Make(NetMsgType::GETCLSIG));
                 }
-                if (fNeedBTCCSIG) {
-                    connman.PushMessage(pnode, msgMaker.Make(NetMsgType::GETBTCCSIG));
-                }
                 ++nRequested;
             }
             if (nRequested > 0) {
                 nTimeLastSigSyncRequest = nNow;
-                LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- re-requested %s%s from %d peer(s)\n",
-                    fNeedCLSIG ? "CLSIG" : "",
-                    (fNeedCLSIG && fNeedBTCCSIG) ? "/BTCCSIG" : (fNeedBTCCSIG ? "BTCCSIG" : ""),
-                    nRequested);
+                LogPrint(BCLog::MNSYNC,
+                         "CMasternodeSync::ProcessTick -- re-requested CLSIG from %d peer(s)\n",
+                         nRequested);
             }
         }
         return;
@@ -178,8 +1023,9 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
 
 
     // Calculate "progress" for LOG reporting / GUI notification
-    double nSyncProgress = double(nTriedPeerCount + (nMode - 1) * 8) / (8*4);
-    LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nCurrentAsset %d nTriedPeerCount %d nSyncProgress %f\n", nTick, nMode, nTriedPeerCount, nSyncProgress);
+    const int attempt{GetAttempt()};
+    double nSyncProgress = double(attempt + (nMode - 1) * 8) / (8*4);
+    LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nCurrentAsset %d attempt %d nSyncProgress %f\n", nTick, nMode, attempt, nSyncProgress);
     uiInterface.NotifyAdditionalDataSyncProgressChanged(nSyncProgress);
     for (auto& pnode : snap.Nodes())
     {
@@ -202,35 +1048,10 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                     if (pNodeTmp->nVersion >= PROTOCOL_VERSION && !pNodeTmp->IsInboundConn() && !fRequestedEarlier) {
                         netfulfilledman->AddFulfilledRequest(pNodeTmp->addr, "mempool-sync");
                         connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETCLSIG));
-                        if (fBTCCConfigured) {
-                            connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETBTCCSIG));
-                        }
                         LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- syncing mempool from peer=%d\n", nTick, nMode, pNodeTmp->GetId());
                     }
                 }
                 return;
-            } else if (nMode == MASTERNODE_SYNC_GOVERNANCE) {
-                if (!governance->IsValid()) {
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-                // check for timeout first
-                if(GetTime() - GetTimeLastBumped() > MASTERNODE_SYNC_TIMEOUT_SECONDS) {
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-
-                // only request obj sync once from each peer
-                if(netfulfilledman->HasFulfilledRequest(pnode->addr, "governance-sync")) {
-                    // will request votes on per-obj basis from each node in a separate loop below
-                    // to avoid deadlocks here
-                    continue;
-                }
-                netfulfilledman->AddFulfilledRequest(pnode->addr, "governance-sync");
-
-                nTriedPeerCount++;
-                SendGovernanceSyncRequest(pnode, connman);
-                continue; //this will cause each peer to get one request each six seconds for the various assets we need
             }
         }
 
@@ -285,104 +1106,17 @@ void CMasternodeSync::ProcessTick(CConnman& connman, const PeerManager& peerman)
                                     connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::MEMPOOL));
                                 }
                             }
-                            // Keep CLSIG/BTCCSIG requests independent from mempool-sync bookkeeping.
+                            // Keep CLSIG requests independent from mempool-sync bookkeeping.
                             connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETCLSIG));
-                            if (fBTCCConfigured) {
-                                connman.PushMessage(pNodeTmp, msgMaker.Make(NetMsgType::GETBTCCSIG));
-                            }
-                            LogPrint(BCLog::MNSYNC, "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- requested CLSIG%s from peer=%d\n",
-                                nTick, nMode, fBTCCConfigured ? "/BTCCSIG" : "", pNodeTmp->GetId());
+                            LogPrint(BCLog::MNSYNC,
+                                     "CMasternodeSync::ProcessTick -- nTick %d nMode %d -- requested CLSIG from peer=%d\n",
+                                     nTick, nMode, pNodeTmp->GetId());
                         }
                     }
                 }
             }
-
-            // GOVOBJ : SYNC GOVERNANCE ITEMS FROM OUR PEERS
-
-            if(nMode == MASTERNODE_SYNC_GOVERNANCE) {
-                if (!governance->IsValid()) {
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-                LogPrint(BCLog::GOBJECT, "CMasternodeSync::ProcessTick -- nTick %d nMode %d nTimeLastBumped %lld GetTime() %lld diff %lld\n", nTick, nMode, GetTimeLastBumped(), GetTime(), GetTime() - GetTimeLastBumped());
-
-                // check for timeout first
-                if(GetTime() - GetTimeLastBumped() > MASTERNODE_SYNC_TIMEOUT_SECONDS) {
-                    LogPrintf("CMasternodeSync::ProcessTick -- nTick %d nMode %d -- timeout\n", nTick, nMode);
-                    if(nTriedPeerCount == 0) {
-                        LogPrintf("CMasternodeSync::ProcessTick -- WARNING: failed to sync %s\n", GetAssetName());
-                        // it's kind of ok to skip this for now, hopefully we'll catch up later?
-                    }
-                    SwitchToNextAsset(connman);
-                    return;
-                }
-
-                // only request obj sync once from each peer
-                if(netfulfilledman->HasFulfilledRequest(pnode->addr, "governance-sync")) {
-                    // will request votes on per-obj basis from each node in a separate loop below
-                    // to avoid deadlocks here
-                    continue;
-                }
-                netfulfilledman->AddFulfilledRequest(pnode->addr, "governance-sync");
-
-                nTriedPeerCount++;
-
-                SendGovernanceSyncRequest(pnode, connman);
-
-                break; //this will cause each peer to get one request each six seconds for the various assets we need
-            }
         }
     }
-
-
-    if (nCurrentAsset != MASTERNODE_SYNC_GOVERNANCE) {
-        return;
-    }
-
-    // request votes on per-obj basis from each node
-    for (auto& pnode : snap.Nodes()) {
-        if(!netfulfilledman->HasFulfilledRequest(pnode->addr, "governance-sync")) {
-            continue; // to early for this node
-        }
-        int nObjsLeftToAsk = governance->RequestGovernanceObjectVotes(pnode, connman, peerman);
-        // check for data
-        if(nObjsLeftToAsk == 0) {
-            static int64_t nTimeNoObjectsLeft = 0;
-            static int nLastTick = 0;
-            static int nLastVotes = 0;
-            if(nTimeNoObjectsLeft == 0) {
-                // asked all objects for votes for the first time
-                nTimeNoObjectsLeft = GetTime();
-            }
-            // make sure the condition below is checked only once per tick
-            if(nLastTick == nTick) continue;
-            if(GetTime() - nTimeNoObjectsLeft > MASTERNODE_SYNC_TIMEOUT_SECONDS &&
-                governance->GetVoteCount() - nLastVotes < std::max(int(0.0001 * nLastVotes), MASTERNODE_SYNC_TICK_SECONDS)
-            ) {
-                // We already asked for all objects, waited for MASTERNODE_SYNC_TIMEOUT_SECONDS
-                // after that and less then 0.01% or MASTERNODE_SYNC_TICK_SECONDS
-                // (i.e. 1 per second) votes were received during the last tick.
-                // We can be pretty sure that we are done syncing.
-                LogPrintf("CMasternodeSync::ProcessTick -- nTick %d nCurrentAsset %d -- asked for all objects, nothing to do\n", nTick, MASTERNODE_SYNC_GOVERNANCE);
-                // reset nTimeNoObjectsLeft to be able to use the same condition on resync
-                nTimeNoObjectsLeft = 0;
-                SwitchToNextAsset(connman);
-                return;
-            }
-            nLastTick = nTick;
-            nLastVotes = governance->GetVoteCount();
-        }
-    }
-}
-
-void CMasternodeSync::SendGovernanceSyncRequest(CNode* pnode, CConnman& connman)
-{
-    CNetMsgMaker msgMaker(pnode->GetCommonVersion());
-
-    CBloomFilter filter;
-
-    connman.PushMessage(pnode, msgMaker.Make(NetMsgType::MNGOVERNANCESYNC, uint256(), filter));
-    
 }
 
 void CMasternodeSync::NotifyHeaderTip(const CBlockIndex *pindexNew)
@@ -441,9 +1175,10 @@ void CMasternodeSync::UpdatedBlockTip(const CBlockIndex *pindexNew, ChainstateMa
                 pindexNew->nHeight, pindexTip->nHeight, fInitialDownload, ReachedBestHeader());
 }
 
-void CMasternodeSync::DoMaintenance(CConnman &connman, const PeerManager& peerman)
+void CMasternodeSync::DoMaintenance(CConnman& connman, PeerManager& peerman,
+                                   ChainstateManager& chainman)
 {
     if (ShutdownRequested()) return;
 
-    ProcessTick(connman, peerman);
+    ProcessTick(connman, peerman, chainman);
 }

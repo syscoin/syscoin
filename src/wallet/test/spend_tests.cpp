@@ -11,6 +11,8 @@
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 
+#include <algorithm> // SYSCOIN: inspect asset-bearing inventory outputs.
+
 #include <boost/test/unit_test.hpp>
 
 namespace wallet {
@@ -106,6 +108,97 @@ BOOST_FIXTURE_TEST_CASE(wallet_duplicated_preset_inputs_test, TestChain100Setup)
     res_tx = CreateTransaction(*wallet, recipients, /*change_pos*/-1, coin_control);
     BOOST_CHECK(!res_tx.has_value());
 }
+
+// SYSCOIN BEGIN: Ordinary wallet spending must preserve asset-bearing UTXOs.
+BOOST_AUTO_TEST_CASE(asset_selected_inputs_require_asset_version)
+{
+    LOCK(m_wallet.cs_wallet);
+    const CAssetCoinInfo asset{42, 7};
+    const CTxOut asset_output{COIN, CScript{} << OP_TRUE, asset};
+    CMutableTransaction tx;
+    tx.vout.push_back(asset_output);
+    // Exercise stored UTXO metadata directly; asset consensus validation is
+    // independent of this coin-control policy test.
+    const auto* wallet_tx{m_wallet.AddToWallet(
+        MakeTransactionRef(tx), TxStateInactive{})};
+    BOOST_REQUIRE(wallet_tx != nullptr);
+
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const CoinSelectionParams selection_params{rng};
+    for (const bool external : {false, true}) {
+        const COutPoint outpoint{
+            external ? uint256S("a55e7") : wallet_tx->GetHash(), 0};
+        CCoinControl coin_control;
+        coin_control.SetInputWeight(outpoint, 272);
+        if (external) {
+            coin_control.SelectExternal(outpoint, asset_output);
+        } else {
+            coin_control.Select(outpoint);
+        }
+
+        const auto rejected{FetchSelectedInputs(
+            m_wallet, coin_control, selection_params)};
+        BOOST_REQUIRE(!rejected);
+        BOOST_CHECK_EQUAL(util::ErrorString(rejected).original,
+                          "Asset inputs require an asset transaction");
+
+        coin_control.m_version = SYSCOIN_TX_VERSION_ALLOCATION_SEND;
+        const auto accepted{FetchSelectedInputs(
+            m_wallet, coin_control, selection_params)};
+        BOOST_REQUIRE(accepted);
+        BOOST_REQUIRE_EQUAL(accepted->coins.size(), 1U);
+        const auto& selected{**accepted->coins.begin()};
+        BOOST_CHECK(selected.outpoint == outpoint);
+        BOOST_CHECK(selected.txout.assetInfo == asset);
+        BOOST_CHECK_EQUAL(selected.txout.nValue, COIN);
+    }
+
+    // Explicit external SYS inputs remain available to ordinary transactions.
+    const COutPoint plain_outpoint{uint256S("a55e8"), 0};
+    CCoinControl ordinary_control;
+    ordinary_control.SetInputWeight(plain_outpoint, 272);
+    ordinary_control.SelectExternal(
+        plain_outpoint, CTxOut{COIN, CScript{} << OP_TRUE});
+    const auto ordinary{FetchSelectedInputs(
+        m_wallet, ordinary_control, selection_params)};
+    BOOST_REQUIRE(ordinary);
+    BOOST_REQUIRE_EQUAL(ordinary->coins.size(), 1U);
+    BOOST_CHECK((*ordinary->coins.begin())->txout.assetInfo.IsNull());
+}
+
+BOOST_AUTO_TEST_CASE(asset_inventory_excluded_from_automatic_selection)
+{
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    const auto destination{m_wallet.GetNewDestination(OutputType::BECH32, "")};
+    BOOST_REQUIRE(destination);
+    const auto script{GetScriptForDestination(*destination)};
+    const CAssetCoinInfo asset{42, 7};
+    CMutableTransaction tx;
+    tx.vout.emplace_back(COIN, script);
+    tx.vout.emplace_back(2 * COIN, script, asset);
+    const uint256 block_hash{m_node.chainman->GetConsensus().hashGenesisBlock};
+    m_wallet.SetLastBlockProcessed(0, block_hash);
+    BOOST_REQUIRE(m_wallet.AddToWallet(
+        MakeTransactionRef(tx), TxStateConfirmed{block_hash, 0, 0}));
+
+    const auto spendable{AvailableCoins(m_wallet).All()};
+    BOOST_REQUIRE_EQUAL(spendable.size(), 1U);
+    BOOST_CHECK(spendable[0].outpoint == COutPoint(tx.GetHash(), 0));
+    BOOST_CHECK_EQUAL(spendable[0].txout.nValue, COIN);
+
+    const auto inventory{AvailableCoinsListUnspent(m_wallet).All()};
+    BOOST_REQUIRE_EQUAL(inventory.size(), 2U);
+    const auto asset_coin{std::find_if(inventory.begin(), inventory.end(),
+        [&](const COutput& output) {
+            return output.outpoint == COutPoint(tx.GetHash(), 1);
+        })};
+    BOOST_REQUIRE(asset_coin != inventory.end());
+    BOOST_CHECK(asset_coin->txout.assetInfo == asset);
+    BOOST_CHECK_EQUAL(asset_coin->txout.nValue, 2 * COIN);
+}
+// SYSCOIN END: Ordinary wallet spending must preserve asset-bearing UTXOs.
 
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet
