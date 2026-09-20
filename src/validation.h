@@ -22,6 +22,7 @@
 #include <nevm/response.h>
 #include <node/blockstorage.h>
 #include <node/btcheader_state.h> // SYSCOIN: shared managed-backend state boundary.
+#include <node/pq_legacy_upgrade.h> // SYSCOIN: captured legacy validation provenance.
 #include <policy/feerate.h>
 #include <policy/packages.h>
 #include <policy/policy.h>
@@ -1300,6 +1301,9 @@ private:
     std::optional<node::PQActivationHandoffRecord>
         m_pq_activation_handoff_record GUARDED_BY(::cs_main);
     std::atomic<bool> m_pq_activation_participation_allowed{false};
+    std::optional<node::PQLegacyUpgradeRecord> m_pq_legacy_upgrade
+        GUARDED_BY(::cs_main);
+    bool m_pq_legacy_rebuild GUARDED_BY(::cs_main){false};
     // SYSCOIN END: Fail-closed local provenance for the BLS-free activation.
 
     //! Internal helper for ActivateSnapshot().
@@ -1629,6 +1633,27 @@ public:
     bool IsInitialBlockDownload() const;
 
     // SYSCOIN BEGIN: Public-network BLS-to-PQ activation handoff.
+    bool ResetPQLegacyUpgradeSuffix() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void SetPQLegacyUpgrade(const node::PQLegacyUpgradeRecord& record,
+                           bool rebuild_this_startup)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    const std::optional<node::PQLegacyUpgradeRecord>& GetPQLegacyUpgrade() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        return m_pq_legacy_upgrade;
+    }
+    bool IsPQLegacyRebuild() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        return m_pq_legacy_rebuild;
+    }
+    /** Restrict replay and later forks to the legacy-validated predecessor. */
+    bool CheckPQLegacyUpgradeBranch(const CBlockIndex& candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Finish the paired reset before any import can publish rebuilt coins. */
+    bool MarkPQLegacyReplayReady(std::string& error)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Initialize local provenance before replay. Explicit replay and an empty
      * coins DB are durably quarantined before any opaque legacy block is read.
@@ -1638,12 +1663,12 @@ public:
                                     bilingual_str& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Verify the transition release's exact imported A-1 pin. */
+    /** Verify the validated legacy datadir's exact imported A-1 pin. */
     bool FinalizePQActivationHandoff(const CBlockIndex* tip,
                                      bilingual_str& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Verify an imported transition-release pin against the active tip. */
+    /** Verify the imported legacy pin against the active tip. */
     bool MaybeFinalizePQActivationHandoff(const CBlockIndex& tip,
                                           std::string& error)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

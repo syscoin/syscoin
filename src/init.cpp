@@ -2141,6 +2141,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         };
         auto [status, error] = catch_exceptions([&]{ return LoadChainstate(chainman, cache_sizes, options); });
         if (status == node::ChainstateLoadStatus::SUCCESS) {
+            // SYSCOIN: Legacy migration selects paired chainstate replay
+            // during loading, after the command-line options were copied.
+            // Verification and cache loading must observe that same rebuild.
+            if (WITH_LOCK(cs_main, return chainman.IsPQLegacyRebuild();)) {
+                fReindexChainState = true;
+                fReindexGeth = true;
+                options.reindex_chainstate = true;
+                options.fReindexGeth = true;
+            }
             uiInterface.InitMessage(_("Verifying blocks…").translated);
             if (chainman.m_blockman.m_have_pruned && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
                 LogPrintfCategory(BCLog::PRUNE, "pruned datadir may not have more than %d blocks; only checking available blocks\n",
@@ -2257,6 +2266,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             return InitError(Untranslated("Cannot restore NEVM payload repair: " + error));
         }
     }
+    const bool pq_legacy_rebuild{
+        WITH_LOCK(cs_main, return chainman.IsPQLegacyRebuild();)};
+    if (pq_legacy_rebuild && args.IsArgSet("-hrp")) fNEVMConnection = false;
+    const bool pq_legacy_geth_requested{pq_legacy_rebuild && fNEVMConnection};
+    bool pq_legacy_geth_attached{false};
     if(fNEVMConnection && !fRegTest) {
         if(!node.chainman->ActiveChainstate().DoGethStartupProcedure()) {
             fNEVMConnection = false;
@@ -2371,6 +2385,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     "Preserve both databases and repair their branch alignment.",
                     geth_pair_error)));
             }
+            pq_legacy_geth_attached = true;
             if (!chainman.DiscoverNEVMPayloadRepair(
                     nHeightFromGeth, lastSYSBlockHashFromGeth, geth_pair_error)) {
                 return InitError(Untranslated("Cannot recover NEVM payload: " + geth_pair_error));
@@ -2503,6 +2518,68 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         std::string error;
         if (!chainman.RecoverNEVMPendingConnect(count, hash, error)) {
             return InitError(Untranslated("Cannot recover NEVM pending connection: " + error));
+        }
+        if (pq_legacy_rebuild) {
+            // The regtest endpoint is external. Prove its reset/bootstrap
+            // pair explicitly instead of treating absent pending work as ACK.
+            GetMainSignals().NotifyGetNEVMBlockInfo(count, hash, error);
+            if (!error.empty()) {
+                return InitError(Untranslated("Cannot attach Geth for PQ legacy replay: " + error));
+            }
+            LOCK(cs_main);
+            if (!chainman.InitializeNEVMStartupPair(count, hash, error)) {
+                return InitError(Untranslated("Cannot align Geth for PQ legacy replay: " + error));
+            }
+            pq_legacy_geth_attached = true;
+        }
+    }
+
+    if (pq_legacy_rebuild) {
+        if (pq_legacy_geth_requested &&
+            (!fNEVMConnection || !pq_legacy_geth_attached)) {
+            return InitError(Untranslated(
+                "Geth must finish its paired reset and attach before PQ legacy replay can begin"));
+        }
+        if (!pq_legacy_geth_requested) {
+            // Core-only nodes need no execution endpoint. If their datadir
+            // contains old managed state, retire it under Geth's own lock so
+            // a later NEVM-enabled start cannot revive the legacy suffix.
+            try {
+                const fs::path geth_dir{args.GetDataDirNet() / "geth"};
+                const bool has_old_geth{
+                    fs::symlink_status(geth_dir / "geth" / "chaindata").type() != fs::file_type::not_found ||
+                    fs::symlink_status(geth_dir / "chaindata").type() != fs::file_type::not_found};
+                std::string reset_error;
+                if (has_old_geth && !node::PrepareGethDataDirectory(
+                        args.GetDataDirNet(), /*reindex=*/true, reset_error)) {
+                    return InitError(Untranslated("Cannot reset old Geth state for PQ legacy replay: " + reset_error));
+                }
+            } catch (const fs::filesystem_error& exception) {
+                return InitError(Untranslated("Cannot inspect old Geth state for PQ legacy replay: " + std::string{exception.what()}));
+            }
+        }
+        // Clear legacy flat-file caches before replay can start, and before
+        // REPLAY_READY allows a crash restart to preserve rebuilt chainstate.
+        // CFlatDB closes these files without synchronizing them itself.
+        if (!netfulfilledman->LoadCache(false) ||
+            !mmetaman->LoadCache(false) || !governance->LoadCache(false)) {
+            return InitError(Untranslated("Cannot clear legacy caches before PQ replay"));
+        }
+        for (const char* name : {"netfulfilled.dat", "mncache.dat", "governance.dat"}) {
+            FILE* cache{fsbridge::fopen(args.GetDataDirNet() / name, "rb+")};
+            if (cache == nullptr) {
+                return InitError(Untranslated("Cannot reopen legacy cache for synchronization: " + std::string{name}));
+            }
+            const bool synced{FileCommit(cache)};
+            const bool closed{std::fclose(cache) == 0};
+            if (!synced || !closed) {
+                return InitError(Untranslated("Cannot synchronize cleared legacy cache: " + std::string{name}));
+            }
+        }
+        DirectoryCommit(args.GetDataDirNet());
+        std::string replay_error;
+        if (!WITH_LOCK(cs_main, return chainman.MarkPQLegacyReplayReady(replay_error);)) {
+            return InitError(Untranslated(replay_error));
         }
     }
 
@@ -2697,19 +2774,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (!sporkManager->LoadCache()) {
         return InitError(Untranslated("Failed to load sporks cache\n"));
     }
-    if (!netfulfilledman->LoadCache(fLoadCacheFiles)) {
+    if (!pq_legacy_rebuild && !netfulfilledman->LoadCache(fLoadCacheFiles)) {
         if (fLoadCacheFiles) {
             return InitError(Untranslated("Failed to load fulfilled requests cache"));
         }
         return InitError(Untranslated("Failed to clear fulfilled requests cache"));
     }
-    if (!mmetaman->LoadCache(fLoadCacheFiles)) {
+    if (!pq_legacy_rebuild && !mmetaman->LoadCache(fLoadCacheFiles)) {
         if (fLoadCacheFiles) {
             return InitError(Untranslated("Failed to load masternode cache"));
         }
         return InitError(Untranslated("Failed to clear masternode cache"));
     }
-    if (!governance->LoadCache(fLoadCacheFiles)) {
+    if (!pq_legacy_rebuild && !governance->LoadCache(fLoadCacheFiles)) {
         if (fLoadCacheFiles) {
             return InitError(Untranslated("Failed to load governance cache"));
         }

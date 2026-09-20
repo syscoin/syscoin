@@ -2842,6 +2842,115 @@ node::PQActivationHandoffTip BuildPQActivationHandoffTip(
 
 } // namespace
 
+// SYSCOIN: A legacy node may have stored an old-rule suffix past activation.
+// Reindex-chainstate retains Bitcoin's block index, so retire its old validity
+// decisions before replay. Keep block bodies and recheck them normally; a
+// previously rejected PQ branch must also get a new consensus decision.
+bool ChainstateManager::ResetPQLegacyUpgradeSuffix()
+{
+    AssertLockHeld(cs_main);
+    if (!IsPQLegacyRebuild()) return true;
+    const auto& upgrade{GetPQLegacyUpgrade()};
+    assert(upgrade);
+    auto indexes{m_blockman.GetAllBlockIndices()};
+    std::sort(indexes.begin(), indexes.end(), CBlockIndexHeightOnlyComparator());
+    m_best_invalid = nullptr;
+    for (CBlockIndex* index : indexes) {
+        if (index->nHeight < upgrade->activation_height) {
+            if ((index->nStatus & BLOCK_FAILED_MASK) &&
+                (m_best_invalid == nullptr || index->nChainWork > m_best_invalid->nChainWork)) {
+                m_best_invalid = index;
+            }
+            continue;
+        }
+        const auto validity{std::min(index->nStatus & BLOCK_VALID_MASK,
+                                     static_cast<unsigned int>(BLOCK_VALID_TRANSACTIONS))};
+        index->nStatus &= ~(BLOCK_VALID_MASK | BLOCK_FAILED_MASK |
+                            BLOCK_CONFLICT_CHAINLOCK | BLOCK_HAVE_UNDO |
+                            BLOCK_GOVERNANCE_VALIDATED |
+                            BLOCK_PQ_BTCC_INDEX_VALIDATED |
+                            BLOCK_PQ_RECEIPT_INDEX_VALIDATED);
+        index->nStatus |= validity;
+        index->nUndoPos = 0;
+        m_failed_blocks.erase(index);
+        m_blockman.m_dirty_blockindex.insert(index);
+        if (index->nTx != 0 && index->pprev && index->pprev->HaveNumChainTxs()) {
+            index->nChainTx = index->pprev->nChainTx + index->nTx;
+        }
+        if (index->IsValid(BLOCK_VALID_TRANSACTIONS) && index->HaveNumChainTxs()) {
+            for (Chainstate* chainstate : GetAll()) {
+                chainstate->TryAddBlockIndexCandidate(index);
+            }
+        }
+    }
+    // The upgrade journal remains REBUILD_REQUIRED until Core and Geth have
+    // both been reset. A crash before that repeats this idempotent operation.
+    return m_blockman.WriteBlockIndexDB();
+}
+
+void ChainstateManager::SetPQLegacyUpgrade(
+    const node::PQLegacyUpgradeRecord& record, bool rebuild_this_startup)
+{
+    AssertLockHeld(cs_main);
+    assert(record.IsValid());
+    m_pq_legacy_upgrade = record;
+    m_pq_legacy_rebuild = rebuild_this_startup;
+}
+
+bool ChainstateManager::CheckPQLegacyUpgradeBranch(
+    const CBlockIndex& candidate) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_pq_legacy_upgrade) return true;
+    const auto& upgrade{*m_pq_legacy_upgrade};
+    // Full block-file reindex publishes genesis before the captured anchor's
+    // index has been reconstructed. It cannot authorize any other prefix yet.
+    if (candidate.nHeight == 0) {
+        return candidate.GetBlockHash() == upgrade.genesis_hash;
+    }
+    const CBlockIndex* anchor{
+        m_blockman.LookupBlockIndex(upgrade.predecessor_hash)};
+    if (anchor == nullptr || anchor->nHeight != upgrade.activation_height - 1) {
+        return false;
+    }
+    // GetAncestor uses skip pointers. Neither block connection nor repeated
+    // fork selection scans the historical prefix to prove this relationship.
+    const CBlockIndex* expected{candidate.nHeight <= anchor->nHeight
+        ? anchor->GetAncestor(candidate.nHeight)
+        : candidate.GetAncestor(anchor->nHeight)};
+    return expected != nullptr && expected->GetBlockHash() ==
+        (candidate.nHeight <= anchor->nHeight
+             ? candidate.GetBlockHash() : upgrade.predecessor_hash);
+}
+
+bool ChainstateManager::MarkPQLegacyReplayReady(std::string& error)
+{
+    AssertLockHeld(cs_main);
+    error.clear();
+    if (!m_pq_legacy_upgrade || !m_pq_legacy_rebuild) return true;
+    try {
+        node::PQLegacyUpgradeJournal journal{{
+            .path = m_options.datadir / "pq-upgrade",
+            .cache_bytes = 1 << 20,
+            .options = m_options.block_tree_db}};
+        const auto persisted{journal.ReadUpgrade()};
+        if (!persisted || *persisted != *m_pq_legacy_upgrade) {
+            error = "PQ legacy upgrade journal changed before paired replay";
+            return false;
+        }
+        if (!journal.MarkReplayReady()) {
+            error = "Cannot persist readiness for paired PQ legacy replay";
+            return false;
+        }
+        m_pq_legacy_upgrade->phase = node::PQLegacyUpgradePhase::REPLAY_READY;
+        return true;
+    } catch (const std::exception& exception) {
+        error = "Cannot open PQ legacy upgrade journal: " +
+                std::string{exception.what()};
+        return false;
+    }
+}
+
 bool ChainstateManager::PreparePQActivationHandoff(
     bool force_historical_replay,
     bool empty_chainstate,
@@ -2858,9 +2967,11 @@ bool ChainstateManager::PreparePQActivationHandoff(
         return false;
     }
 
-    // Reconstruction cannot authenticate legacy BLS history, so it
-    // deliberately replaces any live pin with permanent replay quarantine.
-    if (!force_historical_replay && !empty_chainstate && public_network &&
+    // Ordinary reconstruction cannot authenticate legacy BLS history. Only
+    // the separate journal captured from a validated legacy datadir before
+    // its paired rebuild can preserve that authority through replay.
+    if (((!force_historical_replay && !empty_chainstate && public_network) ||
+         m_pq_legacy_upgrade) &&
         block_tree->HasPQActivationHandoff()) {
         node::PQActivationHandoffRecord record;
         if (!block_tree->ReadPQActivationHandoff(record)) {
@@ -2870,9 +2981,39 @@ bool ChainstateManager::PreparePQActivationHandoff(
         persisted = std::move(record);
     }
 
+    if (m_pq_legacy_upgrade) {
+        const auto& upgrade{*m_pq_legacy_upgrade};
+        if (!upgrade.IsValid() ||
+            upgrade.genesis_hash != GetConsensus().hashGenesisBlock ||
+            upgrade.activation_height != GetConsensus().nPQActivationHeight ||
+            Consensus::CheckPQActivationConfiguration(GetConsensus()) !=
+                Consensus::PQActivationResult::VALID) {
+            error = Untranslated("PQ legacy upgrade journal does not match this network and activation");
+            return false;
+        }
+        if (persisted &&
+            (!persisted->IsValid(upgrade.activation_height) ||
+             persisted->state != node::PQActivationHandoffState::PINNED ||
+             persisted->predecessor_hash != upgrade.predecessor_hash)) {
+            error = Untranslated("PQ activation handoff conflicts with the validated legacy datadir");
+            return false;
+        }
+        if (!persisted) {
+            persisted = node::PQActivationHandoffRecord{
+                node::PQActivationHandoffRecord::VERSION,
+                node::PQActivationHandoffState::PINNED,
+                upgrade.activation_height, upgrade.predecessor_hash};
+            if (!block_tree->WritePQActivationHandoff(*persisted)) {
+                error = Untranslated("Cannot persist the validated legacy activation predecessor");
+                return false;
+            }
+        }
+    }
+
     const auto resolution{node::PreparePQActivationHandoff(
-        GetConsensus(), public_network, force_historical_replay,
-        empty_chainstate, persisted)};
+        GetConsensus(), public_network,
+        force_historical_replay && !m_pq_legacy_upgrade,
+        empty_chainstate && !m_pq_legacy_upgrade, persisted)};
     if (resolution.record_to_write &&
         !block_tree->WritePQActivationHandoff(
             *resolution.record_to_write)) {
@@ -2890,8 +3031,8 @@ bool ChainstateManager::PreparePQActivationHandoff(
         std::memory_order_release);
     if (resolution.state == node::PQActivationRuntimeState::FAILED) {
         error = Untranslated(
-            "PQ activation handoff state is invalid; restore the transition "
-            "release handoff or run that release on the selected branch");
+            "PQ activation handoff state is invalid; restore the validated "
+            "legacy datadir and its captured upgrade journal");
         return false;
     }
     return true;
@@ -2928,8 +3069,8 @@ bool ChainstateManager::FinalizePQActivationHandoff(
     if (resolution.state == node::PQActivationRuntimeState::FAILED) {
         error = Untranslated(
             "The local PQ activation handoff is missing, unvalidated, or no "
-            "longer matches the active A-1 predecessor; return to the "
-            "legacy-validating transition release");
+            "longer matches the active A-1 predecessor; restore the "
+            "validated legacy datadir and its captured upgrade journal");
         return false;
     }
     return true;
@@ -2990,7 +3131,10 @@ bool ChainstateManager::CheckPQActivationHandoffDisconnect(
             }
         }
     }
-    if (node::DisconnectCrossesPQActivationHandoff(
+    if ((m_pq_legacy_upgrade &&
+         disconnecting.nHeight == m_pq_legacy_upgrade->activation_height - 1 &&
+         disconnecting.GetBlockHash() == m_pq_legacy_upgrade->predecessor_hash) ||
+        node::DisconnectCrossesPQActivationHandoff(
             GetConsensus(), m_pq_activation_runtime_state,
             m_pq_activation_handoff_record, disconnecting.nHeight,
             disconnecting.GetBlockHash())) {
@@ -3518,6 +3662,24 @@ bool ChainstateManager::InitializeNEVMStartupPair(
 {
     AssertLockHeld(cs_main);
     error.clear();
+    if (m_pq_legacy_upgrade && m_pq_legacy_rebuild && geth_count != 0) {
+        const int64_t start{GetConsensus().nNEVMStartBlock};
+        const int64_t anchor_height{m_pq_legacy_upgrade->activation_height - 1};
+        const CBlockIndex* applied{m_blockman.LookupBlockIndex(syscoin_hash)};
+        const bool awaiting_anchor_index{
+            m_blockman.LoadingBlocks() &&
+            m_blockman.LookupBlockIndex(m_pq_legacy_upgrade->predecessor_hash) == nullptr};
+        if (start < 0 || anchor_height < start ||
+            geth_count > static_cast<uint64_t>(anchor_height - start + 1) ||
+            syscoin_hash.IsNull() ||
+            (applied != nullptr &&
+             applied->nHeight != start + static_cast<int64_t>(geth_count) - 1) ||
+            (!awaiting_anchor_index &&
+             (applied == nullptr || !CheckPQLegacyUpgradeBranch(*applied)))) {
+            error = "Geth bootstrap must match the validated legacy branch at or below A-1";
+            return false;
+        }
+    }
     if (m_nevm_startup_pair) {
         error = "NEVM startup pair is already awaiting Core recovery";
         return false;
@@ -3582,6 +3744,12 @@ bool ChainstateManager::CheckNEVMStartupConnect(
     if (!m_nevm_startup_pair) return true;
     const auto& pair{*m_nevm_startup_pair};
     const CBlockIndex* applied{m_blockman.LookupBlockIndex(pair.block_hash)};
+    if (m_pq_legacy_upgrade && applied != nullptr &&
+        m_blockman.LookupBlockIndex(m_pq_legacy_upgrade->predecessor_hash) != nullptr &&
+        !CheckPQLegacyUpgradeBranch(*applied)) {
+        error = "Geth's startup pair conflicts with the validated legacy activation predecessor";
+        return false;
+    }
     if (applied == nullptr) {
         // Every valid branch shares the configured genesis. A fresh Core
         // must activate it before startup can open header acquisition.
@@ -3610,6 +3778,20 @@ bool ChainstateManager::MaybeCompleteNEVMStartupPair(std::string& error)
     error.clear();
     if (!m_nevm_startup_pair) return true;
     auto& pair{*m_nevm_startup_pair};
+    if (m_pq_legacy_upgrade) {
+        const CBlockIndex* anchor{
+            m_blockman.LookupBlockIndex(m_pq_legacy_upgrade->predecessor_hash)};
+        if (anchor != nullptr && pair.height <= anchor->nHeight) {
+            const CBlockIndex* expected{anchor->GetAncestor(pair.height)};
+            if (expected == nullptr || expected->GetBlockHash() != pair.block_hash) {
+                // Full reindex can initially lack both headers. Once the
+                // captured anchor exists, waiting for a different hash at a
+                // known prefix height can never resolve by honest download.
+                error = "Geth's startup pair conflicts with the validated legacy activation predecessor";
+                return false;
+            }
+        }
+    }
     const CBlockIndex* tip{ActiveTip()};
     if (tip == nullptr || tip->nHeight < pair.height) {
         pair.status_wait_started.reset();
@@ -5938,6 +6120,12 @@ static SteadyClock::duration time_undo{};
 static SteadyClock::duration time_index{};
 static SteadyClock::duration time_total{};
 static int64_t num_blocks_total = 0;
+// SYSCOIN: A captured legacy suffix was accepted under earlier contextual
+// rules. Local chainstate replay must check the new rules at activation too.
+static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& state,
+                                const ChainstateManager& chainman,
+                                const CBlockIndex* pindexPrev)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 // SYSCOIN
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, bool fJustCheck, bool bReverify) {
@@ -5957,6 +6145,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (rejection) rejection->reset();
     AssertLockHeld(cs_main);
     assert(pindex);
+
+    if (!m_chainman.CheckPQLegacyUpgradeBranch(*pindex)) {
+        return state.Error("Block is outside the validated legacy activation branch");
+    }
 
     // SYSCOIN: Reject a local recovery alignment error before special-tx or
     // coins state can change. It does not make a competing block invalid.
@@ -6001,6 +6193,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             return FatalError(m_chainman.GetNotifications(), state, "Corrupt block found indicating potential hardware failure; shutting down");
         }
         return error("%s: Consensus::CheckBlock: %s", __func__, state.ToString());
+    }
+    if (m_chainman.GetPQLegacyUpgrade() &&
+        pindex->nHeight >= params.GetConsensus().nPQActivationHeight &&
+        !ContextualCheckBlock(block, state, m_chainman, pindex->pprev)) {
+        return error("%s: Legacy upgrade contextual checks: %s", __func__, state.ToString());
     }
     // SYSCOIN: Apply fork-specific AuxPoW and BTCPREV context at the Bitcoin
     // ConnectBlock boundary, including replay of previously indexed blocks.
@@ -7186,7 +7383,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         return state.Error("nevm-disconnect-unapplied-prefix-mismatch");
     }
     // SYSCOIN BEGIN: Never cross the imported A-1 handoff in this BLS-free
-    // process. A transition release must validate any replacement first.
+    // process. A legacy-validating datadir must authenticate any replacement.
     std::string pq_handoff_disconnect_error;
     if (!m_chainman.CheckPQActivationHandoffDisconnect(
             *pindexDelete, pq_handoff_disconnect_error)) {
@@ -7588,7 +7785,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  Ticks<SecondsDouble>(time_connect_total),
                  Ticks<MillisecondsDouble>(time_connect_total) / num_blocks_total);
         // SYSCOIN BEGIN: A node replaying from below A-1 may consume an existing
-        // transition-release pin only after validating that exact predecessor.
+        // legacy-datadir pin only after validating that exact predecessor.
         // Keep coins and bridge outputs local until this fallible check passes.
         if (pindexNew->nHeight ==
                 m_chainman.GetConsensus().nPQActivationHeight - 1) {
@@ -7731,9 +7928,11 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // Reconcile Geth's already-applied prefix before ordinary fork
             // choice. Keep competing tips eligible for when the pair clears;
             // preseal admission must observe the same temporary selection.
-            while (it != setBlockIndexCandidates.rend() && startup_applied != nullptr &&
-                   ((*it)->nHeight > startup_applied->nHeight ||
-                    startup_applied->GetAncestor((*it)->nHeight) != *it)) {
+            while (it != setBlockIndexCandidates.rend() &&
+                   ((!m_chainman.CheckPQLegacyUpgradeBranch(**it)) ||
+                    (startup_applied != nullptr &&
+                     ((*it)->nHeight > startup_applied->nHeight ||
+                      startup_applied->GetAncestor((*it)->nHeight) != *it)))) {
                 ++it;
             }
             // SYSCOIN END: Restrict startup candidates to the Geth-applied branch.
@@ -8710,6 +8909,10 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
                 const CBlockIndex* applied{m_blockman.LookupBlockIndex(pair.block_hash)};
                 std::string startup_pair_error;
                 if (applied == nullptr) {
+                    if (m_chainman.GetPQLegacyUpgrade() &&
+                        !m_chainman.MaybeCompleteNEVMStartupPair(startup_pair_error)) {
+                        return state.Error(startup_pair_error);
+                    }
                     if (m_chain.Tip() != nullptr || pair.height <= 0) return true;
                     // Startup waits for genesis before opening Core's peer
                     // network. Activate only genesis while the applied pair's

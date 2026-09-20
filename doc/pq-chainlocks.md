@@ -2434,19 +2434,27 @@ still disabled, so there is no released production database migration to infer.
 
 ### 11.2 Local activation handoff
 
-The final BLS-free binary consumes a separate, fsynced handoff record written by
-the legacy-validating transition release at `A-1`. This record is deployment
-provenance, not consensus state and not a configured activation hash. The
-BLS-free process can verify an imported pin but cannot manufacture or replace
-one from structurally replayed legacy history.
+The BLS-free binary can upgrade a datadir validated by the existing legacy
+binary through `A-1`. Before resetting state, it records the old coins endpoint
+and its exact `A-1` ancestor in the separate, fsynced `pq-upgrade` database.
+Legacy database formats, fully validated block indexes, the matching persisted
+masternode snapshot, and locally retained block files are required. This is
+local deployment provenance, not consensus state or a configured activation
+hash. A datadir already replayed by the BLS-free binary cannot supply it.
 
-- A public datadir without an imported pin remains sync-only. Below `A-1` it is
-  deferred; at `A-1` it cannot create block `A`, and it fails closed if asked to
-  cross the activation boundary. Producers therefore run the transition release
-  through `A-1`, let it fsync the exact predecessor, and only then start the
-  BLS-free release. A loaded tip at or above `A` must have both that matching pin
-  and block `A`'s strong complete-PQ-validation provenance.
-- An empty datadir, full reindex, `-reindex-chainstate`, or snapshot/background
+- Stop the old node cleanly at `A-1`, then start the activation release with
+  its complete deployment profile. The first launch automatically rebuilds
+  chainstate and the new auxiliary indexes from locally stored Core blocks,
+  paired with a Geth reset. The journal survives an interrupted launch and
+  later explicit reindexing. Pruned or incomplete legacy history must be
+  restored before this automatic local upgrade can start.
+- Replay is bound to the saved `A-1` branch. If the old node advanced beyond
+  that boundary, its suffix is checked under PQ rules; its old validity flags
+  do not authorize it. Participation is unlocked only after the rebuilt chain
+  reaches the captured predecessor. A loaded tip at or above `A` must also
+  carry block `A`'s complete PQ validation provenance. Geth bootstrap cannot
+  carry the first rebuild past the captured legacy boundary.
+- An empty datadir, reindex without captured legacy provenance, or snapshot/background
   validation starts in historical-replay quarantine. Blocks and headers may be
   reconstructed for inspection, but mining, provider admission, MNAUTH,
   governance, PQ share/certificate traffic, certificate restoration, and
@@ -2455,8 +2463,8 @@ one from structurally replayed legacy history.
   snapshot release is required to make a fresh BLS-free reconstruction live.
 - The imported `A-1` pin is a local transition checkpoint. This BLS-free process
   rejects any disconnection that would cross it, even before the first durable
-  PQ ChainLock. Operators must return to the transition release to validate a
-  replacement legacy branch and produce its handoff. Reorganizations strictly
+  PQ ChainLock. Replacing the legacy prefix requires a separately validated
+  legacy datadir; replay alone cannot replace the journal. Reorganizations strictly
   above `A-1` remain subject to the ordinary PoW and PQ-finality rules.
 - A public all-sentinel profile remains sync-only and never advertises live
   authority. Regtest bypasses this deployment handoff so activation fixtures
@@ -2593,8 +2601,8 @@ The boundary is unambiguous:
 
 Publish the BLS-free activation release only with the complete manifest. The
 only remaining legacy support is the isolated opaque decoder/state-transition
-module for heights below `A`. A transition-release datadir may validate from
-genesis, import the fsynced `A-1` handoff, and follow valid-most-work history
+module for heights below `A`. An existing legacy datadir can preserve its
+validated `A-1` predecessor, rebuild locally, and follow valid-most-work history
 until a fully verified durable PQ certificate establishes finality. A clean
 BLS-free datadir may reconstruct the same history only in quarantine until a
 separately authenticated checkpoint or snapshot release makes it live. An

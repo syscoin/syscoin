@@ -12,6 +12,7 @@
 #include <logging.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
+#include <node/pq_legacy_migration.h> // SYSCOIN: preserve legacy provenance before paired replay.
 #include <sync.h>
 #include <threadsafety.h>
 #include <tinyformat.h>
@@ -79,6 +80,7 @@ bool VerifyActivePQState(const Chainstate& chainstate)
            (deterministicMNManager != nullptr &&
             deterministicMNManager->VerifyPersistedPQRegistrySnapshot(tip));
 }
+
 
 } // namespace
 // Complete initialization of chainstates after the initial call has been made
@@ -188,6 +190,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     if (!chainman.LoadBlockIndex()) {
         if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
         return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
+    }
+    if (!chainman.ResetPQLegacyUpgradeSuffix()) {
+        return {ChainstateLoadStatus::FAILURE_FATAL,
+                Untranslated("Failed to reset legacy activation block validity for replay")};
     }
     // SYSCOIN: Restore the exceptional external-effect retention head before
     // startup pruning, inverse-metadata maintenance, or coins reconstruction.
@@ -324,7 +330,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
-            // SYSCOIN BEGIN: Verify the transition release's imported A-1 pin
+            // SYSCOIN BEGIN: Verify the legacy datadir's imported A-1 pin
             // before any public service can observe startup readiness.
             if (chainstate == active_chainstate) {
                 bilingual_str handoff_error;
@@ -519,6 +525,17 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
         }
     }
     // SYSCOIN END: Resume durable reindex state before loading chainstate and Geth.
+
+    // SYSCOIN: Capture the old coins endpoint and its validated A-1 ancestor
+    // before any ordinary reindex path can erase the evidence. Include the
+    // persisted reindex marker above when deciding whether both stores need
+    // resetting again after an interrupted launch.
+    chainman.m_blockman.m_block_tree_db.reset();
+    bilingual_str upgrade_error;
+    if (!PreparePQLegacyUpgrade(chainman, effective_options, cache_sizes,
+                                upgrade_error)) {
+        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB, upgrade_error};
+    }
 
     chainman.m_total_coinstip_cache = cache_sizes.coins;
     chainman.m_total_coinsdb_cache = cache_sizes.coins_db;

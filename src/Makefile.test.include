@@ -168,6 +168,9 @@ SYSCOIN_TESTS =\
   test/pq_governance_auth_tests.cpp \
   test/pq_mnauth_tests.cpp \
   test/pq_migration_tests.cpp \
+  test/pq_legacy_database_tests.cpp \
+  test/pq_legacy_migration_tests.cpp \
+  test/pq_legacy_upgrade_tests.cpp \
   test/pq_operator_keys_tests.cpp \
   test/pq_operator_key_state_tests.cpp \
   test/pq_provider_auth_tests.cpp \

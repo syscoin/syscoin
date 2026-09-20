@@ -175,7 +175,7 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
         return {PQActivationRuntimeState::DEFERRED_HANDOFF, std::nullopt};
     }
     // This BLS-free release may consume, but never manufacture, the pin that
-    // the legacy-validating transition release wrote at A-1.
+    // was preserved from legacy validation before rebuilding the datadir.
     if (!persisted && tip.height == predecessor_height) {
         return {PQActivationRuntimeState::DEFERRED_HANDOFF, std::nullopt};
     }

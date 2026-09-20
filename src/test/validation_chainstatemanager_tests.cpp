@@ -10223,6 +10223,278 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
+// SYSCOIN: Exercise migration provenance through the real manager policy;
+// the existing regtest chain supplies indexed, script-valid legacy ancestry.
+struct PQLegacyUpgradeRuntimeSetup : TestChain100Setup {
+    Consensus::Params& consensus{
+        const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
+    const Consensus::Params original_consensus{consensus};
+
+    PQLegacyUpgradeRuntimeSetup()
+    {
+        consensus.DIP0003Height = 100;
+        consensus.nPQActivationHeight = 101;
+        BOOST_REQUIRE(Consensus::CheckPQActivationConfiguration(consensus) ==
+                      Consensus::PQActivationResult::VALID);
+    }
+
+    ~PQLegacyUpgradeRuntimeSetup() { consensus = original_consensus; }
+
+    node::PQLegacyUpgradeRecord Record() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        auto& chainman{*m_node.chainman};
+        const CBlockIndex* tip{chainman.ActiveTip()};
+        const CBlockIndex* anchor{
+            chainman.ActiveChain()[consensus.nPQActivationHeight - 1]};
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE(anchor != nullptr);
+        return {node::PQLegacyUpgradeRecord::VERSION,
+                consensus.hashGenesisBlock, consensus.nPQActivationHeight,
+                tip->nHeight, tip->GetBlockHash(), anchor->GetBlockHash(),
+                node::PQLegacyUpgradePhase::REBUILD_REQUIRED};
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(pq_legacy_upgrade_imports_pin_during_empty_rebuild,
+                        PQLegacyUpgradeRuntimeSetup)
+{
+    auto& chainman{*m_node.chainman};
+    LOCK(::cs_main);
+    const auto record{Record()};
+    chainman.SetPQLegacyUpgrade(record, /*rebuild_this_startup=*/true);
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(chainman.PreparePQActivationHandoff(
+        /*force_historical_replay=*/true, /*empty_chainstate=*/true, error),
+        error.original);
+    node::PQActivationHandoffRecord imported;
+    BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadPQActivationHandoff(imported));
+    BOOST_CHECK(imported.state == node::PQActivationHandoffState::PINNED);
+    BOOST_CHECK(imported.predecessor_hash == record.predecessor_hash);
+
+    // Regtest normally bypasses deployment. Use the existing public-policy
+    // fixture to prove the imported record does not grant participation early.
+    llmq::test::PQHistoryReauthenticationTestAccess::PreparePublicHandoff(chainman);
+    BOOST_REQUIRE_MESSAGE(chainman.FinalizePQActivationHandoff(
+        chainman.ActiveChain()[99], error), error.original);
+    BOOST_CHECK(llmq::test::PQHistoryReauthenticationTestAccess::HandoffState(chainman) ==
+                node::PQActivationRuntimeState::DEFERRED_HANDOFF);
+    BOOST_CHECK(!llmq::test::PQHistoryReauthenticationTestAccess::
+        HandoffParticipationAllowed(chainman));
+    BOOST_REQUIRE_MESSAGE(chainman.FinalizePQActivationHandoff(
+        chainman.ActiveTip(), error), error.original);
+    BOOST_CHECK(llmq::test::PQHistoryReauthenticationTestAccess::HandoffState(chainman) ==
+                node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(llmq::test::PQHistoryReauthenticationTestAccess::
+        HandoffParticipationAllowed(chainman));
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_legacy_upgrade_rejects_network_or_handoff_mismatch,
+                        PQLegacyUpgradeRuntimeSetup)
+{
+    auto& chainman{*m_node.chainman};
+    LOCK(::cs_main);
+    const auto valid{Record()};
+    auto wrong{valid};
+    wrong.genesis_hash = uint256{77};
+    chainman.SetPQLegacyUpgrade(wrong, true);
+    bilingual_str error;
+    BOOST_CHECK(!chainman.PreparePQActivationHandoff(true, true, error));
+    BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->HasPQActivationHandoff());
+    wrong = valid;
+    ++wrong.activation_height;
+    ++wrong.legacy_tip_height;
+    chainman.SetPQLegacyUpgrade(wrong, true);
+    BOOST_CHECK(!chainman.PreparePQActivationHandoff(true, true, error));
+    BOOST_CHECK(!chainman.m_blockman.m_block_tree_db->HasPQActivationHandoff());
+    chainman.SetPQLegacyUpgrade(valid, true);
+    BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WritePQActivationHandoff({
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::PINNED,
+        valid.activation_height, uint256{88}}));
+    BOOST_CHECK(!chainman.PreparePQActivationHandoff(true, true, error));
+    node::PQActivationHandoffRecord retained;
+    BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadPQActivationHandoff(retained));
+    BOOST_CHECK(retained.predecessor_hash == uint256{88});
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_legacy_upgrade_enforces_branch_and_disconnect_floor,
+                        PQLegacyUpgradeRuntimeSetup)
+{
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    LOCK(::cs_main);
+    const auto record{Record()};
+    chainman.SetPQLegacyUpgrade(record, true);
+    BOOST_CHECK(chainman.CheckPQLegacyUpgradeBranch(*chainman.ActiveChain()[0]));
+    BOOST_CHECK(chainman.CheckPQLegacyUpgradeBranch(*chainman.ActiveChain()[99]));
+    BOOST_CHECK(chainman.CheckPQLegacyUpgradeBranch(*chainman.ActiveTip()));
+
+    const uint256 conflicting_hash{uint256{99}}, child_hash{uint256{100}};
+    CBlockIndex conflicting;
+    conflicting.phashBlock = &conflicting_hash;
+    conflicting.pprev = chainman.ActiveChain()[99];
+    conflicting.nHeight = 100;
+    conflicting.BuildSkip();
+    BOOST_CHECK(!chainman.CheckPQLegacyUpgradeBranch(conflicting));
+    CBlockIndex child;
+    child.phashBlock = &child_hash;
+    child.pprev = &conflicting;
+    child.nHeight = 101;
+    child.BuildSkip();
+    BOOST_CHECK(!chainman.CheckPQLegacyUpgradeBranch(child));
+    child.pprev = chainman.ActiveTip();
+    child.BuildSkip();
+    BOOST_CHECK(chainman.CheckPQLegacyUpgradeBranch(child));
+
+    std::string error;
+    // The durable journal protects A-1 even before runtime pin promotion.
+    BOOST_CHECK(!chainman.CheckPQActivationHandoffDisconnect(*chainman.ActiveTip(), error));
+    BOOST_CHECK(chainman.CheckPQActivationHandoffDisconnect(child, error));
+    CCoinsViewCache view{&chainstate.CoinsTip()};
+    const uint256 original_best{view.GetBestBlock()};
+    BlockValidationState state;
+    BOOST_CHECK(!chainstate.ConnectBlock(CBlock{}, state, &conflicting, view, true));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK(view.GetBestBlock() == original_best);
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_legacy_upgrade_bounds_only_reset_geth_bootstrap,
+                        PQLegacyUpgradeRuntimeSetup)
+{
+    auto& chainman{*m_node.chainman};
+    LOCK(::cs_main);
+    consensus.nNEVMStartBlock = 1;
+    consensus.DIP0003Height = 90;
+    consensus.nPQActivationHeight = 91;
+    const auto record{Record()};
+    chainman.SetPQLegacyUpgrade(record, true);
+    std::string error;
+    BOOST_CHECK(!chainman.InitializeNEVMStartupPair(
+        100, chainman.ActiveTip()->GetBlockHash(), error));
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(!chainman.InitializeNEVMStartupPair(90, uint256{199}, error));
+    BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMStartupPair(
+        90, record.predecessor_hash, error), error);
+    BOOST_CHECK(!chainman.HasPendingNEVMStartupPair());
+    auto ready{record};
+    ready.phase = node::PQLegacyUpgradePhase::REPLAY_READY;
+    chainman.SetPQLegacyUpgrade(ready, /*rebuild_this_startup=*/false);
+    // A later ordinary restart may already have valid PQ blocks above A-1.
+    BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMStartupPair(
+        100, chainman.ActiveTip()->GetBlockHash(), error), error);
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_legacy_upgrade_replay_ready_requires_same_durable_record,
+                        PQLegacyUpgradeRuntimeSetup)
+{
+    auto& chainman{*m_node.chainman};
+    LOCK(::cs_main);
+    auto record{Record()};
+    const DBParams params{.path = chainman.m_options.datadir / "pq-upgrade",
+                          .cache_bytes = 1 << 20,
+                          .options = chainman.m_options.block_tree_db};
+    {
+        node::PQLegacyUpgradeJournal journal{params};
+        BOOST_REQUIRE(journal.CaptureLegacyUpgrade(record));
+    }
+    chainman.SetPQLegacyUpgrade(record, true);
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(chainman.MarkPQLegacyReplayReady(error), error);
+    record.phase = node::PQLegacyUpgradePhase::REPLAY_READY;
+    {
+        node::PQLegacyUpgradeJournal journal{params};
+        const auto persisted{journal.ReadUpgrade()};
+        BOOST_REQUIRE(persisted.has_value());
+        BOOST_CHECK(*persisted == record);
+    }
+    auto wrong{record};
+    wrong.predecessor_hash = uint256{66};
+    wrong.legacy_tip_hash = wrong.predecessor_hash;
+    BOOST_REQUIRE(wrong.IsValid());
+    chainman.SetPQLegacyUpgrade(wrong, true);
+    BOOST_CHECK(!chainman.MarkPQLegacyReplayReady(error));
+    {
+        node::PQLegacyUpgradeJournal journal{params};
+        const auto persisted{journal.ReadUpgrade()};
+        BOOST_REQUIRE(persisted.has_value());
+        BOOST_CHECK(*persisted == record);
+    }
+    chainman.SetPQLegacyUpgrade(record, false);
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_legacy_upgrade_unknown_geth_pair_fails_when_anchor_loads,
+                        PQLegacyUpgradeRuntimeSetup)
+{
+    auto& chainman{*m_node.chainman};
+    struct RestoreReindex {
+        const bool previous{node::fReindex.load()};
+        ~RestoreReindex() { node::fReindex = previous; }
+    } restore_reindex;
+    {
+        LOCK(::cs_main);
+        consensus.nNEVMStartBlock = 1;
+        consensus.nPQActivationHeight = 102;
+        CBlockHeader anchor{chainman.GetParams().GenesisBlock().GetBlockHeader()};
+        anchor.hashPrevBlock = chainman.ActiveTip()->GetBlockHash();
+        anchor.nTime = chainman.ActiveTip()->nTime + 1;
+        const uint256 anchor_hash{anchor.GetHash()};
+        const node::PQLegacyUpgradeRecord record{
+            node::PQLegacyUpgradeRecord::VERSION,
+            consensus.hashGenesisBlock, 102, 101, anchor_hash, anchor_hash,
+            node::PQLegacyUpgradePhase::REBUILD_REQUIRED};
+        chainman.SetPQLegacyUpgrade(record, true);
+        node::fReindex = true;
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMStartupPair(
+            101, uint256{199}, error), error);
+        BOOST_REQUIRE(chainman.HasPendingNEVMStartupPair());
+        BOOST_REQUIRE_MESSAGE(chainman.MaybeCompleteNEVMStartupPair(error), error);
+        auto* loaded_anchor{chainman.m_blockman.AddToBlockIndex(
+            anchor, chainman.m_best_header)};
+        BOOST_REQUIRE(loaded_anchor != nullptr);
+        BOOST_REQUIRE_EQUAL(loaded_anchor->nHeight, 101);
+        BOOST_CHECK(!chainman.MaybeCompleteNEVMStartupPair(error));
+        BOOST_CHECK(error.find("legacy activation predecessor") != std::string::npos);
+    }
+    // The ordinary import retry must surface the same error even though
+    // Core remains below the reported height and its hash was never indexed.
+    BlockValidationState state;
+    BOOST_CHECK(!chainman.RetryNEVMStartupPair(state));
+    BOOST_CHECK(state.IsError());
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_legacy_upgrade_resets_only_post_activation_validity,
+                        PQLegacyUpgradeRuntimeSetup)
+{
+    auto& chainman{*m_node.chainman};
+    LOCK(::cs_main);
+    consensus.DIP0003Height = 90;
+    consensus.nPQActivationHeight = 91;
+    const auto record{Record()};
+    chainman.SetPQLegacyUpgrade(record, true);
+    const auto* anchor{chainman.ActiveChain()[90]};
+    const auto anchor_status{anchor->nStatus};
+    const auto anchor_undo{anchor->nUndoPos};
+    auto* child{chainman.ActiveChain()[91]};
+    child->nStatus |= BLOCK_FAILED_VALID | BLOCK_CONFLICT_CHAINLOCK |
+                      BLOCK_GOVERNANCE_VALIDATED | BLOCK_PQ_BTCC_INDEX_VALIDATED |
+                      BLOCK_PQ_RECEIPT_INDEX_VALIDATED | BLOCK_HAVE_UNDO;
+    child->nUndoPos = 123;
+    BOOST_REQUIRE(chainman.ResetPQLegacyUpgradeSuffix());
+    BOOST_CHECK_EQUAL(anchor->nStatus, anchor_status);
+    BOOST_CHECK_EQUAL(anchor->nUndoPos, anchor_undo);
+    BOOST_CHECK_EQUAL(child->nStatus & BLOCK_VALID_MASK, BLOCK_VALID_TRANSACTIONS);
+    BOOST_CHECK_EQUAL(child->nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK |
+        BLOCK_GOVERNANCE_VALIDATED | BLOCK_PQ_BTCC_INDEX_VALIDATED |
+        BLOCK_PQ_RECEIPT_INDEX_VALIDATED | BLOCK_HAVE_UNDO), 0U);
+    BOOST_CHECK_EQUAL(child->nUndoPos, 0U);
+    BOOST_CHECK(child->nStatus & BLOCK_HAVE_DATA);
+    BOOST_CHECK_EQUAL(chainman.ActiveTip()->nStatus & BLOCK_VALID_MASK,
+                      BLOCK_VALID_TRANSACTIONS);
+    BOOST_CHECK(chainman.ActiveChainstate().setBlockIndexCandidates.count(
+        chainman.ActiveTip()) != 0);
+}
+
 BOOST_FIXTURE_TEST_CASE(pq_reservation_read_failure_finishes_forward_tip,
                         TestChain100Setup)
 {

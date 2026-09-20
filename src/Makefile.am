@@ -287,6 +287,9 @@ SYSCOIN_CORE_H = \
   node/mini_miner.h \
   node/minisketchwrapper.h \
   node/pq_activation_handoff.h \
+  node/pq_legacy_database.h \
+  node/pq_legacy_migration.h \
+  node/pq_legacy_upgrade.h \
   node/peerman_args.h \
   node/psbt.h \
   node/transaction.h \
@@ -623,6 +626,9 @@ libsyscoin_node_a_SOURCES = \
   node/mini_miner.cpp \
   node/minisketchwrapper.cpp \
   node/peerman_args.cpp \
+  node/pq_legacy_database.cpp \
+  node/pq_legacy_migration.cpp \
+  node/pq_legacy_upgrade.cpp \
   node/psbt.cpp \
   node/transaction.cpp \
   node/interface_ui.cpp \
