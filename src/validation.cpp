@@ -8703,7 +8703,7 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
             // authentication keeps the public IBD latch active.
             const bool was_base_sync_complete{
                 m_chainman.IsBaseBlockSyncComplete()};
-            bool recovering_known_nevm_pair{false};
+            const CBlockIndex* recovering_nevm_pair{nullptr};
             if (this == &m_chainman.ActiveChainstate() &&
                 m_chainman.HasPendingNEVMStartupPair()) {
                 const auto pair{*m_chainman.m_nevm_startup_pair};
@@ -8723,7 +8723,7 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
                         return true;
                     }
                 } else {
-                    recovering_known_nevm_pair = true;
+                    recovering_nevm_pair = applied;
                     // Missing data may wait, but a newly known or conflicted
                     // applied pair must still fail closed before selection.
                     if (!m_chainman.CheckNEVMStartupConnect(*applied, startup_pair_error) ||
@@ -8825,10 +8825,14 @@ bool Chainstate::ActivateBestChainInternal(BlockValidationState& state,
                     }
                 }
                 // SYSCOIN END: Reselect only a different eligible candidate.
-                if (recovering_known_nevm_pair && blocks_connected) {
+                if (recovering_nevm_pair != nullptr && blocks_connected &&
+                    m_chain.Height() >= recovering_nevm_pair->nHeight) {
                     // Revisit the fresh-status gate even when the selected
                     // recovery prefix is now the tip, then resume fork choice
                     // in this call once reconciliation completes.
+                    // Below that endpoint retain Bitcoin's ordinary cached
+                    // target: selecting again after each block would rescan
+                    // the entire remaining recovery ancestry quadratically.
                     pindexMostWork = nullptr;
                 }
                 pindexNewTip = m_chain.Tip();
