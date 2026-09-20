@@ -1187,6 +1187,137 @@ static MuHash3072 FromInt(unsigned char i) {
     return MuHash3072(tmp);
 }
 
+static Num3072 Num3072FromLowWord(uint32_t low, bool high_ones = false)
+{
+    unsigned char bytes[Num3072::BYTE_SIZE];
+    for (auto& byte : bytes) byte = high_ones ? 0xff : 0;
+    for (int i = 0; i < 4; ++i) bytes[i] = static_cast<unsigned char>((low >> (8 * i)) & 0xff);
+    return Num3072{bytes};
+}
+
+static Num3072 SubtractNum3072(Num3072 lhs, Num3072 rhs)
+{
+    unsigned char lhs_bytes[Num3072::BYTE_SIZE];
+    unsigned char rhs_bytes[Num3072::BYTE_SIZE];
+    lhs.ToBytes(lhs_bytes);
+    rhs.ToBytes(rhs_bytes);
+    unsigned int borrow{0};
+    for (size_t i = 0; i < Num3072::BYTE_SIZE; ++i) {
+        const unsigned int difference = lhs_bytes[i] + 256U - rhs_bytes[i] - borrow;
+        lhs_bytes[i] = static_cast<unsigned char>(difference & 0xff);
+        borrow = difference < 256;
+    }
+    BOOST_REQUIRE_EQUAL(borrow, 0U);
+    return Num3072{lhs_bytes};
+}
+
+// Fermat exponentiation is independent of the production safegcd inversion.
+// It uses only the unchanged modular multiplication and squaring operations.
+static Num3072 ReferenceMuHashInverse(const Num3072& value)
+{
+    Num3072 result;
+    // The exponent is p - 2 = 2^3072 - 1103719. All bits above 31 are set.
+    constexpr uint32_t LOW_EXPONENT = 0xffffffffU - 1103718;
+    for (int bit = 3071; bit >= 0; --bit) {
+        result.Square();
+        if (bit >= 32 || ((LOW_EXPONENT >> bit) & 1U)) result.Multiply(value);
+    }
+    return result;
+}
+
+BOOST_AUTO_TEST_CASE(muhash_num3072_division)
+{
+    constexpr uint32_t LOW_MODULUS = 0xffffffffU - 1103716;
+    const Num3072 one;
+    const Num3072 modulus = Num3072FromLowWord(LOW_MODULUS, true);
+    const Num3072 maximum = Num3072FromLowWord(0xffffffffU, true);
+    const auto check_division = [&](Num3072 numerator, Num3072 denominator) {
+        Num3072 expected = numerator;
+        expected.Multiply(ReferenceMuHashInverse(denominator));
+        Num3072 result = numerator;
+        result.Divide(denominator);
+        BOOST_CHECK_EQUAL_COLLECTIONS(std::begin(result.limbs), std::end(result.limbs),
+                                      std::begin(expected.limbs), std::end(expected.limbs));
+        denominator.Multiply(one);
+        bool zero_denominator{true};
+        for (const auto limb : denominator.limbs) zero_denominator &= limb == 0;
+        if (!zero_denominator) {
+            result.Multiply(denominator);
+            numerator.Multiply(one);
+            BOOST_CHECK_EQUAL_COLLECTIONS(std::begin(result.limbs), std::end(result.limbs),
+                                          std::begin(numerator.limbs), std::end(numerator.limbs));
+        }
+    };
+
+    const std::vector<Num3072> boundaries{
+        Num3072FromLowWord(0), one, Num3072FromLowWord(2), Num3072FromLowWord(3),
+        Num3072FromLowWord(LOW_MODULUS - 1, true), modulus,
+        Num3072FromLowWord(LOW_MODULUS + 1, true), maximum};
+    for (size_t n = 0; n < boundaries.size(); ++n) {
+        for (size_t d = 0; d < boundaries.size(); ++d) {
+            BOOST_TEST_CONTEXT("boundary numerator " << n << ", denominator " << d) {
+                check_division(boundaries[n], boundaries[d]);
+            }
+        }
+    }
+
+    // Exercise shifts and carries across both supported limb widths, including
+    // long runs of zero bits and values close to the modulus.
+    for (const int bit : {1, 31, 32, 63, 64, 65, 127, 128, 129, 255, 256, 511, 512,
+                         1023, 1024, 1535, 1536, 2047, 2048, 3070, 3071}) {
+        BOOST_TEST_CONTEXT("power-of-two bit " << bit) {
+            unsigned char bytes[Num3072::BYTE_SIZE]{};
+            bytes[bit / 8] = 1U << (bit % 8);
+            const Num3072 power{bytes};
+            check_division(boundaries[4], power);
+            check_division(SubtractNum3072(power, one), SubtractNum3072(modulus, power));
+            check_division(power, maximum);
+        }
+    }
+
+    FastRandomContext rng{true};
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        BOOST_TEST_CONTEXT("deterministic random iteration " << iteration) {
+            unsigned char numerator_bytes[Num3072::BYTE_SIZE];
+            unsigned char denominator_bytes[Num3072::BYTE_SIZE];
+            for (size_t i = 0; i < Num3072::BYTE_SIZE; ++i) {
+                numerator_bytes[i] = rng.randbits(8);
+                denominator_bytes[i] = rng.randbits(8);
+            }
+            Num3072 numerator{numerator_bytes};
+            Num3072 denominator{denominator_bytes};
+            numerator.Multiply(one);
+            denominator.Multiply(one);
+            check_division(numerator, denominator);
+            // Uniform 3072-bit input almost never hits the small noncanonical
+            // interval, so sample it explicitly for both operands.
+            check_division(Num3072FromLowWord(LOW_MODULUS + rng.randrange(1103717), true),
+                           Num3072FromLowWord(LOW_MODULUS + rng.randrange(1103717), true));
+        }
+    }
+
+    // Independent known answers, computed with Python's arbitrary-precision
+    // pow(d, -1, 2**3072 - 1103717), then SHA256 of the 384-byte LE quotient.
+    const std::array<const char*, 3> quotient_hashes{
+        "ff6af13070927c2b25860c3527b84b120de8a48dddf4ab433cd5aeff50e6ea3d",
+        "41769960487563f2d4eac50dbb1cba164661c33b3a8fa68c8c39f8cf7bab1313",
+        "c91634c76d68defa85a5eff5fc2a87de97b46a03fe716014c3114bf00bbb4ff7"};
+    for (size_t k = 0; k < quotient_hashes.size(); ++k) {
+        unsigned char numerator_bytes[Num3072::BYTE_SIZE];
+        unsigned char denominator_bytes[Num3072::BYTE_SIZE];
+        for (size_t i = 0; i < Num3072::BYTE_SIZE; ++i) {
+            numerator_bytes[i] = (i * (37 + k * 10) + 11 + k * 7) % 256;
+            denominator_bytes[i] = (i * (53 + k * 6) + 19 + k * 11) % 256;
+        }
+        Num3072 result{numerator_bytes};
+        result.Divide(Num3072{denominator_bytes});
+        result.ToBytes(numerator_bytes);
+        unsigned char hash[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(numerator_bytes, sizeof(numerator_bytes)).Finalize(hash);
+        BOOST_CHECK_EQUAL(HexStr(hash), quotient_hashes[k]);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(muhash_tests)
 {
     uint256 out;

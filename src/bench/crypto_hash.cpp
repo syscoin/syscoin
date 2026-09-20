@@ -294,6 +294,21 @@ static void MuHashPrecompute(benchmark::Bench& bench)
     });
 }
 
+// SYSCOIN: State journals finalize after updates; insertion-only benchmarks
+// do not expose the modular-inversion cost paid by this usage.
+static void MuHashFinalize(benchmark::Bench& bench)
+{
+    FastRandomContext rng(true);
+    MuHash3072 acc{rng.randbytes(32)};
+    acc.Remove(rng.randbytes(32));
+    uint256 hash;
+    bench.run([&] {
+        MuHash3072 copy{acc};
+        copy.Finalize(hash);
+        ankerl::nanobench::doNotOptimizeAway(hash);
+    });
+}
+
 BENCHMARK(BenchRIPEMD160, benchmark::PriorityLevel::HIGH);
 BENCHMARK(SHA1, benchmark::PriorityLevel::HIGH);
 BENCHMARK(SHA256_STANDARD, benchmark::PriorityLevel::HIGH);
@@ -323,3 +338,4 @@ BENCHMARK(MuHash, benchmark::PriorityLevel::HIGH);
 BENCHMARK(MuHashMul, benchmark::PriorityLevel::HIGH);
 BENCHMARK(MuHashDiv, benchmark::PriorityLevel::HIGH);
 BENCHMARK(MuHashPrecompute, benchmark::PriorityLevel::HIGH);
+BENCHMARK(MuHashFinalize, benchmark::PriorityLevel::HIGH);

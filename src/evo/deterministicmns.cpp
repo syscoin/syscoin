@@ -2835,12 +2835,12 @@ bool CDeterministicMNManager::ProcessBlock(const CBlock& block, const CBlockInde
             }
         }
 
-        const uint256 dmn_state_hash{newList.GetOrComputePQLegacyStateHash(
-            consensusParams.hashGenesisBlock)};
-
         if (fJustCheck) {
             return true;
         }
+
+        const uint256 dmn_state_hash{newList.GetOrComputePQLegacyStateHash(
+            consensusParams.hashGenesisBlock)};
 
         if (pq_registry != nullptr) {
             bool committed{false};
