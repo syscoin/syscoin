@@ -876,7 +876,7 @@ class SyscoinTestFramework(metaclass=SyscoinTestMetaClass):
             # SYSCOIN: Preserve fork-owned deterministic/PQ/NEVM sidecars in
             # the reusable cached chain.
             for entry in os.listdir(cache_path()):
-                if entry not in ['chainstate', 'blocks', 'indexes', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'evodb_dmn', 'evodb_dmn_aux_gc', 'evodb_dmn_inverse', 'evodb_dmn_pq_registry', 'evodb_dmn_pq_payment_probation', 'evodb_sb', 'nevmdata', 'nevmblobdata']:
+                if entry not in ['chainstate', 'blocks', 'indexes', 'pq-upgrade', 'nevmminttx', 'nevmtxroots', 'geth', 'dbblockindex', 'evodb_dmn', 'evodb_dmn_aux_gc', 'evodb_dmn_inverse', 'evodb_dmn_pq_registry', 'evodb_dmn_pq_payment_probation', 'evodb_sb', 'nevmdata', 'nevmblobdata']:
                     os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
