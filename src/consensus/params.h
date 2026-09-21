@@ -104,9 +104,16 @@ struct Params {
     // SYSCOIN: begin post-quantum migration and receipt policy.
     // First block that accepts only post-quantum provider authorization and
     // requires PQ-root-capable masternode payees. Legacy history below this
-    // height is replayed structurally and follows ordinary proof-of-work fork
-    // choice; this boundary is not a block or derived-state checkpoint.
+    // height is replayed structurally. The height alone is not a block or
+    // derived-state checkpoint; fresh replay may additionally be constrained
+    // by the optional release-authenticated legacy predecessor below.
     int nPQActivationHeight{std::numeric_limits<int>::max()};
+    // Optional release-authenticated A-1 block for fresh BLS-free replay.
+    // This local legacy-history trust anchor is deliberately excluded from
+    // the PQ finality schema: a later bootstrap release consumes the same
+    // certificates as the initially migrated network. Null keeps fresh
+    // public datadirs quarantined. Never inferred from a received certificate.
+    uint256 hashPQLegacyBootstrapBlock;
     // Preparation is the first height accepting key-registry transactions and
     // must precede epoch zero's registration cutoff.
     // The epoch and BTCC origins are schedule anchors.

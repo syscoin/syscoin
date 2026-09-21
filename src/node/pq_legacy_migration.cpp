@@ -18,6 +18,7 @@
 #include <node/blockstorage.h>
 #include <node/caches.h>
 #include <node/chainstate.h>
+#include <node/pq_activation_handoff.h>
 #include <node/pq_legacy_database.h>
 #include <node/pq_legacy_upgrade.h>
 #include <node/utxo_snapshot.h>
@@ -318,14 +319,40 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
         const auto& consensus{chainman.GetConsensus()};
         const fs::path& datadir{chainman.m_options.datadir};
         PQLegacyUpgradeJournal journal{InspectionParams(chainman, datadir / "pq-upgrade")};
+        if (!consensus.hashPQLegacyBootstrapBlock.IsNull()) {
+            if (Consensus::CheckPQActivationConfiguration(consensus) !=
+                    Consensus::PQActivationResult::VALID) {
+                return Fail(error, "The PQ legacy bootstrap checkpoint requires a valid activation height.");
+            }
+            // Inspect before a requested reindex can erase the block index.
+            // A later release may authenticate fresh history, never replace
+            // an already established, conflicting local handoff.
+            const fs::path index_path{datadir / "blocks" / "index"};
+            if (fs::exists(index_path)) {
+                BlockTreeDB block_db{InspectionParams(chainman, index_path)};
+                if (block_db.HasPQActivationHandoff()) {
+                    PQActivationHandoffRecord handoff;
+                    if (!block_db.ReadPQActivationHandoff(handoff) ||
+                        !handoff.IsValid(consensus.nPQActivationHeight) ||
+                        handoff.state == PQActivationHandoffState::FAILED ||
+                        (handoff.state == PQActivationHandoffState::PINNED &&
+                         handoff.predecessor_hash != consensus.hashPQLegacyBootstrapBlock)) {
+                        return Fail(error, "The saved PQ handoff conflicts with the release bootstrap "
+                                           "checkpoint; no chainstate was erased.");
+                    }
+                }
+            }
+        }
         if (auto record{journal.ReadUpgrade()}) {
             if (Consensus::CheckPQActivationConfiguration(consensus) !=
                     Consensus::PQActivationResult::VALID ||
                 record->genesis_hash != consensus.hashGenesisBlock ||
-                record->activation_height != consensus.nPQActivationHeight) {
+                record->activation_height != consensus.nPQActivationHeight ||
+                (!consensus.hashPQLegacyBootstrapBlock.IsNull() &&
+                 record->predecessor_hash != consensus.hashPQLegacyBootstrapBlock)) {
                 return Fail(error,
-                    "The saved PQ upgrade belongs to a different network or "
-                    "activation height; the datadir was not changed.");
+                    "The saved PQ upgrade disagrees with the network, activation "
+                    "height, or legacy bootstrap checkpoint; the datadir was not changed.");
             }
             if (record->phase == PQLegacyUpgradePhase::REBUILD_REQUIRED &&
                 !options.reindex && !options.reindex_chainstate) {
@@ -457,6 +484,11 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
         PQLegacyUpgradeRecord record;
         if (!InspectLegacyHistory(chainman, options, block_db, best, tip,
                                    record, error)) return false;
+        if (!consensus.hashPQLegacyBootstrapBlock.IsNull() &&
+            record.predecessor_hash != consensus.hashPQLegacyBootstrapBlock) {
+            return Fail(error, "The legacy predecessor conflicts with the release bootstrap "
+                               "checkpoint; no chainstate was erased.");
+        }
         if (!journal.CaptureLegacyUpgrade(record)) {
             return Fail(error, "Cannot persist authenticated legacy upgrade provenance.");
         }

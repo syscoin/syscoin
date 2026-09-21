@@ -10223,6 +10223,415 @@ BOOST_FIXTURE_TEST_CASE(persisted_reindex_marker_forces_clean_block_index, Chain
 }
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
+// SYSCOIN: Keep inexpensive regtest blocks, but run the actual public-network
+// manager gates. Merely changing a handoff field in a regtest manager would
+// miss IsPQParticipationAllowed's deliberate regtest bypass.
+class PublicPQBootstrapParams final : public CChainParams {
+public:
+    explicit PublicPQBootstrapParams(const CChainParams& source,
+                                     const uint256& predecessor)
+        : CChainParams{source}
+    {
+        m_chain_type = ChainType::MAIN;
+        consensus.DIP0003Height = 101;
+        consensus.nPQActivationHeight = 101;
+        consensus.hashPQLegacyBootstrapBlock = predecessor;
+    }
+
+    void AddSnapshot(const AssumeutxoData& data) { m_assumeutxo_data.push_back(data); }
+    void SetBootstrapHash(const uint256& hash) { consensus.hashPQLegacyBootstrapBlock = hash; }
+};
+
+struct PQPublicBootstrapRuntimeSetup : TestChain100Setup {
+    std::vector<std::shared_ptr<const CBlock>> blocks;
+    std::unique_ptr<PublicPQBootstrapParams> public_params;
+    std::unique_ptr<CTxMemPool> replay_mempool{
+        std::make_unique<CTxMemPool>(MemPoolOptionsForTest(m_node))};
+    std::unique_ptr<ChainstateManager> public_chainman;
+    const fs::path replay_path{m_path_root / "public-bootstrap"};
+    const int source_sync_mode{masternodeSync.GetAssetID()};
+
+    PQPublicBootstrapRuntimeSetup()
+    {
+        LOCK(::cs_main);
+        auto& source{*m_node.chainman};
+        for (int height{1}; height <= 100; ++height) {
+            CBlock block;
+            BOOST_REQUIRE(source.m_blockman.ReadBlockFromDisk(
+                block, *source.ActiveChain()[height]));
+            block.fChecked = false;
+            blocks.push_back(std::make_shared<const CBlock>(std::move(block)));
+        }
+        public_params = std::make_unique<PublicPQBootstrapParams>(
+            source.GetParams(), blocks.back()->GetHash());
+        BOOST_REQUIRE(Consensus::CheckPQActivationConfiguration(
+            public_params->GetConsensus()) == Consensus::PQActivationResult::VALID);
+    }
+
+    ~PQPublicBootstrapRuntimeSetup()
+    {
+        Close();
+        masternodeSync.SetSyncMode(source_sync_mode);
+    }
+
+    void Close()
+    {
+        // These process-global managers also observe this fixture's temporary
+        // block index. Restore their live owner before freeing its pointers.
+        SyncWithValidationInterfaceQueue();
+        if (public_chainman) {
+            LOCK(::cs_main);
+            deterministicMNManager->UpdatedBlockTip(m_node.chainman->ActiveTip());
+            governance->ObserveChainTip(m_node.chainman->ActiveTip());
+        }
+        public_chainman.reset();
+    }
+
+    ChainstateManager& Open(bool restart = false, bool reindex_chainstate = false)
+    {
+        Close();
+        // TestChain100Setup finished governance sync to mine its source
+        // history. The fresh/restarted public node has no live Sentry or
+        // governance sync yet and must use the ordinary historical lane.
+        masternodeSync.SetSyncMode(MASTERNODE_SYNC_BLOCKCHAIN);
+        fs::create_directories(replay_path / "blocks");
+        const ChainstateManager::Options options{
+            .chainparams = *public_params,
+            .datadir = replay_path,
+            .adjusted_time_callback = GetAdjustedTime,
+            .check_block_index = false,
+            .checkpoints_enabled = false,
+            .minimum_chain_work = arith_uint256{},
+            .assumed_valid_block = uint256{},
+            .notifications = *m_node.notifications,
+        };
+        public_chainman = std::make_unique<ChainstateManager>(
+            m_node.kernel->interrupt, options,
+            BlockManager::Options{.chainparams = *public_params,
+                .blocks_dir = replay_path / "blocks",
+                .notifications = *m_node.notifications});
+        auto& chainman{*public_chainman};
+        LOCK(::cs_main);
+        chainman.m_blockman.m_block_tree_db = std::make_unique<kernel::BlockTreeDB>(
+            DBParams{.path = replay_path / "blocks" / "index", .cache_bytes = 1U << 20});
+        auto& chainstate{chainman.InitializeChainstate(replay_mempool.get())};
+        chainman.m_total_coinsdb_cache = 1U << 20;
+        chainman.m_total_coinstip_cache = 8U << 20;
+        chainstate.InitCoinsDB(1U << 20, false, reindex_chainstate);
+        chainstate.InitCoinsCache(8U << 20);
+        if (restart) BOOST_REQUIRE(chainman.LoadBlockIndex());
+        bilingual_str error;
+        BOOST_REQUIRE_MESSAGE(chainman.PreparePQActivationHandoff(
+            reindex_chainstate, !restart || reindex_chainstate, error), error.original);
+        BOOST_CHECK(chainman.GetParams().GetChainType() == ChainType::MAIN);
+        BOOST_CHECK(!chainman.GetPQLegacyUpgrade());
+        BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+        BOOST_CHECK(!chainman.IsPQBlockProductionAllowed());
+        if (restart && !reindex_chainstate) {
+            BOOST_REQUIRE(chainstate.LoadChainTip());
+        } else {
+            BOOST_REQUIRE(chainstate.LoadGenesisBlock());
+        }
+        deterministicMNManager->UpdatedBlockTip(chainman.ActiveTip());
+        return chainman;
+    }
+
+    void ReplayThrough(int height)
+    {
+        auto& chainman{*public_chainman};
+        std::vector<CBlockHeader> headers;
+        for (const auto& block : blocks) headers.push_back(block->GetBlockHeader());
+        BlockValidationState header_state;
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(headers, true, header_state),
+                              header_state.ToString());
+        for (int next{WITH_LOCK(::cs_main, return chainman.ActiveHeight()) + 1};
+             next <= height; ++next) {
+            if (next == 0) continue;
+            BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlock(
+                blocks[next - 1], true, true, nullptr),
+                "Public checkpoint replay failed at height " << next);
+            BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), next);
+        }
+    }
+
+    void Persist()
+    {
+        auto& chainman{*public_chainman};
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.m_blockman.FlushChainstateBlockFile(chainman.ActiveHeight()));
+        BOOST_REQUIRE(chainman.m_blockman.WriteBlockIndexDB());
+        BOOST_REQUIRE(chainman.ActiveChainstate().CoinsTip().Flush());
+        BOOST_REQUIRE(chainman.ActiveChainstate().CoinsDB().Sync());
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_full_replay_unlocks_without_live_finality,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    auto& chainman{Open()};
+    BOOST_REQUIRE(!llmq::AreChainLocksEnabled());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    // Downloading data alone must not execute an unanchored branch while the
+    // configured predecessor header is still unknown.
+    (void)chainman.ProcessNewBlock(blocks.front(), true, true, nullptr);
+    BOOST_CHECK_LE(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), 0);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    ReplayThrough(99);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    BOOST_CHECK(!chainman.IsPQBlockProductionAllowed());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    BOOST_CHECK_EXCEPTION(
+        (node::BlockAssembler{chainman.ActiveChainstate(), replay_mempool.get()}.
+            CreateNewBlock(CScript{} << OP_TRUE)),
+        std::runtime_error, [](const std::runtime_error& error) {
+            return std::string{error.what()}.find("sync-only quarantine") != std::string::npos;
+        });
+    ReplayThrough(100);
+    BOOST_CHECK(chainman.IsPQParticipationAllowed());
+    BOOST_CHECK(chainman.IsPQBlockProductionAllowed());
+    BOOST_CHECK(!chainman.IsInitialBlockDownload());
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.ActiveChainstate().CoinsTip().GetBestBlock() == blocks.back()->GetHash());
+    node::PQActivationHandoffRecord record;
+    BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadPQActivationHandoff(record));
+    BOOST_CHECK(record.state == node::PQActivationHandoffState::PINNED);
+    BOOST_CHECK(record.predecessor_hash == blocks.back()->GetHash());
+    std::string error;
+    BOOST_CHECK(!chainman.CheckPQActivationHandoffDisconnect(*chainman.ActiveTip(), error));
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_unexecuted_views_cannot_unlock,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    auto& chainman{Open()};
+    ReplayThrough(99);
+    LOCK(::cs_main);
+    auto* const predecessor{chainman.ActiveTip()};
+    auto* const anchor{chainman.m_blockman.AddToBlockIndex(
+        blocks.back()->GetBlockHeader(), chainman.m_best_header)};
+    BOOST_REQUIRE(anchor != nullptr);
+    BOOST_CHECK(!anchor->IsValid(BLOCK_VALID_SCRIPTS));
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(chainman.FinalizePQActivationHandoff(anchor, error), error.original);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    // Even script-valid metadata for a directly connecting candidate is not
+    // publication of its coins and active tip.
+    const auto status{anchor->nStatus};
+    anchor->nStatus = (anchor->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_SCRIPTS;
+    BOOST_REQUIRE_MESSAGE(chainman.FinalizePQActivationHandoff(anchor, error), error.original);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    chainman.ActiveChainstate().m_chain.SetTip(*anchor);
+    BOOST_REQUIRE_MESSAGE(chainman.FinalizePQActivationHandoff(anchor, error), error.original);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    chainman.ActiveChainstate().CoinsTip().SetBestBlock(anchor->GetBlockHash());
+    anchor->nStatus |= BLOCK_ASSUMED_VALID;
+    BOOST_REQUIRE_MESSAGE(chainman.FinalizePQActivationHandoff(anchor, error), error.original);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    anchor->nStatus = status;
+    chainman.ActiveChainstate().CoinsTip().SetBestBlock(predecessor->GetBlockHash());
+    chainman.ActiveChainstate().m_chain.SetTip(*predecessor);
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_restart_and_reindex_keep_the_same_pin,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    Open();
+    ReplayThrough(100);
+    Persist();
+    auto& restarted{Open(/*restart=*/true)};
+    {
+        LOCK(::cs_main);
+        bilingual_str error;
+        BOOST_REQUIRE_MESSAGE(restarted.FinalizePQActivationHandoff(restarted.ActiveTip(), error),
+                              error.original);
+        BOOST_CHECK(restarted.IsPQParticipationAllowed());
+    }
+    auto& reindexed{Open(/*restart=*/true, /*reindex_chainstate=*/true)};
+    BOOST_CHECK(!reindexed.IsPQParticipationAllowed());
+    // All headers retain their previous validation status, but empty coins
+    // must still replay the blocks before the compiled anchor can promote it.
+    {
+        LOCK(::cs_main);
+        auto* const anchor{reindexed.m_blockman.LookupBlockIndex(blocks.back()->GetHash())};
+        BOOST_REQUIRE(anchor != nullptr);
+        bilingual_str error;
+        BOOST_REQUIRE_MESSAGE(reindexed.FinalizePQActivationHandoff(anchor, error), error.original);
+        BOOST_CHECK(!reindexed.IsPQParticipationAllowed());
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(reindexed.ActiveChainstate().ActivateBestChain(state), state.ToString());
+    BOOST_CHECK(reindexed.IsPQParticipationAllowed());
+    BOOST_CHECK(reindexed.IsPQBlockProductionAllowed());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return reindexed.ActiveTip()->GetBlockHash()) ==
+                blocks.back()->GetHash());
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_snapshot_cannot_replace_executed_replay,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    const fs::path snapshot_path{m_path_root / "bootstrap-snapshot.dat"};
+    UniValue snapshot;
+    {
+        AutoFile output{fsbridge::fopen(snapshot_path, "wb")};
+        snapshot = CreateUTXOSnapshot(m_node, m_node.chainman->ActiveChainstate(),
+                                      output, snapshot_path, snapshot_path);
+    }
+    public_params->AddSnapshot(AssumeutxoData{
+        .height = 100,
+        .hash_serialized = AssumeutxoHash{uint256S(snapshot["txoutset_hash"].get_str())},
+        .nChainTx = WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip()->nChainTx),
+        .blockhash = blocks.back()->GetHash(),
+    });
+    auto& chainman{Open()};
+    ReplayThrough(99);
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.m_blockman.AddToBlockIndex(
+            blocks.back()->GetBlockHeader(), chainman.m_best_header));
+    }
+    AutoFile input{fsbridge::fopen(snapshot_path, "rb")};
+    SnapshotMetadata metadata;
+    input >> metadata;
+    BOOST_REQUIRE(chainman.ActivateSnapshot(input, metadata, /*in_memory=*/true));
+    LOCK(::cs_main);
+    BOOST_REQUIRE(chainman.IsSnapshotActive());
+    BOOST_CHECK(!chainman.IsSnapshotValidated());
+    BOOST_CHECK(chainman.ActiveChainstate().CoinsTip().GetBestBlock() == blocks.back()->GetHash());
+    // The snapshot supplies matching UTXOs and even previously validated
+    // metadata, but cannot grant the public legacy-replay capability.
+    auto* const anchor{chainman.ActiveTip()};
+    anchor->nStatus = (anchor->nStatus & ~(BLOCK_VALID_MASK | BLOCK_ASSUMED_VALID)) |
+                     BLOCK_VALID_SCRIPTS;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(chainman.FinalizePQActivationHandoff(anchor, error), error.original);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    BOOST_CHECK(!chainman.IsPQBlockProductionAllowed());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_rejects_another_branch_and_migration_pin,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    auto& chainman{Open()};
+    ReplayThrough(99);
+    CBlock wrong{*blocks.back()};
+    ++wrong.nNonce;
+    while (!CheckProofOfWork(wrong.GetHash(), wrong.nBits, chainman.GetConsensus())) ++wrong.nNonce;
+    wrong.fChecked = false;
+    (void)chainman.ProcessNewBlock(std::make_shared<const CBlock>(wrong), true, true, nullptr);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), 99);
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+    LOCK(::cs_main);
+    chainman.SetPQLegacyUpgrade({node::PQLegacyUpgradeRecord::VERSION,
+        chainman.GetConsensus().hashGenesisBlock, 101, 100, wrong.GetHash(),
+        wrong.GetHash(), node::PQLegacyUpgradePhase::REBUILD_REQUIRED}, true);
+    bilingual_str error;
+    BOOST_CHECK(!chainman.PreparePQActivationHandoff(true, true, error));
+    BOOST_CHECK(!chainman.IsPQParticipationAllowed());
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_keeps_history_and_engine_readiness_gates,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    auto& chainman{Open()};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.PublishPQHistoryAuthState(PQHistoryAuthState::PENDING));
+    }
+    ReplayThrough(100);
+    BOOST_CHECK(chainman.IsPQParticipationAllowed());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    {
+        LOCK(::cs_main);
+        // An ahead engine marker is a separate outstanding obligation; the
+        // compiled legacy anchor supplies no evidence about that future pair.
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(chainman.InitializeNEVMStartupPair(1, uint256{123}, error), error);
+        BOOST_REQUIRE(chainman.PublishPQHistoryAuthState(PQHistoryAuthState::READY));
+    }
+    BOOST_CHECK(chainman.HasPendingNEVMStartupPair());
+    BOOST_CHECK(chainman.IsInitialBlockDownload());
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_existing_unanchored_prefix_requires_reindex,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    // An older BLS-free replay release had no compiled checkpoint. Its
+    // partially executed prefix cannot acquire authority just by upgrading.
+    public_params->SetBootstrapHash({});
+    auto& previous{Open()};
+    CBlock alternate{*blocks.front()};
+    ++alternate.nNonce;
+    while (!CheckProofOfWork(alternate.GetHash(), alternate.nBits,
+                            previous.GetConsensus())) ++alternate.nNonce;
+    alternate.fChecked = false;
+    BOOST_REQUIRE(previous.ProcessNewBlock(
+        std::make_shared<const CBlock>(alternate), true, true, nullptr));
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return previous.ActiveHeight()), 1);
+    BOOST_CHECK(!previous.IsPQParticipationAllowed());
+    Persist();
+
+    public_params->SetBootstrapHash(blocks.back()->GetHash());
+    auto& upgraded{Open(/*restart=*/true)};
+    LOCK(::cs_main);
+    BOOST_REQUIRE(upgraded.ActiveTip()->GetBlockHash() == alternate.GetHash());
+    BOOST_CHECK(upgraded.m_blockman.LookupBlockIndex(blocks.back()->GetHash()) == nullptr);
+    bilingual_str error;
+    BOOST_CHECK(!upgraded.FinalizePQActivationHandoff(upgraded.ActiveTip(), error));
+    BOOST_CHECK(error.original.find("reindex") != std::string::npos);
+    BOOST_CHECK(!upgraded.IsPQParticipationAllowed());
+    BOOST_CHECK(!upgraded.IsPQBlockProductionAllowed());
+    BOOST_CHECK(upgraded.ActiveChainstate().CoinsDB().GetBestBlock() == alternate.GetHash());
+    node::PQActivationHandoffRecord retained;
+    BOOST_REQUIRE(upgraded.m_blockman.m_block_tree_db->ReadPQActivationHandoff(retained));
+    BOOST_CHECK(retained.state == node::PQActivationHandoffState::HISTORICAL_REPLAY);
+    BOOST_CHECK(retained.predecessor_hash.IsNull());
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_public_bootstrap_cached_post_activation_state_requires_replay,
+                       PQPublicBootstrapRuntimeSetup)
+{
+    // The source fixture really validates this block under its legacy rules.
+    // Model an older reconstructed datadir retaining that cached decision at A.
+    const CBlock legacy_child{CreateAndProcessBlock({},
+        CScript{} << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG)};
+    public_params->SetBootstrapHash({});
+    auto& previous{Open()};
+    ReplayThrough(100);
+    {
+        LOCK(::cs_main);
+        auto* const child{previous.m_blockman.AddToBlockIndex(
+            legacy_child.GetBlockHeader(), previous.m_best_header)};
+        BOOST_REQUIRE(child != nullptr);
+        const auto position{previous.m_blockman.SaveBlockToDisk(legacy_child, 101, nullptr)};
+        BOOST_REQUIRE(!position.IsNull());
+        previous.ReceivedBlockTransactions(legacy_child, child, position);
+        BOOST_REQUIRE(child->RaiseValidity(BLOCK_VALID_SCRIPTS));
+        BOOST_CHECK(!(child->nStatus & BLOCK_PQ_BTCC_INDEX_VALIDATED));
+        AddCoins(previous.ActiveChainstate().CoinsTip(), *legacy_child.vtx.front(), 101);
+        previous.ActiveChainstate().CoinsTip().SetBestBlock(child->GetBlockHash());
+        previous.ActiveChainstate().m_chain.SetTip(*child);
+    }
+    Persist();
+
+    public_params->SetBootstrapHash(blocks.back()->GetHash());
+    auto& upgraded{Open(/*restart=*/true)};
+    LOCK(::cs_main);
+    BOOST_REQUIRE_EQUAL(upgraded.ActiveHeight(), 101);
+    BOOST_REQUIRE(upgraded.ActiveTip()->GetBlockHash() == legacy_child.GetHash());
+    BOOST_REQUIRE(upgraded.CheckPQLegacyUpgradeBranch(*upgraded.ActiveTip()));
+    bilingual_str error;
+    BOOST_CHECK(!upgraded.FinalizePQActivationHandoff(upgraded.ActiveTip(), error));
+    BOOST_CHECK(error.original.find("reindex-chainstate") != std::string::npos);
+    BOOST_CHECK(error.original.find("assumevalid=0") != std::string::npos);
+    BOOST_CHECK(!upgraded.IsPQParticipationAllowed());
+    node::PQActivationHandoffRecord retained;
+    BOOST_REQUIRE(upgraded.m_blockman.m_block_tree_db->ReadPQActivationHandoff(retained));
+    BOOST_CHECK(retained.state == node::PQActivationHandoffState::HISTORICAL_REPLAY);
+    BOOST_CHECK(retained.predecessor_hash.IsNull());
+}
+
 // SYSCOIN: Exercise migration provenance through the real manager policy;
 // the existing regtest chain supplies indexed, script-valid legacy ancestry.
 struct PQLegacyUpgradeRuntimeSetup : TestChain100Setup {

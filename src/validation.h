@@ -1648,7 +1648,7 @@ public:
         AssertLockHeld(::cs_main);
         return m_pq_legacy_rebuild;
     }
-    /** Restrict replay and later forks to the legacy-validated predecessor. */
+    /** Restrict replay and later forks to the captured or release-authenticated predecessor. */
     bool CheckPQLegacyUpgradeBranch(const CBlockIndex& candidate) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Finish the paired reset before any import can publish rebuilt coins. */

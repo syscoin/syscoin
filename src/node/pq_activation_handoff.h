@@ -86,6 +86,9 @@ struct PQActivationHandoffTip {
     uint256 active_predecessor_hash;
     bool predecessor_fully_validated{false};
     bool activation_fully_validated{false};
+    // Caller attests to full active-chain replay in a non-assumed chainstate;
+    // a matching header or independently loaded block index is insufficient.
+    bool bootstrap_replay_verified{false};
 };
 
 inline bool IsPQActivationHandoffActiveView(
@@ -114,7 +117,22 @@ inline PQActivationHandoffResolution PreparePQActivationHandoff(
         return {PQActivationRuntimeState::FAILED, std::nullopt};
     }
 
+    const bool release_bootstrap{!params.hashPQLegacyBootstrapBlock.IsNull()};
+    if (release_bootstrap && persisted &&
+        (!persisted->IsValid(params.nPQActivationHeight) ||
+         persisted->state == PQActivationHandoffState::FAILED ||
+         (persisted->state == PQActivationHandoffState::PINNED &&
+          persisted->predecessor_hash != params.hashPQLegacyBootstrapBlock))) {
+        // A release checkpoint must not erase evidence of a conflicting local
+        // handoff, including when the caller requests a destructive rebuild.
+        return {PQActivationRuntimeState::FAILED, std::nullopt};
+    }
     if (force_historical_replay || empty_chainstate) {
+        if (release_bootstrap && persisted) {
+            // Retain an authenticated pin durably, but require replay to
+            // re-establish readiness before allowing participation again.
+            return {PQActivationRuntimeState::HISTORICAL_REPLAY, std::nullopt};
+        }
         return {
             PQActivationRuntimeState::HISTORICAL_REPLAY,
             PQActivationHandoffRecord{
@@ -149,7 +167,6 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
 {
     if (runtime_state == PQActivationRuntimeState::BYPASS ||
         runtime_state == PQActivationRuntimeState::SYNC_ONLY ||
-        runtime_state == PQActivationRuntimeState::HISTORICAL_REPLAY ||
         runtime_state == PQActivationRuntimeState::FAILED ||
         runtime_state == PQActivationRuntimeState::PINNED) {
         return {runtime_state, std::nullopt};
@@ -165,6 +182,40 @@ inline PQActivationHandoffResolution FinalizePQActivationHandoff(
         tip.predecessor_fully_validated &&
         !tip.predecessor_hash.IsNull() &&
         tip.active_predecessor_hash == tip.predecessor_hash};
+    if (!params.hashPQLegacyBootstrapBlock.IsNull()) {
+        if (persisted &&
+            (!persisted->IsValid(params.nPQActivationHeight) ||
+             persisted->state == PQActivationHandoffState::FAILED ||
+             (persisted->state == PQActivationHandoffState::PINNED &&
+              persisted->predecessor_hash != params.hashPQLegacyBootstrapBlock))) {
+            return {PQActivationRuntimeState::FAILED, std::nullopt};
+        }
+        if (runtime_state != PQActivationRuntimeState::HISTORICAL_REPLAY &&
+            runtime_state != PQActivationRuntimeState::DEFERRED_HANDOFF) {
+            return {PQActivationRuntimeState::FAILED, std::nullopt};
+        }
+        if (!usable_predecessor || !tip.bootstrap_replay_verified ||
+            (tip.height >= params.nPQActivationHeight &&
+             !tip.activation_fully_validated)) {
+            return {runtime_state, std::nullopt};
+        }
+        if (tip.predecessor_hash != params.hashPQLegacyBootstrapBlock) {
+            return {PQActivationRuntimeState::FAILED, std::nullopt};
+        }
+        if (persisted && persisted->state == PQActivationHandoffState::PINNED) {
+            return {PQActivationRuntimeState::PINNED, std::nullopt};
+        }
+        return {
+            PQActivationRuntimeState::PINNED,
+            PQActivationHandoffRecord{
+                PQActivationHandoffRecord::VERSION,
+                PQActivationHandoffState::PINNED,
+                params.nPQActivationHeight,
+                params.hashPQLegacyBootstrapBlock}};
+    }
+    if (runtime_state == PQActivationRuntimeState::HISTORICAL_REPLAY) {
+        return {runtime_state, std::nullopt};
+    }
     if (runtime_state != PQActivationRuntimeState::DEFERRED_HANDOFF) {
         return {PQActivationRuntimeState::FAILED, std::nullopt};
     }

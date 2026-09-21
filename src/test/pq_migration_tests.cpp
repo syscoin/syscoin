@@ -436,4 +436,217 @@ BOOST_AUTO_TEST_CASE(unassigned_public_is_sync_only_and_regtest_bypasses)
                 node::PQActivationHandoffState::HISTORICAL_REPLAY);
 }
 
+BOOST_AUTO_TEST_CASE(release_bootstrap_requires_assigned_valid_activation)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.hashPQLegacyBootstrapBlock = uint256::ONEV;
+    for (const int height : {std::numeric_limits<int>::max(), -1, 0, 4}) {
+        params.nPQActivationHeight = height;
+        BOOST_CHECK(Consensus::CheckPQActivationConfiguration(params) ==
+                    Consensus::PQActivationResult::INVALID_CONFIGURATION);
+        const auto prepared{node::PreparePQActivationHandoff(
+            params, /*public_network=*/true,
+            /*force_historical_replay=*/true,
+            /*empty_chainstate=*/true, std::nullopt)};
+        BOOST_CHECK(prepared.state == node::PQActivationRuntimeState::FAILED);
+        BOOST_CHECK(!prepared.record_to_write);
+    }
+    params.nPQActivationHeight = 9;
+    BOOST_CHECK(Consensus::CheckPQActivationConfiguration(params) ==
+                Consensus::PQActivationResult::VALID);
+}
+
+BOOST_AUTO_TEST_CASE(release_bootstrap_requires_complete_active_replay)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    params.hashPQLegacyBootstrapBlock = uint256::ONEV;
+    const auto prepared{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/false,
+        /*empty_chainstate=*/true, std::nullopt)};
+    BOOST_REQUIRE(prepared.record_to_write);
+    BOOST_CHECK(prepared.state == node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(prepared.record_to_write->predecessor_hash.IsNull());
+
+    const node::PQActivationHandoffTip verified{
+        /*height=*/8, uint256::ONEV, uint256::ONEV,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/false,
+        /*bootstrap_replay_verified=*/true};
+    for (int missing_evidence = 0; missing_evidence < 5; ++missing_evidence) {
+        auto tip{verified};
+        switch (missing_evidence) {
+        case 0: tip.height = 7; break;
+        case 1: tip.predecessor_fully_validated = false; break;
+        case 2: tip.active_predecessor_hash = uint256::TWOV; break;
+        case 3: tip.predecessor_hash.SetNull(); break;
+        case 4: tip.bootstrap_replay_verified = false; break;
+        }
+        const auto resolution{node::FinalizePQActivationHandoff(
+            params, prepared.state, prepared.record_to_write, tip)};
+        BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+        BOOST_CHECK(!resolution.record_to_write);
+    }
+
+    // No certificate, live quorum or activation block is required to
+    // authenticate the completed legacy replay against a release checkpoint.
+    const auto resolution{node::FinalizePQActivationHandoff(
+        params, prepared.state, prepared.record_to_write, verified)};
+    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::PINNED);
+    BOOST_REQUIRE(resolution.record_to_write);
+    BOOST_CHECK(resolution.record_to_write->state == node::PQActivationHandoffState::PINNED);
+    BOOST_CHECK(resolution.record_to_write->IsValid(params.nPQActivationHeight));
+    BOOST_CHECK(resolution.record_to_write->predecessor_hash == params.hashPQLegacyBootstrapBlock);
+}
+
+BOOST_AUTO_TEST_CASE(later_release_can_authenticate_existing_historical_replay)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    const node::PQActivationHandoffRecord historical{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::HISTORICAL_REPLAY, 9, {}};
+    node::PQActivationHandoffTip tip{
+        /*height=*/10, uint256::ONEV, uint256::ONEV,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/true,
+        /*bootstrap_replay_verified=*/true};
+    auto resolution{node::FinalizePQActivationHandoff(
+        params, node::PQActivationRuntimeState::HISTORICAL_REPLAY, historical, tip)};
+    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!resolution.record_to_write);
+
+    params.hashPQLegacyBootstrapBlock = uint256::ONEV;
+    const auto restarted{node::PreparePQActivationHandoff(
+        params, /*public_network=*/true,
+        /*force_historical_replay=*/false,
+        /*empty_chainstate=*/false, historical)};
+    BOOST_CHECK(restarted.state == node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!restarted.record_to_write);
+    tip.activation_fully_validated = false;
+    resolution = node::FinalizePQActivationHandoff(params, restarted.state, historical, tip);
+    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::HISTORICAL_REPLAY);
+    BOOST_CHECK(!resolution.record_to_write);
+
+    tip.activation_fully_validated = true;
+    resolution = node::FinalizePQActivationHandoff(params, restarted.state, historical, tip);
+    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::PINNED);
+    BOOST_REQUIRE(resolution.record_to_write);
+    BOOST_CHECK(resolution.record_to_write->predecessor_hash == uint256::ONEV);
+}
+
+BOOST_AUTO_TEST_CASE(release_bootstrap_rejects_wrong_branch_without_rewriting_authority)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    params.hashPQLegacyBootstrapBlock = uint256::ONEV;
+    const node::PQActivationHandoffRecord historical{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::HISTORICAL_REPLAY, 9, {}};
+    node::PQActivationHandoffTip tip{
+        /*height=*/8, uint256::TWOV, uint256::TWOV,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/false,
+        /*bootstrap_replay_verified=*/true};
+    auto resolution{node::FinalizePQActivationHandoff(
+        params, node::PQActivationRuntimeState::HISTORICAL_REPLAY, historical, tip)};
+    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::FAILED);
+    BOOST_CHECK(!resolution.record_to_write);
+
+    // A rejected candidate must not poison the durable journal. Restarting
+    // with the correct fully replayed branch can still authenticate it.
+    tip.predecessor_hash = tip.active_predecessor_hash = uint256::ONEV;
+    resolution = node::FinalizePQActivationHandoff(
+        params, node::PQActivationRuntimeState::HISTORICAL_REPLAY, historical, tip);
+    BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::PINNED);
+    BOOST_REQUIRE(resolution.record_to_write);
+    BOOST_CHECK(resolution.record_to_write->predecessor_hash == uint256::ONEV);
+}
+
+BOOST_AUTO_TEST_CASE(release_bootstrap_preserves_corrupt_failed_or_conflicting_records)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    params.hashPQLegacyBootstrapBlock = uint256::ONEV;
+    const node::PQActivationHandoffTip tip{
+        /*height=*/8, uint256::ONEV, uint256::ONEV,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/false,
+        /*bootstrap_replay_verified=*/true};
+    for (const auto& record : {
+             node::PQActivationHandoffRecord{2, node::PQActivationHandoffState::PINNED, 9, uint256::ONEV},
+             node::PQActivationHandoffRecord{1, node::PQActivationHandoffState::PINNED, 10, uint256::ONEV},
+             node::PQActivationHandoffRecord{1, node::PQActivationHandoffState::PINNED, 9, uint256::TWOV},
+             node::PQActivationHandoffRecord{1, node::PQActivationHandoffState::PINNED, 9, {}},
+             node::PQActivationHandoffRecord{1, node::PQActivationHandoffState::FAILED, 9, uint256::ONEV},
+             node::PQActivationHandoffRecord{1, node::PQActivationHandoffState::HISTORICAL_REPLAY, 9, uint256::ONEV}}) {
+        for (const bool force_replay : {false, true}) {
+            for (const bool empty_chainstate : {false, true}) {
+                const auto prepared{node::PreparePQActivationHandoff(
+                    params, /*public_network=*/true,
+                    force_replay, empty_chainstate, record)};
+                BOOST_CHECK(prepared.state == node::PQActivationRuntimeState::FAILED);
+                BOOST_CHECK(!prepared.record_to_write);
+            }
+        }
+        for (const auto runtime : {node::PQActivationRuntimeState::HISTORICAL_REPLAY,
+                                   node::PQActivationRuntimeState::DEFERRED_HANDOFF}) {
+            const auto resolution{node::FinalizePQActivationHandoff(params, runtime, record, tip)};
+            BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::FAILED);
+            BOOST_CHECK(!resolution.record_to_write);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(release_bootstrap_restart_and_reindex_reestablish_readiness)
+{
+    Consensus::Params params;
+    params.DIP0003Height = 5;
+    params.nPQActivationHeight = 9;
+    params.hashPQLegacyBootstrapBlock = uint256::ONEV;
+    const node::PQActivationHandoffRecord pinned{
+        node::PQActivationHandoffRecord::VERSION,
+        node::PQActivationHandoffState::PINNED, 9, uint256::ONEV};
+    node::PQActivationHandoffTip tip{
+        /*height=*/9, uint256::ONEV, uint256::ONEV,
+        /*predecessor_fully_validated=*/true,
+        /*activation_fully_validated=*/true,
+        /*bootstrap_replay_verified=*/true};
+    for (const bool force_replay : {false, true}) {
+        for (const bool empty_chainstate : {false, true}) {
+            const auto prepared{node::PreparePQActivationHandoff(
+                params, /*public_network=*/true,
+                force_replay, empty_chainstate, pinned)};
+            BOOST_CHECK(prepared.state == (force_replay || empty_chainstate
+                ? node::PQActivationRuntimeState::HISTORICAL_REPLAY
+                : node::PQActivationRuntimeState::DEFERRED_HANDOFF));
+            BOOST_CHECK(!prepared.record_to_write);
+            auto incomplete{tip};
+            incomplete.bootstrap_replay_verified = false;
+            auto resolution{node::FinalizePQActivationHandoff(
+                params, prepared.state, pinned, incomplete)};
+            BOOST_CHECK(resolution.state == prepared.state);
+            BOOST_CHECK(!resolution.record_to_write);
+            resolution = node::FinalizePQActivationHandoff(params, prepared.state, pinned, tip);
+            BOOST_CHECK(resolution.state == node::PQActivationRuntimeState::PINNED);
+            BOOST_CHECK(!resolution.record_to_write);
+        }
+    }
+    BOOST_CHECK(node::DisconnectCrossesPQActivationHandoff(
+        params, node::PQActivationRuntimeState::PINNED, pinned, 8, uint256::ONEV));
+    // Once durable, the authenticated pin remains consumable by a release
+    // without the optional anchor; it does not need new certificate rules.
+    params.hashPQLegacyBootstrapBlock.SetNull();
+    const auto restored{node::FinalizePQActivationHandoff(
+        params, node::PQActivationRuntimeState::DEFERRED_HANDOFF, pinned, tip)};
+    BOOST_CHECK(restored.state == node::PQActivationRuntimeState::PINNED);
+    BOOST_CHECK(!restored.record_to_write);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -17,6 +17,7 @@
 #include <nevm/sha3.h>
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
+#include <node/pq_activation_handoff.h>
 #include <node/pq_legacy_upgrade.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -239,28 +240,35 @@ struct LegacyMigrationSetup : ChainTestingSetup {
                                            m_cache_sizes, error);
     }
 
-    void CheckUncapturedAndUnchanged()
+    void CheckCoinsUnchanged()
     {
-        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
-        BOOST_CHECK(!journal.ReadUpgrade());
-        BOOST_CHECK(!journal.HasBLSFreeHistory());
         CDBWrapper coins{DB("chainstate")};
         uint256 best;
         BOOST_REQUIRE(coins.Read(uint8_t{'B'}, best));
         BOOST_CHECK(best == hashes.back());
     }
 
-    void CheckRejectedWithoutReset()
+    void CheckUncapturedAndUnchanged()
     {
-        node::ChainstateLoadOptions options;
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_CHECK(!journal.ReadUpgrade());
+        BOOST_CHECK(!journal.HasBLSFreeHistory());
+        CheckCoinsUnchanged();
+    }
+
+    bilingual_str CheckRejectedWithoutReset(node::ChainstateLoadOptions options = {})
+    {
+        const auto original_options{options};
+        const bool original_geth{fReindexGeth};
         bilingual_str error;
         BOOST_CHECK(!Plan(options, error));
         BOOST_CHECK(!error.empty());
-        BOOST_CHECK(!options.reindex);
-        BOOST_CHECK(!options.reindex_chainstate);
-        BOOST_CHECK(!options.fReindexGeth);
-        BOOST_CHECK(!fReindexGeth);
+        BOOST_CHECK_EQUAL(options.reindex, original_options.reindex);
+        BOOST_CHECK_EQUAL(options.reindex_chainstate, original_options.reindex_chainstate);
+        BOOST_CHECK_EQUAL(options.fReindexGeth, original_options.fReindexGeth);
+        BOOST_CHECK_EQUAL(fReindexGeth.load(), original_geth);
         CheckUncapturedAndUnchanged();
+        return error;
     }
 
     void ReplaceBody(std::size_t height, const CBlock& block)
@@ -805,6 +813,165 @@ BOOST_AUTO_TEST_CASE(saved_deployment_mismatch_preserves_replay_ready_record)
     node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
     BOOST_CHECK(*journal.ReadUpgrade() == captured);
     BOOST_CHECK(!options.reindex_chainstate);
+}
+
+BOOST_AUTO_TEST_CASE(release_checkpoint_must_match_captured_legacy_predecessor)
+{
+    MakeLegacy();
+    consensus.hashPQLegacyBootstrapBlock = hashes[1];
+    for (int reset = 0; reset < 3; ++reset) {
+        node::ChainstateLoadOptions options;
+        options.reindex = reset == 1;
+        options.reindex_chainstate = reset == 2;
+        const auto error{CheckRejectedWithoutReset(options)};
+        BOOST_CHECK(error.original.find("bootstrap checkpoint") != std::string::npos);
+    }
+
+    consensus.hashPQLegacyBootstrapBlock = hashes[2];
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+    node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+    BOOST_REQUIRE(journal.ReadUpgrade());
+    BOOST_CHECK(journal.ReadUpgrade()->predecessor_hash == consensus.hashPQLegacyBootstrapBlock);
+    CheckCoinsUnchanged();
+}
+
+BOOST_AUTO_TEST_CASE(release_checkpoint_conflict_preserves_saved_upgrade_before_reset)
+{
+    MakeLegacy();
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    consensus.hashPQLegacyBootstrapBlock = hashes[1];
+    for (const bool replay_ready : {false, true}) {
+        node::PQLegacyUpgradeRecord captured;
+        {
+            node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+            if (replay_ready) BOOST_REQUIRE(journal.MarkReplayReady());
+            captured = *journal.ReadUpgrade();
+        }
+        for (int reset = 0; reset < 3; ++reset) {
+            options = {};
+            options.reindex = reset == 1;
+            options.reindex_chainstate = reset == 2;
+            const auto before{options};
+            fReindexGeth = false;
+            BOOST_CHECK(!Plan(options, error));
+            BOOST_CHECK(error.original.find("saved PQ upgrade") != std::string::npos);
+            BOOST_CHECK_EQUAL(options.reindex, before.reindex);
+            BOOST_CHECK_EQUAL(options.reindex_chainstate, before.reindex_chainstate);
+            BOOST_CHECK_EQUAL(options.fReindexGeth, before.fReindexGeth);
+            BOOST_CHECK(!fReindexGeth);
+            node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+            BOOST_REQUIRE(journal.ReadUpgrade());
+            BOOST_CHECK(*journal.ReadUpgrade() == captured);
+            BOOST_CHECK(!journal.HasBLSFreeHistory());
+            CheckCoinsUnchanged();
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(release_checkpoint_cannot_erase_conflicting_or_invalid_handoff)
+{
+    MakeLegacy();
+    consensus.hashPQLegacyBootstrapBlock = hashes[2];
+    for (const auto& handoff : {
+             node::PQActivationHandoffRecord{1, node::PQActivationHandoffState::PINNED, 3, hashes[1]},
+             node::PQActivationHandoffRecord{1, node::PQActivationHandoffState::FAILED, 3, hashes[2]},
+             node::PQActivationHandoffRecord{2, node::PQActivationHandoffState::PINNED, 3, hashes[2]}}) {
+        {
+            node::BlockTreeDB db{DB("blocks/index")};
+            BOOST_REQUIRE(db.WritePQActivationHandoff(handoff));
+        }
+        for (int reset = 0; reset < 3; ++reset) {
+            node::ChainstateLoadOptions options;
+            options.reindex = reset == 1;
+            options.reindex_chainstate = reset == 2;
+            const auto error{CheckRejectedWithoutReset(options)};
+            BOOST_CHECK(error.original.find("saved PQ handoff") != std::string::npos);
+            node::BlockTreeDB db{DB("blocks/index")};
+            node::PQActivationHandoffRecord saved;
+            BOOST_REQUIRE(db.ReadPQActivationHandoff(saved));
+            BOOST_CHECK_EQUAL(saved.version, handoff.version);
+            BOOST_CHECK(saved.state == handoff.state);
+            BOOST_CHECK_EQUAL(saved.activation_height, handoff.activation_height);
+            BOOST_CHECK(saved.predecessor_hash == handoff.predecessor_hash);
+        }
+    }
+    // A present record that cannot deserialize must also survive a rejected
+    // reset. One byte cannot contain the serialized handoff structure.
+    const auto key{std::make_pair(uint8_t{'F'}, std::string{"pq_activation_handoff_v1"})};
+    {
+        node::BlockTreeDB db{DB("blocks/index")};
+        BOOST_REQUIRE(db.Write(key, uint8_t{99}, true));
+    }
+    for (int reset = 1; reset < 3; ++reset) {
+        node::ChainstateLoadOptions options;
+        options.reindex = reset == 1;
+        options.reindex_chainstate = reset == 2;
+        const auto error{CheckRejectedWithoutReset(options)};
+        BOOST_CHECK(error.original.find("saved PQ handoff") != std::string::npos);
+        node::BlockTreeDB db{DB("blocks/index")};
+        uint8_t saved{0};
+        BOOST_REQUIRE(db.Read(key, saved));
+        BOOST_CHECK_EQUAL(saved, 99);
+    }
+    // A matching durable handoff is compatible with retaining the same legacy
+    // provenance and preparing a paired rebuild.
+    {
+        node::BlockTreeDB db{DB("blocks/index")};
+        BOOST_REQUIRE(db.WritePQActivationHandoff({
+            1, node::PQActivationHandoffState::PINNED, 3, hashes[2]}));
+    }
+    node::ChainstateLoadOptions options;
+    options.reindex = true;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(options.reindex);
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+    CheckCoinsUnchanged();
+}
+
+BOOST_AUTO_TEST_CASE(bls_free_origin_does_not_bypass_handoff_conflict_preflight)
+{
+    MakeLegacy();
+    consensus.hashPQLegacyBootstrapBlock = hashes[2];
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.MarkBLSFreeHistory());
+    }
+    const node::PQActivationHandoffRecord conflicting{
+        1, node::PQActivationHandoffState::PINNED, 3, hashes[1]};
+    {
+        node::BlockTreeDB db{DB("blocks/index")};
+        BOOST_REQUIRE(db.WritePQActivationHandoff(conflicting));
+    }
+    for (int reset = 0; reset < 3; ++reset) {
+        node::ChainstateLoadOptions options;
+        options.reindex = reset == 1;
+        options.reindex_chainstate = reset == 2;
+        const auto before{options};
+        bilingual_str error;
+        BOOST_CHECK(!Plan(options, error));
+        BOOST_CHECK(error.original.find("saved PQ handoff") != std::string::npos);
+        BOOST_CHECK_EQUAL(options.reindex, before.reindex);
+        BOOST_CHECK_EQUAL(options.reindex_chainstate, before.reindex_chainstate);
+        BOOST_CHECK_EQUAL(options.fReindexGeth, before.fReindexGeth);
+        BOOST_CHECK(!fReindexGeth);
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_CHECK(journal.HasBLSFreeHistory());
+        BOOST_CHECK(!journal.ReadUpgrade());
+        node::BlockTreeDB db{DB("blocks/index")};
+        node::PQActivationHandoffRecord saved;
+        BOOST_REQUIRE(db.ReadPQActivationHandoff(saved));
+        BOOST_CHECK(saved.state == conflicting.state);
+        BOOST_CHECK(saved.predecessor_hash == conflicting.predecessor_hash);
+        CheckCoinsUnchanged();
+    }
 }
 
 BOOST_AUTO_TEST_CASE(mixed_memory_fixture_does_not_create_upgrade_database)

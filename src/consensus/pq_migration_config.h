@@ -29,14 +29,16 @@ enum class PQPaymentEligibilityResult {
     INVALID_CONFIGURATION,
 };
 
-// SYSCOIN: This height-only transition intentionally carries no branch hash or
-// reconstructed-state commitment. Historical fork choice remains ordinary
-// proof of work until PQ ChainLocks provide live finality.
+// SYSCOIN: The activation boundary is height-based. A later release may also
+// authenticate its exact legacy predecessor for fresh-node replay; that local
+// bootstrap policy does not change the PQ certificate schema.
 inline PQActivationResult CheckPQActivationConfiguration(
     const Params& params)
 {
     if (params.nPQActivationHeight == std::numeric_limits<int>::max()) {
-        return PQActivationResult::DISABLED;
+        return params.hashPQLegacyBootstrapBlock.IsNull()
+            ? PQActivationResult::DISABLED
+            : PQActivationResult::INVALID_CONFIGURATION;
     }
     // The first finality statement authenticates the block at A - 1. A
     // genesis-height activation has no real predecessor to bind.

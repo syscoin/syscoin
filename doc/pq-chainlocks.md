@@ -2385,8 +2385,8 @@ Covered certificates remain prunable only under the durable checkpoint rules.
 
 These paths do not release public activation or historical-replay quarantine.
 A fresh, full-reindex, or snapshot-reconstruction node that is not yet
-authorized to participate still needs the separately authenticated checkpoint
-or snapshot release required by that quarantine before restoring/requesting
+authorized to participate still needs the authenticated legacy handoff or
+release checkpoint and complete replay before restoring/requesting
 finality authority or becoming live. Null or inconclusive audits remain
 fail-open no-ops for new misses.
 
@@ -2416,12 +2416,15 @@ The boundary has deliberately narrow meaning:
   non-BLS structure and deterministic state effects are still checked.
 - Block `A` and every descendant use only PQ provider authorization,
   root-qualified payments, deterministic PQ rosters, and PQ finality rules.
-- `A` carries no configured block hash, deterministic-MN root, PQ-registry
-  root, or special minimum-work commitment. Before PQ finality exists, normal
-  valid-most-work fork choice selects history.
+- `A` alone carries no block hash or reconstructed-state root. The initial
+  activation release uses locally validated legacy provenance. A subsequent
+  bootstrap release may pin the now-known exact `A-1` block with
+  `hashPQLegacyBootstrapBlock`. Fork choice above that authenticated legacy
+  boundary remains valid-most-work until PQ finality constrains it.
 - The configured initial predecessor height is `A-1`. Its hash is read from
-  the fully validated candidate branch, never from configuration or the first
-  message observed on the network.
+  the fully validated candidate branch and checked against the captured local
+  pin or optional release checkpoint, never selected by the first message
+  observed on the network.
 - The first fully verified certificate is written durably before enforcement.
   Its signed predecessor and target ancestry bind the actual branch. Invalid,
   incomplete, or merely first-seen data cannot pin a hash.
@@ -2442,6 +2445,12 @@ already contain PQ-enrolled operators. Regtest exposes only
 `-pqactivationheight`; there are no migration block-hash or state-root options.
 Public-network overrides remain forbidden and activation is release-disabled
 until a complete profile is compiled for that network.
+The optional legacy bootstrap hash is a separate release-authenticated trust
+anchor. It remains null in the current public profiles; populating it without
+a valid activation height is a configuration error. It is not inferred from
+peers, a first certificate, or `defaultAssumeValid`, and `-checkpoints=0` cannot
+disable it. It is excluded from the PQ certificate schema so later bootstrap
+releases consume the same certificates as the initially migrated network.
 
 The release-updatable BTCC receipt assumption `R` remains a separate exact
 record containing a block hash, cursor, and cumulative receipt-state hash. It
@@ -2453,7 +2462,7 @@ below `R`.
 
 This model adds no wire field or block-index serialization version. The local
 finality schema commits `A-1`, all schedules, `R`, genesis, and the signature
-profile, but no activation block hash. A persisted winner carries its own
+profile, but no optional legacy bootstrap hash. A persisted winner carries its own
 signed branch identity and is fully reverified on restart. Public profiles are
 still disabled, so there is no released production database migration to infer.
 
@@ -2493,13 +2502,30 @@ execution succeeds or protect against disk damage occurring after inspection.
   reaches the captured predecessor. A loaded tip at or above `A` must also
   carry block `A`'s complete PQ validation provenance. Geth bootstrap cannot
   carry the first rebuild past the captured legacy boundary.
-- An empty datadir, reindex without captured legacy provenance, or snapshot/background
-  validation starts in historical-replay quarantine. Blocks and headers may be
-  reconstructed for inspection, but mining, provider admission, MNAUTH,
-  governance, PQ share/certificate traffic, certificate restoration, and
-  ChainLock enforcement remain disabled. Validating block `A` in this mode does
-  not promote the process or create a pin. A later authenticated checkpoint or
-  snapshot release is required to make a fresh BLS-free reconstruction live.
+- An empty datadir or reindex without captured legacy provenance starts in
+  historical-replay quarantine. Mining, provider admission, MNAUTH, governance,
+  PQ share/certificate traffic, certificate restoration, and ChainLock
+  enforcement remain disabled until the handoff is authenticated. Without a
+  compiled legacy bootstrap checkpoint this quarantine does not self-promote,
+  even after block `A` or the first PQ certificate.
+- With `hashPQLegacyBootstrapBlock` configured, fresh nodes first obtain its
+  header ancestry, then replay the exact legacy prefix. The checkpoint does not
+  supply UTXOs or deterministic-MN state: ordinary replay reconstructs them.
+  Only after the active coins and auxiliary state have successfully applied
+  `A-1` does the node durably pin that boundary and release the handoff gate.
+  Header-only, connecting-but-unpublished, assumed-valid, and active-snapshot
+  views cannot authorize this transition. A loaded post-activation tip also
+  requires block `A`'s complete PQ validation provenance.
+- Existing Geth alignment, historical PQ authentication, and IBD readiness
+  remain independent gates. The legacy checkpoint itself needs no currently
+  online Sentries, enabled ChainLock spork, or new certificate. Reindex must
+  replay the prefix again before reopening participation. A conflicting saved
+  pin or migration record fails before a requested database reset; it is not
+  overwritten by a later release's checkpoint. An older sync-only chainstate
+  whose prefix cannot be matched to known checkpoint ancestry requires
+  `-reindex-chainstate` and its paired Geth rebuild.
+  A loaded suffix missing full validation provenance at `A` requires the same
+  rebuild with `-assumevalid=0`; waiting for more blocks cannot supply it.
 - The imported `A-1` pin is a local transition checkpoint. This BLS-free process
   rejects any disconnection that would cross it, even before the first durable
   PQ ChainLock. Replacing the legacy prefix requires a separately validated
@@ -2591,6 +2617,14 @@ Nodes do not choose roster membership from their local peer counts or the time
 they received the spork. Every node derives the same round and frozen snapshots
 from the validated chain. Operators missing a round can join subsequent rounds.
 
+The initial rollout does not need to predict `A-1`'s hash. After upgraded
+Sentries establish finality, independently verify the common legacy boundary
+using the legacy-validated chain and publish its exact hash in a subsequent
+bootstrap release's chainparams. That release enables fresh datadirs through
+the replay path above. Publishing this constant explicitly trusts that legacy
+history; replay does not restore the removed BLS signature verification. A
+separate deterministic-state root is unnecessary when all state is replayed.
+
 Optional shadow operation can exercise key coverage, threshold shares, latency,
 and restart recovery before enabling finality. A separate public preparation-only
 profile would still require an explicitly supported release; the regtest profile
@@ -2610,8 +2644,9 @@ only remaining legacy support is the isolated opaque decoder/state-transition
 module for heights below `A`. An existing legacy datadir can preserve its
 validated `A-1` predecessor, rebuild locally, and follow valid-most-work history
 until a fully verified durable PQ certificate establishes finality. A clean
-BLS-free datadir may reconstruct the same history only in quarantine until a
-separately authenticated checkpoint or snapshot release makes it live. An
+BLS-free datadir remains quarantined until a bootstrap release supplies the
+authenticated legacy checkpoint and its replay completes. An active snapshot
+does not substitute for that replay. An
 all-sentinel release remains a non-authoritative compatibility-replay/sync
 build, and a partially populated public profile must never start. The future
 preparation release must identify its no-finality profile explicitly rather
@@ -3281,6 +3316,12 @@ The following must be resolved in code and release artifacts before activation:
   and agreement on the first receipted authority; and
 - the single-signer backup and recovery procedure for scheduled child-key
   journals, including rotation to a fresh child-tree generation after loss.
+
+The subsequent fresh-node bootstrap release additionally requires the exact
+`A-1` hash, independently authenticated after the migrated-node rollout
+establishes finality. Validate public-network replay, restart, reindex,
+wrong-prefix and snapshot handling, plus independent engine/history readiness,
+against the final deployment parameters before publishing that release.
 
 The depth-16 outer commitment provides the fixed epoch horizon described above.
 Separately, each derived child key owns an 8,176-byte public height-8 warm

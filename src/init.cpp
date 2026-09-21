@@ -1499,6 +1499,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const bool public_profile_unassigned{
         chainparams.GetChainType() != ChainType::REGTEST &&
         consensus.nPQActivationHeight == std::numeric_limits<int>::max() &&
+        consensus.hashPQLegacyBootstrapBlock.IsNull() &&
         consensus.nPQPreparationHeight == std::numeric_limits<int>::max() &&
         consensus.nPQChainLockEpochOrigin == std::numeric_limits<int>::max() &&
         consensus.nPQRegistrationCutoffBlocks == 0 &&
