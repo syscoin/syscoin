@@ -214,7 +214,7 @@ struct Num3072Signed
     {
         // Add modulus if this was negative. This brings the range of *this to 1-2^3072..2^3072-1.
         signed_limb_t cond_add = limbs[SIGNED_LIMBS-1] >> (LIMB_SIZE-1); // -1 if this is negative; 0 otherwise
-        limbs[0] += signed_limb_t(-MAX_PRIME_DIFF) & cond_add;
+        limbs[0] += -signed_limb_t(MAX_PRIME_DIFF) & cond_add;
         limbs[FINAL_LIMB_POSITION] += (signed_limb_t(1) << FINAL_LIMB_MODULUS_BITS) & cond_add;
         // Next negate all limbs if negate was set. This does not change the range of *this.
         signed_limb_t cond_negate = -signed_limb_t(negate); // -1 if this negate is true; 0 otherwise
@@ -228,7 +228,7 @@ struct Num3072Signed
         }
         // Again add modulus if *this was negative. This brings the range of *this to 0..2^3072-1.
         cond_add = limbs[SIGNED_LIMBS-1] >> (LIMB_SIZE-1); // -1 if this is negative; 0 otherwise
-        limbs[0] += signed_limb_t(-MAX_PRIME_DIFF) & cond_add;
+        limbs[0] += -signed_limb_t(MAX_PRIME_DIFF) & cond_add;
         limbs[FINAL_LIMB_POSITION] += (signed_limb_t(1) << FINAL_LIMB_MODULUS_BITS) & cond_add;
         // Perform another carry. Now all limbs are in range 0..2^SIGNED_LIMB_SIZE-1.
         for (int i = 0; i < SIGNED_LIMBS - 1; ++i) {
@@ -287,9 +287,9 @@ inline limb_t ComputeDivstepMatrix(signed_limb_t eta, limb_t f, limb_t g, Signed
         if (eta < 0) {
             limb_t tmp;
             eta = -eta;
-            tmp = f; f = g; g = -tmp;
-            tmp = u; u = q; q = -tmp;
-            tmp = v; v = r; r = -tmp;
+            tmp = f; f = g; g = limb_t{0} - tmp;
+            tmp = u; u = q; q = limb_t{0} - tmp;
+            tmp = v; v = r; r = limb_t{0} - tmp;
         }
         /* eta is now >= 0. In what follows we're going to cancel out the bottom bits of g. No more
          * than i can be cancelled out (as we'd be done before that point), and no more than eta+1
@@ -428,7 +428,7 @@ Num3072 Num3072::GetInverse() const
     e.limbs[0] = 1;
     // F is initialized as modulus, which in signed limb representation can be expressed
     // simply as 2^3072 + -MAX_PRIME_DIFF.
-    f.limbs[0] = -MAX_PRIME_DIFF;
+    f.limbs[0] = -signed_limb_t(MAX_PRIME_DIFF);
     f.limbs[FINAL_LIMB_POSITION] = ((limb_t)1) << FINAL_LIMB_MODULUS_BITS;
     g.FromNum3072(*this);
     int len = SIGNED_LIMBS; //!< The number of significant limbs in f and g
