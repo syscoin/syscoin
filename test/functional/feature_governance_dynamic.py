@@ -137,11 +137,10 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.expected_budget = self.initial_budget
         self.check_superblockbudget()
 
-        # Ensure nodes are connected at the beginning
-        for idx, node_outer in enumerate(self.nodes):
-            for idx, node_inner in enumerate(self.nodes):
-                if node_inner.index != node_outer.index:
-                    self.connect_nodes(node_inner.index, node_outer.index, wait_for_connect=False)
+        # Keep the framework's controller-to-MN topology. Redundant MN links
+        # advertise votes already delivered by the controller, occupying the
+        # bounded upload lanes until their unused announcements expire.
+        self.connect_governance_nodes()
 
         # Step 1: SB1 - Proposals to push budget up by 10%
         self.log.info("SB1 - Proposals to increase budget by 10%")
@@ -373,9 +372,25 @@ class SyscoinGovernanceTest(DashTestFramework):
                 self.nodes[0].gobject_vote_alias(
                     proposal_hash, map_vote_signals[1],
                     map_vote_outcomes[1], mn.proTxHash)
-                # Node 0 owns every fixture MN voting key, unlike independent
-                # live MN sources. Drain each vote before originating another.
+                # Node 0 owns every fixture MN voting key. Drain each vote
+                # across the five relay links before originating another.
                 self.sync_proposal_votes(proposal_hash, expected_yes_count)
+
+    def connect_governance_nodes(self, recovering_node=None):
+        for node in self.nodes[1:]:
+            if node.index == recovering_node:
+                # MN governance recovery requires an outbound relay peer.
+                # Reverse its single controller link instead of adding a
+                # second connection that would duplicate announcements.
+                self.connect_nodes(node.index, 0)
+                controller_subver = self.nodes[0].getnetworkinfo()["subversion"]
+                assert_equal(any(
+                    peer["subver"] == controller_subver
+                    and not peer["inbound"]
+                    and not peer["masternode"]
+                    for peer in node.getpeerinfo()), True)
+            else:
+                self.connect_nodes(0, node.index, wait_for_connect=False)
 
     def sync_gobject_list(self, expected_count, timeout=GOVERNANCE_PROPAGATION_TIMEOUT):
         sb_block_height = self.nodes[0].getgovernanceinfo()["nextsuperblock"]
@@ -496,12 +511,20 @@ class SyscoinGovernanceTest(DashTestFramework):
         def all_nodes_have_exact_count():
             self.bump_governance_sync_mocktime(
                 sync_clock, sb_block_height)
+            expected_hashes = None
             for node in self.nodes:
                 funding_result = node.gobject_get(
                     proposal_hash)["FundingResult"]
                 if (funding_result["YesCount"] != expected_yes_count or
                         funding_result["NoCount"] != 0 or
                         funding_result["AbstainCount"] != 0):
+                    return False
+                vote_hashes = set(node.gobject_getcurrentvotes(proposal_hash))
+                if len(vote_hashes) != expected_yes_count:
+                    return False
+                if expected_hashes is None:
+                    expected_hashes = vote_hashes
+                elif vote_hashes != expected_hashes:
                     return False
             return True
 
@@ -636,10 +659,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.stop_node(1)
         self.start_node(1, extra_args=["-mocktime=" + str(self.mocktime), '-reindex', *self.extra_args[1]])
         self.nodes[1].setnetworkactive(True)
-        for idx, node_outer in enumerate(self.nodes):
-            for idx, node_inner in enumerate(self.nodes):
-                if node_inner.index != node_outer.index:
-                    self.connect_nodes(node_inner.index, node_outer.index, wait_for_connect=False)
+        self.connect_governance_nodes(recovering_node=1)
 
         self.wait_for_recovery_sync(sb_height)
         self.wait_for_governance_recovery(
@@ -686,10 +706,7 @@ class SyscoinGovernanceTest(DashTestFramework):
         initialize_datadir(self.options.tmpdir, 1, self.chain)
         self.start_node(1, extra_args=["-mocktime=" + str(self.mocktime), '-networkactive=0', *self.extra_args[1]])
         self.nodes[1].setnetworkactive(True)
-        for idx, node_outer in enumerate(self.nodes):
-            for idx, node_inner in enumerate(self.nodes):
-                if node_inner.index != node_outer.index:
-                    self.connect_nodes(node_inner.index, node_outer.index, wait_for_connect=False)
+        self.connect_governance_nodes(recovering_node=1)
 
         self.wait_for_recovery_sync(sb_height)
         self.wait_for_governance_recovery(
