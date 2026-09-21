@@ -23,6 +23,7 @@ import time
 from threading import Event, Thread
 
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
+from test_framework.authproxy import JSONRPCException
 from test_framework.auxpow import reverseHex
 from test_framework.auxpow_testing import computeAuxpow
 from test_framework.messages import (
@@ -30,6 +31,8 @@ from test_framework.messages import (
     CBlock,
     CNEVMBlock,
     CNEVMBlockConnect,
+    CNEVMBlockDisconnect,
+    deser_string,
     from_hex,
     ser_uint256,
     uint256_from_compact,
@@ -162,6 +165,9 @@ class ZMQNEVMResponder:
         self.context = context
         self.address = address
         self.btcprev_by_sys_hash = {}
+        self.applied_syshashes = []
+        self.durable_pair_events = []
+        self.connect_negotiations = 0
         self.running = True
         self.ready = Event()
         self.error = None
@@ -203,7 +209,24 @@ class ZMQNEVMResponder:
                 topic = message[0]
                 payload = message[1] if len(message) > 1 else b""
                 if topic == b"nevmcomms":
-                    socket.send_multipart([topic, b"ack"])
+                    command = deser_string(BytesIO(payload))
+                    response = b"ack"
+                    if command == b"connect-v1":
+                        self.connect_negotiations += 1
+                        response = command
+                    elif command == b"flush":
+                        # This mock applies accepted connections immediately.
+                        response = b"flushed"
+                    elif command.startswith(b"durable-pair-v1:"):
+                        count = len(self.applied_syshashes)
+                        tip = self.applied_syshashes[-1] if count else 0
+                        expected = f"durable-pair-v1:{count}:{tip:064x}".encode()
+                        if command == expected:
+                            self.durable_pair_events.append((count, tip))
+                            response = command
+                        else:
+                            response = b"error:mock-durable-pair-mismatch"
+                    socket.send_multipart([topic, response])
                 elif topic == b"nevmblock":
                     value = self.counter
                     self.counter += 1
@@ -214,16 +237,29 @@ class ZMQNEVMResponder:
                     block.vchNEVMBlockData = b"feature_btcheader_policy_auxpow"
                     socket.send_multipart([topic, block.serialize()])
                 elif topic == b"nevmblockinfo":
-                    # No external child chain is attached in this fixture.
-                    # The paired Syscoin hash is null when the applied count is 0.
-                    socket.send_multipart([topic, b"0", b"0" * 64])
+                    # Recovery needs the actual prefix accepted by this mock,
+                    # including across Core restarts and tip disconnections.
+                    count = len(self.applied_syshashes)
+                    tip = self.applied_syshashes[-1] if count else 0
+                    socket.send_multipart([
+                        topic, str(count).encode(), f"{tip:064x}".encode()])
                 elif topic == b"nevmconnect":
                     connect = CNEVMBlockConnect()
                     connect.deserialize(BytesIO(payload))
                     self.btcprev_by_sys_hash[connect.sysblockhash] = (
                         connect.btcprevhash)
+                    if connect.sysblockhash != 0:
+                        exact_retry = (self.applied_syshashes and
+                                       self.applied_syshashes[-1] == connect.sysblockhash)
+                        if not exact_retry:
+                            self.applied_syshashes.append(connect.sysblockhash)
                     socket.send_multipart([topic, b"connected"])
                 elif topic == b"nevmdisconnect":
+                    disconnect = CNEVMBlockDisconnect()
+                    disconnect.deserialize(BytesIO(payload))
+                    assert self.applied_syshashes
+                    assert_equal(self.applied_syshashes[-1], disconnect.sysblockhash)
+                    self.applied_syshashes.pop()
                     socket.send_multipart([topic, b"disconnected"])
                 else:
                     self.log.info("Unknown NEVM ZMQ topic: %s", topic)
@@ -299,7 +335,7 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
                 continue
             try:
                 help_result = subprocess.run(
-                    [node_path, "-help"], capture_output=True, text=True,
+                    [node_path, "-nosettings", "-help"], capture_output=True, text=True,
                     timeout=10, check=False)
             except (OSError, subprocess.TimeoutExpired):
                 continue
@@ -369,6 +405,31 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
             self.zmq_context.destroy(linger=0)
             self.zmq_context = None
 
+    def start_node(self, i, extra_args=None, *args, **kwargs):
+        if i == 0 and "-reindex" in (extra_args or []):
+            # Regtest uses an external engine. Mirror the paired child reset
+            # for preparation/activation reindexes, while ordinary restarts
+            # preserve the applied prefix that Core must reconcile.
+            self.nevm_responder.stop()
+            next_block = self.nevm_responder.counter
+            self.nevm_responder = ZMQNEVMResponder(
+                self.log, self.zmq_context, self.zmq_address)
+            # Replayed blocks retain their old synthetic hashes. New template
+            # requests must keep producing distinct hashes after the reset.
+            self.nevm_responder.counter = next_block
+            self.nevm_responder.start()
+        return super().start_node(i, extra_args, *args, **kwargs)
+
+    def prepare_datadirs(self):
+        super().prepare_datadirs()
+        # Only the controller has a mock execution engine. The regtest-only
+        # NEVM-disabled followers do not maintain root undo, so their initial
+        # clones must not inherit the controller's published root baseline.
+        # Keep normal restart recovery intact and preserve consumed-mint state.
+        for index in range(1, self.num_nodes):
+            shutil.rmtree(Path(self.options.tmpdir) / f"node{index}" /
+                          "regtest" / "nevmtxroots")
+
     def configure_pq_preparation(self):
         assert_equal(self.nodes[0].getblockcount(), 0)
         self.bump_mocktime(1, nodes=[self.nodes[0]])
@@ -398,6 +459,11 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
     def setup_network(self):
         self._start_nevm_responder()
         self._start_external_btc_network()
+        # Shared setup mines the first PQ candidate before run_test(). Its
+        # independent Bitcoin backend must already have left IBD by then.
+        self.log.info("Bootstrap a real Bitcoin regtest header chain")
+        self.btc_nodes[0].mine(60)
+        self._wait_for_btc_sync()
         btc0 = self.btc_nodes[0]
         for args in self.extra_args:
             args.extend([
@@ -720,17 +786,25 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
         assert_equal(extra[btcp_offset + 4:],
                      ser_uint256(int(canonical["_btcprevhash"], 16)))
 
-        source_height = source["height"]
-        source_hash = int(source["hash"], 16)
-        source_btcprev = int(source["_btcprevhash"], 16)
+        # There is no first receipt yet. Only a canonical initialization round
+        # can establish it; an ordinary later candidate is rejected before
+        # certificate lookup. Use the real activation target and its BTCPREV,
+        # carried late by this otherwise valid sibling.
+        target_height = self.BTC_CANDIDATE_ORIGIN
+        target_hash = node.getblockhash(target_height)
+        target_block = from_hex(CBlock(), node.getblock(target_hash, 0))
+        assert target_block.auxpow is not None
+        target_btcprev = target_block.auxpow.parentBlock.hashPrevBlock
+        assert target_btcprev != 0
+        assert carrier_height >= target_height + self.BTCC_NEVM_LAG
         arbitrary_logical_id = int("a5" * 32, 16)
         receipt = (
-            struct.pack("<Hi", 1, source_height)
-            + ser_uint256(source_hash)
+            struct.pack("<Hi", 1, target_height)
+            + ser_uint256(int(target_hash, 16))
             + ser_uint256(arbitrary_logical_id)
-            + struct.pack("<i", source_height)
-            + ser_uint256(source_hash)
-            + ser_uint256(source_btcprev)
+            + struct.pack("<i", target_height)
+            + ser_uint256(int(target_hash, 16))
+            + ser_uint256(target_btcprev)
         )
         assert_equal(len(receipt), 138)
         modified_extra = (
@@ -765,6 +839,26 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
         node.reconsiderblock(canonical_hash)
         assert_equal(node.getbestblockhash(), canonical_hash)
         self.sync_blocks()
+
+        # The private recovery scheduler proves the restored execution pair
+        # before reopening mining. Require that public gate to recover within
+        # a bounded interval, without a new certificate or a node restart.
+        def execution_ready():
+            try:
+                template = node.createauxblock(
+                    node.get_deterministic_priv_key().address)
+            except JSONRPCException as error:
+                if (error.error["code"] == -10 and error.error["message"] ==
+                        "NEVM block production is waiting for execution recovery"):
+                    return False
+                raise
+            assert_equal(template["height"], carrier_height + 1)
+            return True
+
+        self.wait_until(execution_ready, timeout=30)
+        assert_equal(node.getbestblockhash(), canonical_hash)
+        assert_equal(len(self.nevm_responder.applied_syshashes), carrier_height)
+        assert_equal(self.nevm_responder.applied_syshashes[-1], int(canonical_hash, 16))
 
     def _wait_for_zmq_btcprev(self, height):
         sys_hash = int(self.nodes[0].getblockhash(height), 16)
@@ -862,10 +956,6 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
         for node in self.nodes:
             force_finish_mnsync(node)
 
-        self.log.info("Bootstrap a real Bitcoin regtest header chain")
-        self.btc_nodes[0].mine(60)
-        self._wait_for_btc_sync()
-
         self.log.info("Auto-select and bind the first scheduled BTCPREV")
         first = self._mine_candidate()
         first_btcprev = first["_btcprevhash"]
@@ -932,6 +1022,12 @@ class BTCHeaderPolicyAuxpowTest(DashTestFramework):
         self.log.info("Exercise bundled managed headers-only stop/start")
         self._exercise_managed_lifecycle()
         self._assert_no_chainlock_winner()
+        assert self.nevm_responder.connect_negotiations > 0
+        assert self.nevm_responder.durable_pair_events
+        assert_equal(len(self.nevm_responder.applied_syshashes),
+                     self.nodes[0].getblockcount())
+        assert_equal(self.nevm_responder.applied_syshashes[-1],
+                     int(self.nodes[0].getbestblockhash(), 16))
 
 
 if __name__ == "__main__":
