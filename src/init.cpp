@@ -2519,9 +2519,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (!chainman.RecoverNEVMPendingConnect(count, hash, error)) {
             return InitError(Untranslated("Cannot recover NEVM pending connection: " + error));
         }
-        if (pq_legacy_rebuild) {
-            // The regtest endpoint is external. Prove its reset/bootstrap
-            // pair explicitly instead of treating absent pending work as ACK.
+        if (WITH_LOCK(cs_main, return chainman.GetPQLegacyUpgrade().has_value();)) {
+            // SYSCOIN: Classify the external regtest endpoint on every legacy
+            // migration startup, including REPLAY_READY crash restarts. Geth
+            // may retain a replayed prefix ahead of Core's durable coins even
+            // when there is no failed-connect record and no new paired reset.
             GetMainSignals().NotifyGetNEVMBlockInfo(count, hash, error);
             if (!error.empty()) {
                 return InitError(Untranslated("Cannot attach Geth for PQ legacy replay: " + error));
