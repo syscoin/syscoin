@@ -10,7 +10,7 @@
 #error "define the box template to use in BOX_T"
 #endif
 
-#include <catch2/catch.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("construction and copy")
 {
@@ -140,4 +140,35 @@ TEST_CASE("update move")
     } else {
         CHECK(&y.get() == addr);
     }
+}
+
+namespace {
+struct fwd_type;
+struct test_type
+{
+    immer::box<fwd_type> data;
+
+    // Constructor that might trigger overload resolution for box<fwd_type>
+    // while fwd_type is still incomplete
+    test_type() = default;
+    test_type(immer::box<fwd_type> d) : data(std::move(d)) {}
+};
+
+// Function that takes test_type by value - requires complete copy/move operations
+inline test_type make_test_type(test_type t) { return t; }
+
+struct fwd_type
+{
+    int data = 123;
+};
+} // namespace
+
+TEST_CASE("Test box with a fwd declared type")
+{
+    auto val = test_type{};
+    REQUIRE(val.data.get().data == 123);
+
+    // Use the function to ensure copy/move are instantiated
+    auto val2 = make_test_type(val);
+    REQUIRE(val2.data.get().data == 123);
 }

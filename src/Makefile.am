@@ -1251,7 +1251,7 @@ CLEANFILES += zmq/*.gcda zmq/*.gcno
 CLEANFILES += obj/build.h
 
 
-IMMER_DIST = immer/immer
+IMMER_DIST = immer/immer immer/LICENSE immer/README.syscoin
 EXTRA_DIST = \
   $(CTAES_DIST)   \
   $(IMMER_DIST)   \
