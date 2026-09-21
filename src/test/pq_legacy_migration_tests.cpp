@@ -5,13 +5,20 @@
 #include <node/pq_legacy_migration.h>
 
 #include <chain.h>
+#include <chainparams.h>
+#include <consensus/merkle.h>
 #include <consensus/params.h>
+#include <consensus/validation.h>
 #include <dbwrapper.h>
 #include <evo/deterministicmns.h>
 #include <flatfile.h>
+#include <hash.h>
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
 #include <node/pq_legacy_upgrade.h>
+#include <pow.h>
+#include <primitives/block.h>
+#include <script/script.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <txdb.h>
@@ -31,6 +38,9 @@ struct LegacyMigrationSetup : ChainTestingSetup {
     const Consensus::Params original_consensus;
     const bool original_reindex_geth;
     std::vector<uint256> hashes;
+    std::vector<CBlock> blocks;
+    std::vector<unsigned int> positions;
+    std::vector<unsigned int> sizes;
 
     LegacyMigrationSetup()
         : ChainTestingSetup{ChainType::REGTEST},
@@ -66,19 +76,58 @@ struct LegacyMigrationSetup : ChainTestingSetup {
         return m_node.chainman->m_blockman.GetBlockPosFilename({0, 0});
     }
 
-    void MakeLegacy(int32_t height = 5)
+    void MakeLegacy(int32_t height = 5, bool with_witness = false)
     {
         LOCK(cs_main);
-        hashes.push_back(consensus.hashGenesisBlock);
+        if (with_witness) consensus.SegwitHeight = 1;
+        // The bodies, framing, hashes and proof of work are real. The database
+        // metadata below remains a synthetic legacy-provenance fixture, not an
+        // old-binary migration or a contextual replay of these blocks.
+        blocks.push_back(m_node.chainman->GetParams().GenesisBlock());
         for (int32_t h{1}; h <= height; ++h) {
-            hashes.emplace_back(static_cast<uint8_t>(h));
+            CBlock block;
+            block.SetBaseVersion(4, consensus.nAuxpowChainId);
+            block.hashPrevBlock = blocks.back().GetHash();
+            block.nTime = blocks.back().nTime + 1;
+            block.nBits = blocks.front().nBits;
+            CMutableTransaction coinbase;
+            coinbase.vin.resize(1);
+            coinbase.vin[0].prevout.SetNull();
+            coinbase.vin[0].scriptSig = CScript{} << h << OP_0;
+            coinbase.vout.emplace_back(1, CScript{} << OP_TRUE);
+            if (with_witness) {
+                const std::vector<unsigned char> nonce(32, 0);
+                coinbase.vin.front().scriptWitness.stack.push_back(nonce);
+                // A coinbase-only block has the all-zero witness merkle root.
+                uint256 commitment;
+                CHash256().Write(commitment).Write(nonce).Finalize(commitment);
+                std::vector<unsigned char> commitment_bytes{0xaa, 0x21, 0xa9, 0xed};
+                commitment_bytes.insert(commitment_bytes.end(), commitment.begin(), commitment.end());
+                coinbase.vout.emplace_back(0, CScript{} << OP_RETURN << commitment_bytes);
+            }
+            block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+            block.hashMerkleRoot = BlockMerkleRoot(block);
+            while (!CheckProofOfWork(block.GetHash(), block.nBits, consensus)) ++block.nNonce;
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(CheckBlock(block, state, consensus), state.ToString());
+            blocks.push_back(std::move(block));
         }
         fs::create_directories(BlockFile().parent_path());
         {
             std::ofstream file{BlockFile(), std::ios::binary};
-            const std::string bytes(static_cast<std::size_t>(height + 1) * 128, '\0');
-            file.write(bytes.data(), bytes.size());
-            BOOST_REQUIRE(file.good());
+            for (const auto& block : blocks) {
+                CDataStream body{SER_DISK, CLIENT_VERSION};
+                body << block;
+                CDataStream framing{SER_DISK, CLIENT_VERSION};
+                framing << m_node.chainman->GetParams().MessageStart() << uint32_t{static_cast<uint32_t>(body.size())};
+                file.write(reinterpret_cast<const char*>(framing.data()), framing.size());
+                BOOST_REQUIRE(file.good());
+                positions.push_back(static_cast<unsigned int>(file.tellp()));
+                sizes.push_back(body.size());
+                file.write(reinterpret_cast<const char*>(body.data()), body.size());
+                BOOST_REQUIRE(file.good());
+                hashes.push_back(block.GetHash());
+            }
         }
         {
             node::BlockTreeDB db{DB("blocks/index")};
@@ -87,9 +136,14 @@ struct LegacyMigrationSetup : ChainTestingSetup {
                 index.nHeight = h;
                 index.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
                 index.nFile = 0;
-                index.nDataPos = static_cast<unsigned int>(h) * 128;
-                index.nTx = 1;
+                index.nDataPos = positions[h];
+                index.nTx = blocks[h].vtx.size();
                 index.hashPrev = h == 0 ? uint256{} : hashes[h - 1];
+                index.nVersion = blocks[h].nVersion;
+                index.hashMerkleRoot = blocks[h].hashMerkleRoot;
+                index.nTime = blocks[h].nTime;
+                index.nBits = blocks[h].nBits;
+                index.nNonce = blocks[h].nNonce;
                 BOOST_REQUIRE(db.Write(std::pair{uint8_t{'b'}, hashes[h]}, index, true));
             }
         }
@@ -126,10 +180,141 @@ struct LegacyMigrationSetup : ChainTestingSetup {
         BOOST_REQUIRE(coins.Read(uint8_t{'B'}, best));
         BOOST_CHECK(best == hashes.back());
     }
+
+    void CheckRejectedWithoutReset()
+    {
+        node::ChainstateLoadOptions options;
+        bilingual_str error;
+        BOOST_CHECK(!Plan(options, error));
+        BOOST_CHECK(!error.empty());
+        BOOST_CHECK(!options.reindex);
+        BOOST_CHECK(!options.reindex_chainstate);
+        BOOST_CHECK(!options.fReindexGeth);
+        BOOST_CHECK(!fReindexGeth);
+        CheckUncapturedAndUnchanged();
+    }
+
+    void ReplaceBody(std::size_t height, const CBlock& block)
+    {
+        CDataStream body{SER_DISK, CLIENT_VERSION};
+        body << block;
+        BOOST_REQUIRE_EQUAL(body.size(), sizes[height]);
+        std::fstream file{BlockFile(), std::ios::binary | std::ios::in | std::ios::out};
+        file.seekp(positions[height]);
+        file.write(reinterpret_cast<const char*>(body.data()), body.size());
+        BOOST_REQUIRE(file.good());
+    }
+
+    void ReplaceRecordSize(std::size_t height, uint32_t size)
+    {
+        CDataStream bytes{SER_DISK, CLIENT_VERSION};
+        bytes << size;
+        std::fstream file{BlockFile(), std::ios::binary | std::ios::in | std::ios::out};
+        file.seekp(positions[height] - sizeof(uint32_t));
+        file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        BOOST_REQUIRE(file.good());
+    }
 };
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_legacy_migration_tests, LegacyMigrationSetup)
+
+BOOST_AUTO_TEST_CASE(header_only_retained_tip_fails_before_capture)
+{
+    MakeLegacy();
+    // The previous preflight accepted this exact extent: the indexed header
+    // exists, but not even the transaction count needed for replay survives.
+    fs::resize_file(BlockFile(), positions.back() + 80);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(parseable_transaction_corruption_fails_before_capture)
+{
+    MakeLegacy();
+    CBlock corrupt{blocks[2]};
+    CMutableTransaction coinbase{*corrupt.vtx.front()};
+    ++coinbase.vout.front().nValue;
+    corrupt.vtx.front() = MakeTransactionRef(std::move(coinbase));
+    BOOST_CHECK(corrupt.GetHash() == hashes[2]);
+    BOOST_CHECK(BlockMerkleRoot(corrupt) != corrupt.hashMerkleRoot);
+    ReplaceBody(2, corrupt);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(intact_witness_history_can_be_captured)
+{
+    MakeLegacy(/*height=*/5, /*with_witness=*/true);
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+    node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+    BOOST_REQUIRE(journal.ReadUpgrade());
+    BOOST_CHECK(journal.ReadUpgrade()->legacy_tip_hash == hashes.back());
+}
+
+BOOST_AUTO_TEST_CASE(witness_only_corruption_fails_before_capture)
+{
+    MakeLegacy(/*height=*/5, /*with_witness=*/true);
+    CBlock corrupt{blocks[2]};
+    CMutableTransaction coinbase{*corrupt.vtx.front()};
+    coinbase.vin.front().scriptWitness.stack.front()[0] = 1;
+    corrupt.vtx.front() = MakeTransactionRef(std::move(coinbase));
+    BOOST_CHECK(corrupt.GetHash() == hashes[2]);
+    BOOST_CHECK(BlockMerkleRoot(corrupt) == corrupt.hashMerkleRoot);
+    BOOST_CHECK(corrupt.vtx.front()->GetWitnessHash() != blocks[2].vtx.front()->GetWitnessHash());
+    ReplaceBody(2, corrupt);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(noncanonical_transaction_count_fails_before_capture)
+{
+    MakeLegacy();
+    const auto original_size{fs::file_size(BlockFile())};
+    {
+        std::fstream file{BlockFile(), std::ios::binary | std::ios::in | std::ios::out};
+        file.seekp(positions[2] + 80);
+        // CompactSize(1) encoded with the noncanonical three-byte form. The
+        // block extent and its framing still exist in full.
+        const unsigned char count[]{0xfd, 0x01, 0x00};
+        file.write(reinterpret_cast<const char*>(count), sizeof(count));
+        BOOST_REQUIRE(file.good());
+    }
+    BOOST_CHECK_EQUAL(fs::file_size(BlockFile()), original_size);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(wrong_indexed_block_body_fails_before_capture)
+{
+    MakeLegacy();
+    // An independently valid block of the same size at the requested position
+    // must not establish provenance for the indexed hash.
+    ReplaceBody(2, blocks[3]);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(malformed_record_framing_fails_before_capture)
+{
+    MakeLegacy();
+    const auto height{std::size_t{2}};
+    for (const uint32_t size : {uint32_t{0}, uint32_t{79}, sizes[height] - 1,
+                                sizes[height] + 1, std::numeric_limits<uint32_t>::max()}) {
+        BOOST_TEST_CONTEXT("declared block size " << size) {
+            ReplaceRecordSize(height, size);
+            CheckRejectedWithoutReset();
+        }
+    }
+    ReplaceRecordSize(height, sizes[height]);
+    {
+        std::fstream file{BlockFile(), std::ios::binary | std::ios::in | std::ios::out};
+        file.seekp(positions[height] - 8);
+        const std::string wrong_magic(4, '\0');
+        file.write(wrong_magic.data(), wrong_magic.size());
+        BOOST_REQUIRE(file.good());
+    }
+    CheckRejectedWithoutReset();
+}
 
 BOOST_AUTO_TEST_CASE(legacy_capture_precedes_reindex_and_survives_repeated_planning)
 {
@@ -176,6 +361,115 @@ BOOST_AUTO_TEST_CASE(legacy_capture_precedes_reindex_and_survives_repeated_plann
     BOOST_CHECK(options.fReindexGeth);
     node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
     captured.phase = node::PQLegacyUpgradePhase::REBUILD_REQUIRED;
+    BOOST_CHECK(*journal.ReadUpgrade() == captured);
+}
+
+BOOST_AUTO_TEST_CASE(interrupted_capture_rechecks_bodies_but_replay_ready_preserves_progress)
+{
+    MakeLegacy();
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    node::PQLegacyUpgradeRecord captured;
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.ReadUpgrade());
+        captured = *journal.ReadUpgrade();
+    }
+    fs::resize_file(BlockFile(), positions.back() + 80);
+    options = {};
+    fReindexGeth = false;
+    BOOST_CHECK(!Plan(options, error));
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK(!options.reindex);
+    BOOST_CHECK(!options.reindex_chainstate);
+    BOOST_CHECK(!options.fReindexGeth);
+    BOOST_CHECK(!fReindexGeth);
+    {
+        CDBWrapper coins{DB("chainstate")};
+        uint256 best;
+        BOOST_REQUIRE(coins.Read(uint8_t{'B'}, best));
+        BOOST_CHECK(best == hashes.back());
+    }
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.ReadUpgrade());
+        BOOST_CHECK(*journal.ReadUpgrade() == captured);
+        BOOST_REQUIRE(journal.MarkReplayReady());
+    }
+    // Once reset preparation completed, an ordinary restart preserves replay
+    // progress; it does not repeat the destructive-transition preflight.
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(!options.reindex_chainstate);
+    BOOST_CHECK(!options.fReindexGeth);
+    BOOST_CHECK(!fReindexGeth);
+    node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+    captured.phase = node::PQLegacyUpgradePhase::REPLAY_READY;
+    BOOST_CHECK(*journal.ReadUpgrade() == captured);
+}
+
+BOOST_AUTO_TEST_CASE(interrupted_capture_accepts_intact_suffix_with_reset_validity)
+{
+    MakeLegacy();
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    node::PQLegacyUpgradeRecord captured;
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.ReadUpgrade());
+        captured = *journal.ReadUpgrade();
+    }
+    {
+        LOCK(cs_main);
+        node::BlockTreeDB db{DB("blocks/index")};
+        for (int32_t height{consensus.nPQActivationHeight}; height < static_cast<int32_t>(hashes.size()); ++height) {
+            CDiskBlockIndex index;
+            const auto key{std::pair{uint8_t{'b'}, hashes[height]}};
+            BOOST_REQUIRE(db.Read(key, index));
+            // ResetPQLegacyUpgradeSuffix can already have invalidated the old
+            // suffix's cached validation before the original coins are erased.
+            index.nStatus &= ~(BLOCK_VALID_MASK | BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK);
+            index.nStatus |= BLOCK_VALID_TREE;
+            BOOST_REQUIRE(db.Write(key, index, true));
+        }
+    }
+    options = {};
+    fReindexGeth = false;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+    BOOST_CHECK(fReindexGeth);
+    node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+    BOOST_REQUIRE(journal.ReadUpgrade());
+    BOOST_CHECK(*journal.ReadUpgrade() == captured);
+}
+
+BOOST_AUTO_TEST_CASE(interrupted_reset_without_original_coins_or_index_resumes)
+{
+    MakeLegacy();
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    node::PQLegacyUpgradeRecord captured;
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.ReadUpgrade());
+        captured = *journal.ReadUpgrade();
+    }
+    {
+        CDBWrapper coins{DB("chainstate")};
+        BOOST_REQUIRE(coins.Erase(uint8_t{'B'}, true));
+    }
+    BOOST_REQUIRE(fs::remove_all(Path("blocks/index")) > 0);
+    options = {};
+    fReindexGeth = false;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+    BOOST_CHECK(fReindexGeth);
+    node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+    BOOST_REQUIRE(journal.ReadUpgrade());
     BOOST_CHECK(*journal.ReadUpgrade() == captured);
 }
 

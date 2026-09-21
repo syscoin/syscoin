@@ -5,10 +5,14 @@
 #include <node/pq_legacy_migration.h>
 
 #include <chain.h>
+#include <consensus/consensus.h>
+#include <consensus/merkle.h>
 #include <consensus/pq_migration_config.h>
+#include <consensus/validation.h>
 #include <dbwrapper.h>
 #include <evo/deterministicmns.h>
 #include <flatfile.h>
+#include <hash.h>
 #include <logging.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
@@ -16,6 +20,7 @@
 #include <node/pq_legacy_database.h>
 #include <node/pq_legacy_upgrade.h>
 #include <node/utxo_snapshot.h>
+#include <streams.h>
 #include <txdb.h>
 #include <util/fs.h>
 #include <util/translation.h>
@@ -116,12 +121,89 @@ bool ReadSourceIndex(BlockTreeDB& db, const uint256& hash,
     return true;
 }
 
+/** Check witness bytes omitted from the transaction Merkle root. */
+bool CheckLegacyWitnessCommitment(const CBlock& block, int32_t height,
+                                  const Consensus::Params& consensus)
+{
+    const int commitment{height >= consensus.SegwitHeight
+        ? GetWitnessCommitmentIndex(block) : NO_WITNESS_COMMITMENT};
+    if (commitment == NO_WITNESS_COMMITMENT) {
+        return std::none_of(block.vtx.begin(), block.vtx.end(),
+                            [](const auto& tx) { return tx->HasWitness(); });
+    }
+    // CheckBlock has already established a nonempty coinbase input vector.
+    const auto& witness{block.vtx[0]->vin[0].scriptWitness.stack};
+    if (witness.size() != 1 || witness[0].size() != 32) return false;
+    uint256 root{BlockWitnessMerkleRoot(block)};
+    CHash256().Write(root).Write(witness[0]).Finalize(root);
+    const auto& script{block.vtx[0]->vout[commitment].scriptPubKey};
+    return std::equal(root.begin(), root.end(), script.begin() + 6);
+}
+
+/** Authenticate complete disk records before authorizing the coins reset. */
+bool InspectLegacyBlock(const ChainstateManager& chainman,
+                         const CDiskBlockIndex& index, const uint256& hash,
+                         uintmax_t file_size, bilingual_str& error)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    const auto fail = [&](const std::string& reason) {
+        return Fail(error, "Legacy block " + hash.ToString() + " at height " +
+            std::to_string(index.nHeight) + " is incomplete or corrupt (" + reason +
+            "). Restore the complete local block history before upgrading; "
+            "no chainstate was erased.");
+    };
+    try {
+        if (index.nDataPos < BLOCK_SERIALIZATION_HEADER_SIZE) {
+            return fail("invalid disk position");
+        }
+        const FlatFilePos framing{index.nFile, index.nDataPos -
+            static_cast<unsigned int>(BLOCK_SERIALIZATION_HEADER_SIZE)};
+        auto file{chainman.m_blockman.OpenBlockFile(framing, /*fReadOnly=*/true)};
+        if (file.IsNull()) return fail("cannot open block file");
+        MessageStartChars magic;
+        unsigned int size;
+        file >> magic >> size;
+        // Match the block importer's bound: a disk record can contain 32 MiB
+        // of NEVM payload in addition to the Core block, exceeding MAX_SIZE.
+        if (magic != chainman.GetParams().MessageStart() || size < 80 ||
+            size > MAX_BLOCK_SERIALIZED_SIZE ||
+            uint64_t{index.nDataPos} + size > file_size) {
+            return fail("invalid or truncated block record");
+        }
+        std::vector<uint8_t> bytes(size);
+        file.read(MakeWritableByteSpan(bytes));
+        SpanReader reader{SER_DISK, file.GetVersion(), bytes};
+        CBlock block;
+        reader >> block;
+        if (!reader.empty() || block.GetHash() != hash ||
+            index.ConstructBlockHash() != hash ||
+            block.hashPrevBlock != index.hashPrev || block.vtx.size() != index.nTx) {
+            return fail("block record does not match its index");
+        }
+        // Check committed Core data and the AuxPoW wrapper without loading
+        // PoDA sidecars, executing Geth, or applying new contextual PQ rules
+        // to the legacy suffix. Those checks belong to the subsequent replay.
+        BlockValidationState state;
+        if (!CheckBlock(block, state, chainman.GetConsensus())) {
+            return fail(state.ToString());
+        }
+        if (!CheckLegacyWitnessCommitment(block, index.nHeight, chainman.GetConsensus())) {
+            return fail("witness commitment mismatch");
+        }
+        return true;
+    } catch (const std::exception& exception) {
+        return fail(exception.what());
+    }
+}
+
 bool InspectLegacyHistory(ChainstateManager& chainman,
                           const ChainstateLoadOptions& options,
                           BlockTreeDB& db, const uint256& best,
                           const CDiskBlockIndex& tip,
                           PQLegacyUpgradeRecord& record,
-                          bilingual_str& error)
+                          bilingual_str& error,
+                          bool require_legacy_validity = true)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     const auto& consensus{chainman.GetConsensus()};
@@ -136,7 +218,8 @@ bool InspectLegacyHistory(ChainstateManager& chainman,
             "This legacy datadir was pruned; restore an unpruned legacy datadir "
             "before upgrading. No chainstate was erased.");
     }
-    if (!tip.IsValid(BLOCK_VALID_SCRIPTS) || tip.IsAssumedValid()) {
+    if (require_legacy_validity &&
+        (!tip.IsValid(BLOCK_VALID_SCRIPTS) || tip.IsAssumedValid())) {
         return Fail(error,
             "The legacy coins tip is not fully validated. Finish validation "
             "with the legacy Syscoin release before the PQ upgrade.");
@@ -159,9 +242,10 @@ bool InspectLegacyHistory(ChainstateManager& chainman,
             return Fail(error, "PQ upgrade preflight interrupted; no chainstate was erased.");
         }
         if (cursor.nHeight != height ||
-            (cursor.nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
-            cursor.IsAssumedValid() ||
-            (height > 0 && !cursor.IsValid(BLOCK_VALID_SCRIPTS))) {
+            (require_legacy_validity &&
+             ((cursor.nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
+              cursor.IsAssumedValid() ||
+              (height > 0 && !cursor.IsValid(BLOCK_VALID_SCRIPTS))))) {
             return Fail(error,
                 "Legacy history is inconsistent or not fully validated. "
                 "Finish validation with the legacy Syscoin release before upgrading.");
@@ -182,11 +266,7 @@ bool InspectLegacyHistory(ChainstateManager& chainman,
             }
             found = block_file_sizes.emplace(cursor.nFile, fs::file_size(file)).first;
         }
-        if (uint64_t{cursor.nDataPos} + 80 > found->second) {
-            return Fail(error,
-                "A legacy block file is truncated. Restore the complete local "
-                "block history before upgrading; no chainstate was erased.");
-        }
+        if (!InspectLegacyBlock(chainman, cursor, hash, found->second, error)) return false;
         if (height == predecessor_height) record.predecessor_hash = hash;
         if (height == 0) {
             if (hash != consensus.hashGenesisBlock || !cursor.hashPrev.IsNull()) {
@@ -237,6 +317,33 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
                 return Fail(error,
                     "The saved PQ upgrade belongs to a different network or "
                     "activation height; the datadir was not changed.");
+            }
+            if (record->phase == PQLegacyUpgradePhase::REBUILD_REQUIRED &&
+                !options.reindex && !options.reindex_chainstate) {
+                uint256 best;
+                if (!ReadLegacyCoinsTip(chainman, best, error)) return false;
+                if (best == record->legacy_tip_hash) {
+                    // An interrupted preparation may still be about to erase
+                    // the original coins. Recheck its replay inputs, including
+                    // journals captured by an older header-only preflight.
+                    // Saved provenance remains authoritative: suffix validity
+                    // may already have been lowered before the coins reset.
+                    const fs::path index_path{datadir / "blocks" / "index"};
+                    if (!fs::exists(index_path)) {
+                        return Fail(error, "The saved PQ upgrade has no retained block index; "
+                                           "no chainstate was erased.");
+                    }
+                    BlockTreeDB block_db{InspectionParams(chainman, index_path)};
+                    CDiskBlockIndex tip;
+                    if (!ReadSourceIndex(block_db, best, tip, error)) return false;
+                    PQLegacyUpgradeRecord inspected;
+                    if (!InspectLegacyHistory(chainman, options, block_db, best, tip,
+                            inspected, error, /*require_legacy_validity=*/false)) return false;
+                    if (inspected != *record) {
+                        return Fail(error, "Retained legacy history disagrees with the saved PQ "
+                                           "upgrade; no chainstate was erased.");
+                    }
+                }
             }
             if (record->phase == PQLegacyUpgradePhase::REBUILD_REQUIRED ||
                 options.reindex || options.reindex_chainstate) {
