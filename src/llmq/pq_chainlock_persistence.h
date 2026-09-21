@@ -63,7 +63,9 @@ inline constexpr uint16_t ROSTER_RECOVERY_PRECOMMIT_VERSION{1};
  * It is first fsynced as PENDING before the future Bitcoin block exists, then
  * may advance exactly once to READY before any share is produced. Normal
  * handoffs and outage recovery are authorized by durable ChainLock state and
- * never use this record.
+ * never use this record. Before the first winner, an expired attempt may be
+ * atomically replaced by a strictly later canonical PENDING attempt; signer
+ * leaf reservations remain in their independent journal.
  */
 struct RosterRecoveryPrecommit {
     static constexpr std::size_t WIRE_SIZE{
@@ -605,8 +607,19 @@ public:
         const RosterRecoveryPrecommit& precommit,
         ChainLockPersistenceError* error = nullptr);
 
-    /** Atomically replace one exact attempt; never exposes a clear gap. */
+    /** Replace an exact PENDING attempt on another branch at the same target. */
     [[nodiscard]] bool ReplaceRosterRecoveryPrecommit(
+        const RosterRecoveryPrecommit& expected,
+        const RosterRecoveryPrecommit& replacement,
+        ChainLockPersistenceError* error = nullptr);
+
+    /**
+     * Retire an exact PENDING or READY initialization attempt for a strictly
+     * later canonical PENDING target, before any durable winner exists. The
+     * caller establishes that the old round expired on the active chain.
+     * This does not erase or refund independent signer leaf reservations.
+     */
+    [[nodiscard]] bool AdvanceRosterRecoveryPrecommit(
         const RosterRecoveryPrecommit& expected,
         const RosterRecoveryPrecommit& replacement,
         ChainLockPersistenceError* error = nullptr);

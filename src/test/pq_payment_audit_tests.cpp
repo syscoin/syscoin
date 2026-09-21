@@ -406,6 +406,49 @@ BOOST_AUTO_TEST_CASE(schedule_alignment_and_overflow_fail_closed)
     BOOST_CHECK(!changed.IsStructurallyValid(ScheduleConfig()));
 }
 
+BOOST_AUTO_TEST_CASE(late_initializer_is_a_valid_first_audit_response)
+{
+    const auto config{ScheduleConfig()};
+    const auto epoch{BuildPaymentAuditEpochSchedule(config, 7)};
+    BOOST_REQUIRE(epoch);
+    BOOST_REQUIRE_EQUAL(epoch->rows.front().response_height, 2'025);
+    ChainLockStatement statement;
+    statement.height = epoch->rows.front().response_height;
+    statement.previous_chainlock_height = 864;
+    statement.roster_transition = RosterAuthorizationTransitionKind::INITIALIZE;
+    BOOST_CHECK(HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, statement));
+
+    auto changed{statement};
+    changed.height += 10;
+    BOOST_CHECK(!HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, changed));
+    changed = statement;
+    changed.previous_chainlock_height = 865;
+    BOOST_CHECK(!HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, changed));
+    changed = statement;
+    changed.previous_btcc_cursor = {865, NonNullHash(865), NonNullHash(866)};
+    BOOST_CHECK(!HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, changed));
+    changed = statement;
+    changed.btcc_receipt_state = {
+        {865, NonNullHash(865), NonNullHash(866)}, NonNullHash(867), 865, 875};
+    BOOST_CHECK(!HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, changed));
+    changed = statement;
+    changed.roster_authorization_base = {865, NonNullHash(865), NonNullHash(866)};
+    BOOST_CHECK(!HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, changed));
+
+    statement.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    BOOST_CHECK(!HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, statement));
+    statement.previous_chainlock_height = statement.height - PQ_CL_PERIOD;
+    BOOST_CHECK(HasCanonicalPaymentAuditResponsePredecessor(
+        config, 864, statement));
+}
+
 BOOST_AUTO_TEST_CASE(delayed_bitcoin_seed_selects_one_frozen_row)
 {
     const auto config{ScheduleConfig()};

@@ -40,7 +40,7 @@ constexpr uint32_t SNAPSHOT_LAG{144};
 constexpr std::size_t MAX_TEST_WORKERS{8};
 constexpr uint8_t AUTHORIZATION_MASK{0b0111};
 constexpr std::size_t CHILD_KEY_COUNT{
-    (ACTIVE_QUORUMS + 1) * QUORUM_MIN_VALID};
+    2 * ACTIVE_QUORUMS * QUORUM_MIN_VALID};
 
 uint256 NonNullHash(uint64_t value, uint64_t salt = 0)
 {
@@ -250,7 +250,7 @@ struct FullDimensionFixture {
 std::optional<uint32_t> EpochForSnapshot(
     const FullDimensionFixture& fixture, int32_t snapshot_height)
 {
-    for (uint32_t epoch{0}; epoch <= ACTIVE_QUORUMS; ++epoch) {
+    for (uint32_t epoch{0}; epoch < 2 * ACTIVE_QUORUMS; ++epoch) {
         const auto expected{RegistrationCutoffHeight(
             fixture.config.schedule, epoch, SNAPSHOT_LAG)};
         if (expected && *expected == snapshot_height) return epoch;
@@ -314,12 +314,16 @@ OperatorKeyState MakeOperatorState(
     return state;
 }
 
-bool GenerateMemberKeys(FullDimensionFixture& fixture)
+bool GenerateMemberKeys(
+    FullDimensionFixture& fixture,
+    std::size_t key_epochs = ACTIVE_QUORUMS + 1)
 {
+    if (key_epochs * QUORUM_MIN_VALID > CHILD_KEY_COUNT) return false;
     for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
         fixture.member_indices.emplace(NonNullHash(10'000 + member), member);
     }
-    return ParallelFor(CHILD_KEY_COUNT, [&](std::size_t key_index) {
+    return ParallelFor(key_epochs * QUORUM_MIN_VALID, [&](std::size_t key_index) {
+        if (fixture.secret_keys[key_index]) return true;
         scheduled_wots::KeyGenerationSeed seed{};
         FillKeySeed(key_index, seed);
         auto secret_key{scheduled_wots::GenerateSecretKey(seed)};
@@ -333,13 +337,25 @@ bool GenerateMemberKeys(FullDimensionFixture& fixture)
     });
 }
 
-bool BuildRostersAndStatement(FullDimensionFixture& fixture)
+bool BuildRostersAndStatement(FullDimensionFixture& fixture, bool initialize = false)
 {
     QuorumBuildError build_error{QuorumBuildError::NONE};
+    const int32_t target_height{fixture.chain->Tip().nHeight};
     const auto active_epochs{
-        ActiveEpochsAtHeight(fixture.config.schedule, TARGET_HEIGHT)};
+        ActiveEpochsAtHeight(fixture.config.schedule, target_height)};
     if (!active_epochs || active_epochs->front().epoch == 0) return false;
     auto beacon_bundle{ReadyBundle(active_epochs->front().epoch)};
+    if (initialize) {
+        const auto anchor{BTCCursor{target_height, fixture.chain->Tip().GetBlockHash(),
+                                    NonNullHash(90'010)}};
+        auto shared{ReadySeed(active_epochs->back().epoch)};
+        shared.anchor_cursor = anchor;
+        for (auto& seed : beacon_bundle.seeds) {
+            const uint32_t epoch{seed.epoch};
+            seed = shared;
+            seed.epoch = epoch;
+        }
+    }
     BindRecoverySource(beacon_bundle);
     const QuorumSnapshotLookup snapshot_lookup{
         [&](const CBlockIndex& snapshot_index)
@@ -372,7 +388,7 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
     if (!roster_cache) return false;
     const auto canonical_roster_set{
         roster_cache->GetVerifiedActiveNoPublish(
-            TARGET_HEIGHT, fixture.chain->Tip(), beacon_bundle,
+            target_height, fixture.chain->Tip(), beacon_bundle,
             &build_error)};
     if (!canonical_roster_set || build_error != QuorumBuildError::NONE) {
         return false;
@@ -396,21 +412,19 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
         }
     }
 
-    fixture.statement.height = TARGET_HEIGHT;
+    fixture.statement = {};
+    fixture.authorization = {};
+    fixture.statement.height = target_height;
     fixture.statement.block_hash = fixture.chain->Tip().GetBlockHash();
     fixture.statement.previous_chainlock_height =
-        PREVIOUS_CHAINLOCK_HEIGHT;
-    fixture.statement.previous_chainlock_hash = NonNullHash(90'002);
+        initialize ? BTCC_CANDIDATE_ORIGIN - 1 : PREVIOUS_CHAINLOCK_HEIGHT;
+    fixture.statement.previous_chainlock_hash = initialize
+        ? fixture.chain->indices[BTCC_CANDIDATE_ORIGIN - 1].GetBlockHash()
+        : NonNullHash(90'002);
     fixture.statement.payment_probation_state_hash = NonNullHash(90'003);
     fixture.statement.roster_beacons.active = beacon_bundle;
     fixture.statement.roster_beacons.next.epoch =
         beacon_bundle.seeds.back().epoch + 1;
-    RosterBeaconWindow previous_window;
-    previous_window.active =
-        ReadyBundle(active_epochs->front().epoch - 1);
-    previous_window.next = ReadySeed(active_epochs->back().epoch);
-    previous_window.active.recovery_authority_source =
-        beacon_bundle.recovery_authority_source;
     fixture.authorization.predecessor_height =
         fixture.statement.previous_chainlock_height;
     fixture.authorization.predecessor_block_hash =
@@ -419,19 +433,27 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture)
         fixture.config.schedule,
         BTCCScheduleConfig{.candidate_origin = BTCC_CANDIDATE_ORIGIN},
         BTCC_CANDIDATE_ORIGIN - 1};
-    fixture.statement.roster_authorization_base = {
-        fixture.statement.previous_chainlock_height,
-        fixture.statement.previous_chainlock_hash,
-        NonNullHash(90'005)};
-    fixture.authorization.authorization_base =
-        fixture.statement.roster_authorization_base;
-    fixture.authorization.previous = RosterAuthorizationPriorState{
-        NonNullHash(90'004), previous_window};
-    fixture.statement.roster_transition =
-        RosterAuthorizationTransitionKind::ROTATE;
-    fixture.authorization.normal_input =
-        test::MakeSyntheticNormalRosterAuthorizationInput(
+    if (initialize) {
+        fixture.statement.roster_transition = RosterAuthorizationTransitionKind::INITIALIZE;
+        fixture.statement.accepted_btcc_cursor = beacon_bundle.seeds.back().anchor_cursor;
+        fixture.statement.btcc_advance = BTCCAdvance::ADVANCE;
+        fixture.authorization.admission = RosterAuthorizationAdmission::INITIALIZE;
+    } else {
+        RosterBeaconWindow previous_window;
+        previous_window.active = ReadyBundle(active_epochs->front().epoch - 1);
+        previous_window.next = ReadySeed(active_epochs->back().epoch);
+        previous_window.active.recovery_authority_source = beacon_bundle.recovery_authority_source;
+        fixture.statement.roster_authorization_base = {
+            fixture.statement.previous_chainlock_height,
+            fixture.statement.previous_chainlock_hash,
+            NonNullHash(90'005)};
+        fixture.authorization.authorization_base = fixture.statement.roster_authorization_base;
+        fixture.authorization.previous = RosterAuthorizationPriorState{
+            NonNullHash(90'004), previous_window};
+        fixture.statement.roster_transition = RosterAuthorizationTransitionKind::ROTATE;
+        fixture.authorization.normal_input = test::MakeSyntheticNormalRosterAuthorizationInput(
             fixture.statement, *fixture.authorization.previous);
+    }
     RosterAuthorizationTransition transition;
     transition.kind = fixture.statement.roster_transition;
     transition.target_height = fixture.statement.height;
@@ -1093,6 +1115,65 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     BOOST_REQUIRE(prepared_corrupted_audit);
     BOOST_CHECK(!verifier.VerifyChecks(
         std::move(prepared_corrupted_audit->checks)));
+
+    // Reuse the expensive keys already generated above. A later first winner
+    // uses epochs 4..7, so only epochs 5..7 need new keys. This exercises the
+    // real 801-signature wire/verifier path without another full fixture run.
+    constexpr int32_t LATER_INITIALIZATION_TARGET{3465};
+    constexpr int32_t ACTIVATION_PREDECESSOR{BTCC_CANDIDATE_ORIGIN - 1};
+    BOOST_REQUIRE(GenerateMemberKeys(*fixture, 2 * ACTIVE_QUORUMS));
+    fixture->chain = std::make_unique<IndexChain>(LATER_INITIALIZATION_TARGET);
+    BOOST_REQUIRE(BuildRostersAndStatement(*fixture, /*initialize=*/true));
+    BOOST_CHECK_EQUAL(fixture->statement.height, LATER_INITIALIZATION_TARGET);
+    BOOST_CHECK_EQUAL(fixture->statement.previous_chainlock_height, ACTIVATION_PREDECESSOR);
+    BOOST_CHECK(fixture->statement.roster_authorization_base.IsNull());
+    BOOST_CHECK(fixture->statement.btcc_receipt_state == BTCCReceiptState{});
+    BOOST_CHECK_EQUAL(fixture->rosters->front().descriptor.epoch, 4U);
+    BOOST_CHECK_EQUAL(fixture->rosters->back().descriptor.epoch, 7U);
+    BOOST_REQUIRE(BuildAndSignShares(*fixture));
+    auto later_roster_set{VerifiedRosterSet::Create(
+        fixture->genesis_hash, fixture->rosters, &context_error)};
+    BOOST_REQUIRE(later_roster_set);
+    auto later_context{PreparedChainLockContext::Create(
+        fixture->config.schedule, fixture->statement, later_roster_set,
+        fixture->authorization, &context_error)};
+    BOOST_REQUIRE(later_context);
+    BOOST_CHECK_EQUAL(later_context->AuthorizationMask(), 0b1111);
+    auto later_collector{ChainLockCollector::Create(later_context, &collection_error)};
+    BOOST_REQUIRE(later_collector);
+    for (std::size_t index{0}; index < fixture->shares.size(); ++index) {
+        BOOST_REQUIRE(later_collector->AddVerifiedShare(
+            fixture->shares[index], &collection_error) == ShareCollectionResult::ACCEPTED);
+        BOOST_CHECK_EQUAL(later_collector->IsComplete(), index + 1 == FINAL_SIGNATURE_COUNT);
+    }
+    const auto later_collected{later_collector->FinalizeCollection()};
+    BOOST_REQUIRE(later_collected);
+    DataStream later_encoded;
+    later_encoded << later_collected->Certificate();
+    BOOST_REQUIRE_EQUAL(later_encoded.size(), FinalChainLock::WIRE_SIZE);
+    const auto later_decoded{ReadFinalChainLock(later_encoded, FinalChainLock::WIRE_SIZE)};
+    BOOST_CHECK(later_encoded.empty());
+    BOOST_CHECK_EQUAL(later_decoded.signatures.size(), FINAL_SIGNATURE_COUNT);
+    BOOST_CHECK(later_decoded == later_collected->Certificate());
+
+    // Independent receivers rebuild the frozen rosters and authorization;
+    // neither gets the collector's verified capability or signature cache.
+    for (unsigned receiver{0}; receiver < 2; ++receiver) {
+        BOOST_REQUIRE(BuildRostersAndStatement(*fixture, /*initialize=*/true));
+        BOOST_CHECK(fixture->statement == later_decoded.statement);
+        const auto receiver_rosters{VerifiedRosterSet::Create(
+            fixture->genesis_hash, fixture->rosters, &context_error)};
+        BOOST_REQUIRE(receiver_rosters);
+        const auto receiver_context{PreparedChainLockContext::Create(
+            fixture->config.schedule, later_decoded.statement, receiver_rosters,
+            fixture->authorization, &context_error)};
+        BOOST_REQUIRE(receiver_context);
+        auto prepared_later{PrepareFinalChainLockVerification(
+            later_decoded, *receiver_context, &verification_error)};
+        BOOST_REQUIRE(prepared_later);
+        ChainLockVerifier receiver_verifier{TestWorkerCount()};
+        BOOST_CHECK(receiver_verifier.VerifyChecks(std::move(prepared_later->checks)));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

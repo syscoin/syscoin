@@ -330,6 +330,26 @@ BOOST_AUTO_TEST_CASE(receipt_assumption_anchor_binds_exact_latest_slot)
     BOOST_CHECK(!carrier_after_anchor.IsValid());
 }
 
+BOOST_AUTO_TEST_CASE(receipt_assumption_anchor_accepts_delayed_initialization)
+{
+    auto config{MakeConfig()};
+    config.btcc_schedule.candidate_origin = 865;
+    config.btcc_receipt_assumption_anchor = BTCCReceiptAssumptionAnchor{
+        3'195, NonNullHash(3195),
+        BTCCReceiptState{
+            MakeCursor(2'025, 1), NonNullHash(2), 2'025, 3'195}};
+    BOOST_REQUIRE(config.IsValid());
+    auto ordinary_target{config};
+    ordinary_target.btcc_receipt_assumption_anchor.receipt_state
+        .latest_chainlock_target_height += 10;
+    BOOST_CHECK(!ordinary_target.IsValid());
+    auto before_propagation{config};
+    before_propagation.btcc_receipt_assumption_anchor.height = 2'025;
+    before_propagation.btcc_receipt_assumption_anchor.receipt_state
+        .latest_receipt_carrier_height = 2'025;
+    BOOST_CHECK(!before_propagation.IsValid());
+}
+
 BOOST_AUTO_TEST_CASE(durable_btcc_receipt_state_accepts_exact_keep_progress)
 {
     const BTCCursor cursor{MakeCursor(870, 10)};
@@ -1870,6 +1890,41 @@ BOOST_AUTO_TEST_CASE(all_admissions_require_the_unique_predecessor_successor)
     BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
 }
 
+BOOST_AUTO_TEST_CASE(late_initialization_can_skip_empty_bootstrap_rounds)
+{
+    auto config{MakeConfig()};
+    config.btcc_schedule.candidate_origin = 865;
+    TestFinalityContext context;
+    ChainLockFinalityStore store{NonNullHash(401), config, context};
+    auto initializer{MakeChainLock(2'025, 864, NonNullHash(864), 401)};
+    initializer.statement.roster_transition =
+        RosterAuthorizationTransitionKind::INITIALIZE;
+    initializer.statement.roster_authorization_base = {};
+    initializer.statement.roster_beacons = InitializationWindow(2'025);
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_CHECK(store.PrepareCandidate(initializer, &error));
+    // Startup restoration uses a fresh store, without the live admission
+    // attempt's witness-deduplication entry.
+    ChainLockFinalityStore reopened{NonNullHash(401), config, context};
+    BOOST_CHECK(reopened.PreparePersistedCandidate(initializer, &error));
+
+    auto wrong_target{initializer};
+    wrong_target.statement.height += 10;
+    BOOST_CHECK(!store.PrepareCandidate(wrong_target, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
+    auto wrong_predecessor{initializer};
+    wrong_predecessor.statement.previous_chainlock_height = 865;
+    BOOST_CHECK(!store.PrepareCandidate(wrong_predecessor, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
+    auto ordinary{initializer};
+    ordinary.statement.roster_transition =
+        RosterAuthorizationTransitionKind::KEEP;
+    ordinary.statement.roster_authorization_base = {
+        864, NonNullHash(864), NonNullHash(402)};
+    BOOST_CHECK(!store.PrepareCandidate(ordinary, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INELIGIBLE_HEIGHT);
+}
+
 BOOST_AUTO_TEST_CASE(persisted_latest_restore_is_separate_from_live_admission)
 {
     const uint256 genesis{NonNullHash(40)};
@@ -2358,6 +2413,80 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(*ahead.GetBest() == recovery);
     BOOST_CHECK(*caught_up.GetBest() == recovery);
     BOOST_CHECK(*behind.GetBest() == recovery);
+}
+
+BOOST_AUTO_TEST_CASE(first_receipt_cursor_proof_cannot_bypass_verified_import)
+{
+    const uint256 genesis{NonNullHash(440)};
+    auto config{MakeConfig()};
+    config.btcc_schedule.candidate_origin = 865;
+    auto durable{MakeChainLock(2'025, 864, NonNullHash(864), 440)};
+    durable.statement.roster_transition = RosterAuthorizationTransitionKind::INITIALIZE;
+    durable.statement.roster_authorization_base = {};
+    durable.statement.roster_beacons = InitializationWindow(2'025);
+    durable.statement.accepted_btcc_cursor = {
+        2'025, durable.statement.block_hash, NonNullHash(441)};
+    durable.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    BOOST_REQUIRE(durable.IsStructurallyValid());
+    const BTCCursor first_cursor{865, NonNullHash(442), NonNullHash(443)};
+    auto candidate{MakeChainLock(3'175, 3'170, NonNullHash(3170), 444)};
+    candidate.statement.roster_transition = RosterAuthorizationTransitionKind::RECOVER;
+    candidate.statement.roster_authorization_base = {
+        865, first_cursor.sys_hash, NonNullHash(445)};
+    const auto recovered{MakeRecoveryRosterBeaconWindow(
+        durable.statement.roster_beacons.active.recovery_authority_source, 11)};
+    BOOST_REQUIRE(recovered);
+    candidate.statement.roster_beacons = *recovered;
+    candidate.statement.previous_btcc_cursor = first_cursor;
+    candidate.statement.accepted_btcc_cursor = first_cursor;
+    candidate.statement.btcc_receipt_state = {
+        first_cursor, NonNullHash(446), 865, 2'035};
+    BOOST_REQUIRE(candidate.IsStructurallyValid());
+    BTCCCursorReconciliationProof proof;
+    proof.carrier_height = 2'035;
+    proof.carrier_hash = NonNullHash(447);
+    proof.carrier_parent_hash = NonNullHash(448);
+    proof.skipped_cursor = durable.statement.accepted_btcc_cursor;
+    proof.current_receipt_state = candidate.statement.btcc_receipt_state;
+    proof.receipt_logical_id = candidate.statement.roster_authorization_base.logical_id;
+    BOOST_REQUIRE(proof.IsStructurallyValid());
+    BOOST_REQUIRE(IsBTCCCursorReconciliationProof(durable, candidate, proof, config));
+
+    for (unsigned mutation{0}; mutation < 11; ++mutation) {
+        BOOST_TEST_CONTEXT("first receipt cursor transition mutation=" << mutation) {
+            auto wrong_durable{durable};
+            auto wrong_candidate{candidate};
+            auto wrong_proof{proof};
+            if (mutation == 0) wrong_durable.statement.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+            if (mutation == 1) wrong_durable.statement.btcc_receipt_state = candidate.statement.btcc_receipt_state;
+            if (mutation == 2) wrong_candidate.statement.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+            if (mutation == 3) wrong_candidate.statement.btcc_advance = BTCCAdvance::ADVANCE;
+            if (mutation == 4) wrong_candidate.statement.height = 2'025;
+            if (mutation == 5) wrong_candidate.statement.previous_chainlock_height = 2'020;
+            if (mutation == 6) wrong_candidate.statement.height += 10;
+            if (mutation == 7) wrong_candidate.statement.previous_btcc_cursor.btc_hash = NonNullHash(449);
+            if (mutation == 8) wrong_proof.receipt_logical_id = NonNullHash(450);
+            if (mutation == 9) wrong_proof.previous_receipt_state = wrong_proof.current_receipt_state;
+            if (mutation == 10) wrong_proof.carrier_height++;
+            BOOST_CHECK(!IsBTCCCursorReconciliationProof(
+                wrong_durable, wrong_candidate, wrong_proof, config));
+        }
+    }
+
+    TestFinalityContext context;
+    ChainLockFinalityStore store{genesis, config, context};
+    auto prepared{store.PreparePersistedCandidate(durable)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store.AcceptPersistedVerified(*prepared, durable, true));
+    context.btcc_cursor_reconciliation = proof;
+    prepared = store.PrepareCatchupCandidate(candidate);
+    BOOST_REQUIRE(prepared);
+    ChainLockFinalityError error{ChainLockFinalityError::NONE};
+    BOOST_CHECK(!store.AcceptCatchupVerified(
+        *prepared, candidate, true, [] { return true; }, {}, &error));
+    BOOST_CHECK(error == ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
+    BOOST_REQUIRE(store.GetBest());
+    BOOST_CHECK(*store.GetBest() == durable);
 }
 
 BOOST_AUTO_TEST_CASE(catchup_rechecks_context_after_index_durability_hook)

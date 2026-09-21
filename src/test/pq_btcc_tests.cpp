@@ -560,6 +560,56 @@ BOOST_AUTO_TEST_CASE(initial_receipt_retries_after_null_fixed_carrier)
         *receipted, initial));
 }
 
+BOOST_AUTO_TEST_CASE(late_initialization_receipt_preserves_branch_and_propagation_checks)
+{
+    const auto schedule{MakeChainLockScheduleConfig(0)};
+    BOOST_REQUIRE(schedule);
+    const BTCCScheduleConfig btcc{.candidate_origin = 865};
+    constexpr int32_t ACTIVATION_PREDECESSOR{864};
+    constexpr int32_t TARGET{2'025};
+    constexpr int32_t FIRST_CARRIER{TARGET + PQ_BTCC_NEVM_LAG};
+    // An accepted initializer remains receiptable even after another bootstrap
+    // round becomes available: a missing receipt must not strand its winner.
+    constexpr int32_t LATE_CARRIER{3'195};
+    IndexChain chain{LATE_CARRIER + 1};
+    chain.At(TARGET).btcpPrevCommitment = NonNullHash(22600);
+    BTCCReceipt receipt;
+    receipt.chainlock_target_height = TARGET;
+    receipt.chainlock_target_hash = chain.At(TARGET).GetBlockHash();
+    receipt.chainlock_logical_id = NonNullHash(22601);
+    receipt.accepted_cursor = Cursor(chain, TARGET);
+    const BTCCReceiptState empty;
+    BOOST_REQUIRE(receipt.IsStructurallyValid());
+    BOOST_CHECK(!IsBTCCReceiptTargetForCarrier(
+        *schedule, btcc, ACTIVATION_PREDECESSOR, empty, TARGET, TARGET));
+    for (const int32_t carrier : {FIRST_CARRIER, LATE_CARRIER}) {
+        BOOST_CHECK(ValidateBTCCReceiptOnBranch(
+            *schedule, btcc, ACTIVATION_PREDECESSOR, chain.At(carrier),
+            empty, receipt));
+        const auto applied{ApplyBTCCReceiptState(
+            NonNullHash(22602), *schedule, btcc, ACTIVATION_PREDECESSOR,
+            carrier, chain.At(carrier).GetBlockHash(), empty, receipt)};
+        BOOST_REQUIRE(applied);
+        BOOST_CHECK_EQUAL(applied->latest_chainlock_target_height, TARGET);
+        BOOST_CHECK_EQUAL(applied->latest_receipt_carrier_height, carrier);
+        const auto reconstructed{ReconstructBTCCReceipt(
+            NonNullHash(22602), *schedule, btcc, ACTIVATION_PREDECESSOR,
+            chain.At(carrier), empty, *applied, receipt.chainlock_logical_id)};
+        BOOST_REQUIRE(reconstructed);
+        BOOST_CHECK(*reconstructed == receipt);
+    }
+    auto wrong_branch{receipt};
+    wrong_branch.chainlock_target_hash = NonNullHash(22603);
+    BOOST_CHECK(!ValidateBTCCReceiptOnBranch(
+        *schedule, btcc, ACTIVATION_PREDECESSOR, chain.At(LATE_CARRIER),
+        empty, wrong_branch));
+    BOOST_CHECK(!IsBTCCReceiptTargetForCarrier(
+        *schedule, btcc, ACTIVATION_PREDECESSOR, empty, LATE_CARRIER,
+        TARGET + static_cast<int32_t>(btcc.candidate_period)));
+    BOOST_CHECK(!IsBTCCReceiptTargetForCarrier(
+        *schedule, btcc, TARGET, empty, LATE_CARRIER, TARGET));
+}
+
 BOOST_AUTO_TEST_CASE(indexed_receipt_reconstruction_is_exact_and_prune_safe)
 {
     const auto chainlock_schedule{MakeChainLockScheduleConfig(0)};

@@ -15,6 +15,7 @@
 #include <chainparams.h>
 #include <dbwrapper.h>
 #include <key.h>
+#include <llmq/pq_roster_beacon.h>
 #include <llmq/quorums_commitment.h>
 #include <masternode/masternodemeta.h>
 #include <messagesigner.h>
@@ -5504,6 +5505,138 @@ BOOST_AUTO_TEST_CASE(finality_roster_cutoffs_survive_branch_churn)
     BOOST_CHECK(!restarted.m_evoDb->Read(branch_hash(100), snapshot));
     BOOST_REQUIRE(restarted.m_evoDb->Read(
         branch_hash(100 + ordinary_branch_writes - 1), snapshot));
+}
+
+BOOST_AUTO_TEST_CASE(unreceipted_later_initializer_retains_first_receipt_rosters_through_gc_and_restart)
+{
+    SelectParams(ChainType::MAIN);
+    constexpr uint32_t roster_lag{llmq::pq::PQ_EPOCH_BLOCKS};
+    const int64_t minimum_origin{
+        static_cast<int64_t>(Params().GetConsensus().DIP0003Height) +
+        roster_lag + 1};
+    const int64_t aligned_origin{
+        ((minimum_origin + llmq::pq::PQ_EPOCH_ALIGNMENT - 1) /
+         llmq::pq::PQ_EPOCH_ALIGNMENT) *
+        llmq::pq::PQ_EPOCH_ALIGNMENT};
+    BOOST_REQUIRE_LE(aligned_origin,
+                     std::numeric_limits<int32_t>::max());
+    const llmq::pq::ChainLockScheduleConfig schedule{
+        .epoch_origin = static_cast<int32_t>(aligned_origin)};
+    const int32_t activation_predecessor{
+        schedule.epoch_origin +
+        static_cast<int32_t>(llmq::pq::PQ_WARMUP_BLOCKS)};
+    const auto first_target{llmq::pq::NextEligibleChainLockTargetHeight(
+        schedule, activation_predecessor)};
+    BOOST_REQUIRE(first_target);
+    const llmq::pq::BTCCScheduleConfig btcc_schedule{
+        .candidate_origin = *first_target};
+    const auto later_target{llmq::pq::CanonicalRosterRecoveryTargetHeight(
+        schedule, btcc_schedule, 7)};
+    BOOST_REQUIRE(later_target);
+    BOOST_REQUIRE(llmq::pq::IsCanonicalRosterInitializationTarget(
+        schedule, btcc_schedule, activation_predecessor, *later_target));
+    const auto first_epochs{
+        llmq::pq::ActiveEpochsAtHeight(schedule, *first_target)};
+    const auto later_epochs{
+        llmq::pq::ActiveEpochsAtHeight(schedule, *later_target)};
+    BOOST_REQUIRE(first_epochs);
+    BOOST_REQUIRE(later_epochs);
+    const auto bootstrap_floor{llmq::pq::RegistrationCutoffHeight(
+        schedule, first_epochs->front().epoch, roster_lag)};
+    const auto later_floor{llmq::pq::RegistrationCutoffHeight(
+        schedule, later_epochs->front().epoch, roster_lag)};
+    const auto signing_height{
+        llmq::pq::SigningHeightForTarget(schedule, *later_target)};
+    BOOST_REQUIRE(bootstrap_floor);
+    BOOST_REQUIRE(later_floor);
+    BOOST_REQUIRE(signing_height);
+    const int start_height{*bootstrap_floor - 1};
+    const auto chain{BuildSnapshotIndexChain(
+        start_height, *signing_height - start_height + 1)};
+    BOOST_REQUIRE_LT(
+        *bootstrap_floor,
+        chain.Tip()->nHeight - CDeterministicMNManager::LIST_CACHE_SIZE + 1);
+    const uint256 side_hash{
+        MakeSnapshotKey(*signing_height + 100)};
+    const ScopedDiskDBPath disk_db;
+    auto db_params = DBParams{
+        .path = disk_db.path,
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = false,
+        .wipe_data = true,
+    };
+    const auto maintain = [](CDeterministicMNManager& manager) {
+        // Compaction is deliberately bounded; finish its few erase batches
+        // so a still-readable snapshot cannot merely be waiting for GC.
+        for (size_t pass{0}; pass < 32; ++pass) {
+            BOOST_REQUIRE(manager.FlushCacheToDisk(/*bForceFlush=*/true));
+            if (!manager.AuxiliaryHistoryMaintenanceRetryRequested()) return;
+        }
+        BOOST_FAIL("snapshot compaction did not finish within its test bound");
+    };
+    const auto check_first_receipt_inputs =
+        [&](CDeterministicMNManager& manager) {
+            for (const auto& epoch : *first_epochs) {
+                const auto cutoff{llmq::pq::RegistrationCutoffHeight(
+                    schedule, epoch.epoch, roster_lag)};
+                BOOST_REQUIRE(cutoff);
+                BOOST_REQUIRE(manager.VerifyPersistedSnapshot(
+                    chain.At(*cutoff)));
+            }
+            CDeterministicMNList side_snapshot;
+            BOOST_REQUIRE(manager.m_evoDb->Read(side_hash, side_snapshot));
+            BOOST_CHECK_EQUAL(side_snapshot.GetHeight(), *bootstrap_floor);
+        };
+
+    {
+        CDeterministicMNManager manager(db_params);
+        manager.UpdatedBlockTip(chain.Tip());
+        constexpr int flush_chunk{256};
+        for (int height{start_height}; height <= *signing_height;
+             height += flush_chunk) {
+            WriteSnapshotRange(manager, height,
+                std::min(flush_chunk, *signing_height - height + 1));
+            BOOST_REQUIRE(
+                manager.FlushPendingSnapshotsToDisk(/*fSync=*/true));
+        }
+        BOOST_REQUIRE(manager.m_evoDb->WriteThrough(
+            side_hash,
+            CDeterministicMNList{side_hash, *bootstrap_floor, 0},
+            /*fSync=*/true));
+
+        // The handler keeps the original floor while a durable H2
+        // INITIALIZE still signs an empty receipt state. Its own H2 roster
+        // floor cannot replace the H1 inputs needed for the first receipt.
+        BOOST_CHECK_EQUAL(manager.UpdateFinalitySnapshotRetentionFloor(
+                              *bootstrap_floor),
+                          *bootstrap_floor);
+        maintain(manager);
+        check_first_receipt_inputs(manager);
+        CDeterministicMNList expired;
+        BOOST_CHECK(!manager.m_evoDb->Read(
+            MakeSnapshotKey(start_height), expired));
+    }
+
+    db_params.wipe_data = false;
+    CDeterministicMNManager restarted(db_params);
+    restarted.UpdatedBlockTip(chain.Tip());
+    // Startup rederives this floor from the still-unreceipted durable H2.
+    BOOST_CHECK_EQUAL(restarted.UpdateFinalitySnapshotRetentionFloor(
+                          *bootstrap_floor),
+                      *bootstrap_floor);
+    maintain(restarted);
+    check_first_receipt_inputs(restarted);
+
+    // Control: once the caller can safely release the bootstrap obligation,
+    // the later floor really does make the old inputs eligible for deletion.
+    BOOST_CHECK_EQUAL(restarted.UpdateFinalitySnapshotRetentionFloor(
+                          *later_floor),
+                      *later_floor);
+    maintain(restarted);
+    CDeterministicMNList expired;
+    BOOST_CHECK(!restarted.m_evoDb->Read(
+        MakeSnapshotKey(*bootstrap_floor), expired));
+    BOOST_CHECK(!restarted.m_evoDb->Read(side_hash, expired));
 }
 
 BOOST_AUTO_TEST_CASE(finality_roster_process_block_uses_sparse_write_through)

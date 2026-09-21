@@ -5,6 +5,7 @@
 #include <llmq/pq_chainlock_store.h>
 
 #include <llmq/pq_payment_audit.h>
+#include <llmq/pq_roster_beacon.h>
 
 #include <algorithm>
 #include <chrono>
@@ -86,13 +87,21 @@ bool IsDurableBTCCursorMonotonic(
 
 bool BTCCCursorReconciliationProof::IsStructurallyValid() const noexcept
 {
-    return carrier_height >= 0 && !carrier_hash.IsNull() &&
-           !carrier_parent_hash.IsNull() && skipped_cursor.IsStructurallyValid() &&
-           !skipped_cursor.IsNull() &&
-           previous_receipt_state.IsStructurallyValid() &&
-           current_receipt_state.IsStructurallyValid() &&
-           previous_receipt_state == current_receipt_state &&
-           receipt_logical_id.IsNull();
+    if (carrier_height < 0 || carrier_hash.IsNull() ||
+        carrier_parent_hash.IsNull() || !skipped_cursor.IsStructurallyValid() ||
+        skipped_cursor.IsNull() ||
+        !previous_receipt_state.IsStructurallyValid() ||
+        !current_receipt_state.IsStructurallyValid()) return false;
+    if (receipt_logical_id.IsNull()) {
+        return previous_receipt_state == current_receipt_state;
+    }
+    return previous_receipt_state == BTCCReceiptState{} &&
+           !current_receipt_state.cursor.IsNull() &&
+           current_receipt_state.cursor.sys_height < skipped_cursor.sys_height &&
+           current_receipt_state.latest_chainlock_target_height ==
+               current_receipt_state.cursor.sys_height &&
+           current_receipt_state.latest_receipt_carrier_height == carrier_height &&
+           carrier_height > skipped_cursor.sys_height;
 }
 
 bool IsBTCCCursorReconciliation(
@@ -108,6 +117,41 @@ bool IsBTCCCursorReconciliation(
     const auto& recovery{candidate.statement};
     const auto& skipped{durable.accepted_btcc_cursor};
     const auto& authenticated{durable.btcc_receipt_state.cursor};
+    if (durable.roster_transition == RosterAuthorizationTransitionKind::INITIALIZE &&
+        durable.btcc_receipt_state == BTCCReceiptState{} &&
+        recovery.btcc_receipt_state != BTCCReceiptState{}) {
+        const auto& receipt{recovery.btcc_receipt_state};
+        const auto& base{recovery.roster_authorization_base};
+        return recovery.roster_transition == RosterAuthorizationTransitionKind::RECOVER &&
+               recovery.height > durable.height &&
+               recovery.previous_chainlock_height >= durable.height &&
+               (recovery.previous_chainlock_height != durable.height ||
+                recovery.previous_chainlock_hash == durable.block_hash) &&
+               durable.previous_chainlock_height == config.activation_predecessor_height &&
+               durable.previous_btcc_cursor.IsNull() &&
+               durable.roster_authorization_base.IsNull() &&
+               skipped.sys_height == durable.height &&
+               skipped.sys_hash == durable.block_hash &&
+               IsCanonicalRosterInitializationTarget(
+                   config.chainlock_schedule, config.btcc_schedule,
+                   config.activation_predecessor_height, durable.height) &&
+               IsCanonicalRosterInitializationTarget(
+                   config.chainlock_schedule, config.btcc_schedule,
+                   config.activation_predecessor_height, recovery.height) &&
+               !receipt.cursor.IsNull() && receipt.cursor.sys_height < skipped.sys_height &&
+               receipt.latest_chainlock_target_height == receipt.cursor.sys_height &&
+               receipt.latest_receipt_carrier_height > durable.height &&
+               receipt.latest_receipt_carrier_height < recovery.height &&
+               IsBTCCReceiptTargetForCarrier(
+                   config.chainlock_schedule, config.btcc_schedule,
+                   config.activation_predecessor_height, {},
+                   receipt.latest_receipt_carrier_height, receipt.cursor.sys_height) &&
+               base.height == receipt.cursor.sys_height &&
+               base.block_hash == receipt.cursor.sys_hash && !base.logical_id.IsNull() &&
+               recovery.previous_btcc_cursor == receipt.cursor &&
+               recovery.accepted_btcc_cursor == receipt.cursor &&
+               recovery.btcc_advance == BTCCAdvance::KEEP;
+    }
     if (skipped.IsNull() ||
         !IsBTCCCandidateHeight(config.btcc_schedule,
                                skipped.sys_height) ||
@@ -145,6 +189,16 @@ bool IsBTCCCursorReconciliationProof(
         return false;
     }
     const auto& durable{best.statement};
+    if (!proof.receipt_logical_id.IsNull()) {
+        return candidate.statement.roster_transition ==
+                   RosterAuthorizationTransitionKind::RECOVER &&
+               durable.roster_transition == RosterAuthorizationTransitionKind::INITIALIZE &&
+               durable.btcc_receipt_state == BTCCReceiptState{} &&
+               proof.skipped_cursor == durable.accepted_btcc_cursor &&
+               proof.previous_receipt_state == durable.btcc_receipt_state &&
+               proof.current_receipt_state == candidate.statement.btcc_receipt_state &&
+               proof.receipt_logical_id == candidate.statement.roster_authorization_base.logical_id;
+    }
     const int64_t carrier_height{
         static_cast<int64_t>(durable.accepted_btcc_cursor.sys_height) +
         config.btcc_schedule.nevm_injection_lag};
@@ -327,17 +381,15 @@ bool ChainLockFinalityStoreConfig::IsValid() const noexcept
         btcc_receipt_assumption_anchor.receipt_state};
     const auto anchor_source{BTCCSourceHeightForNEVMInjection(
         btcc_schedule, anchor_state.latest_receipt_carrier_height)};
-    const auto initial_target{NextEligibleChainLockTargetHeight(
-        chainlock_schedule, activation_predecessor_height)};
-    const auto initial_signing_height{initial_target
-        ? SigningHeightForTarget(chainlock_schedule, *initial_target)
-        : std::optional<int32_t>{}};
+    const auto initial_signing_height{SigningHeightForTarget(
+        chainlock_schedule, anchor_state.latest_chainlock_target_height)};
     const bool valid_receipt_position{
         (anchor_source &&
          *anchor_source == anchor_state.latest_chainlock_target_height) ||
-        (initial_target && initial_signing_height &&
-         IsBTCCCandidateHeight(btcc_schedule, *initial_target) &&
-         anchor_state.latest_chainlock_target_height == *initial_target &&
+        (initial_signing_height &&
+         IsCanonicalRosterInitializationTarget(
+             chainlock_schedule, btcc_schedule, activation_predecessor_height,
+             anchor_state.latest_chainlock_target_height) &&
          static_cast<int64_t>(*initial_signing_height) +
                  PQ_BTCC_RECEIPT_PROPAGATION_BUFFER <=
              anchor_state.latest_receipt_carrier_height)};
@@ -492,7 +544,16 @@ bool ChainLockFinalityStore::CheckCurrentStoreState(
     const auto next_target{NextEligibleChainLockTargetHeight(
         m_config.chainlock_schedule,
         statement.previous_chainlock_height)};
-    if (!next_target || statement.height != *next_target) {
+    const bool canonical_initializer{
+        statement.roster_transition ==
+            RosterAuthorizationTransitionKind::INITIALIZE &&
+        statement.previous_chainlock_height ==
+            m_config.activation_predecessor_height &&
+        IsCanonicalRosterInitializationTarget(
+            m_config.chainlock_schedule, m_config.btcc_schedule,
+            m_config.activation_predecessor_height, statement.height)};
+    if (!canonical_initializer &&
+        (!next_target || statement.height != *next_target)) {
         SetError(error, ChainLockFinalityError::INELIGIBLE_HEIGHT);
         return false;
     }
@@ -1263,6 +1324,12 @@ bool ChainLockFinalityStore::AcceptVerifiedInternal(
              *reconciliation_best, chainlock,
              *rechecked->btcc_cursor_reconciliation, m_config)))) {
         SetError(error, ChainLockFinalityError::CONTEXT_CHANGED);
+        return false;
+    }
+    if (rechecked->btcc_cursor_reconciliation &&
+        !rechecked->btcc_cursor_reconciliation->receipt_logical_id.IsNull() &&
+        !use_historical_sync_successor) {
+        SetError(error, ChainLockFinalityError::INVALID_PREPARATION_TOKEN);
         return false;
     }
 

@@ -1524,6 +1524,29 @@ BOOST_AUTO_TEST_CASE(initialization_and_recovery_require_explicit_admission)
         fixture->genesis_hash, statement, ordinary_live, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 
+    // Supplying a self-consistent synthetic prior must not turn the original
+    // first target into a LIVE edge. Only INITIALIZE can exist at that height.
+    auto first_as_keep{statement};
+    first_as_keep.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    first_as_keep.roster_authorization_base = {
+        first_as_keep.previous_chainlock_height,
+        first_as_keep.previous_chainlock_hash, NonNullHash(9110)};
+    first_as_keep.accepted_btcc_cursor = {};
+    first_as_keep.btcc_advance = BTCCAdvance::KEEP;
+    auto first_live{ordinary_live};
+    first_live.authorization_base = first_as_keep.roster_authorization_base;
+    first_live.normal_input = test::MakeSyntheticNormalRosterAuthorizationInput(
+        first_as_keep, *first_live.previous);
+    const auto forged_normal{DeriveNormalRosterAuthorizationDecision(
+        fixture->genesis_hash, *first_live.normal_input)};
+    BOOST_REQUIRE(forged_normal);
+    BOOST_CHECK(forged_normal->transition.kind == RosterAuthorizationTransitionKind::KEEP);
+    first_as_keep.roster_authorization_state_hash = forged_normal->state_hash;
+    BOOST_REQUIRE(first_as_keep.IsStructurallyValid());
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, first_as_keep, first_live, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
     const RosterAuthorizationBaseIdentity initialization_base{
         statement.height, statement.block_hash,
         GetLogicalChainLockId(fixture->genesis_hash, statement)};
@@ -1579,6 +1602,64 @@ BOOST_AUTO_TEST_CASE(initialization_and_recovery_require_explicit_admission)
                             later_initialize);
     BOOST_CHECK(!ValidateRosterAuthorizationState(
         fixture->genesis_hash, later_initialize_statement,
+        later_initialize, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    // A later bootstrap round is valid before the first winner, but its
+    // predecessor remains the activation boundary, never target-period.
+    later_initialize_statement.previous_chainlock_height = 864;
+    later_initialize_statement.previous_chainlock_hash = NonNullHash(9102);
+    later_initialize.predecessor_height = 864;
+    later_initialize.predecessor_block_hash = NonNullHash(9102);
+    SealRosterAuthorization(fixture->genesis_hash,
+                            later_initialize_statement,
+                            later_initialize);
+    const auto later_initialize_mask{ValidateRosterAuthorizationState(
+        fixture->genesis_hash, later_initialize_statement,
+        later_initialize, &error)};
+    BOOST_REQUIRE(later_initialize_mask);
+    BOOST_CHECK_EQUAL(*later_initialize_mask, 0b1111);
+
+    auto already_initialized{later_initialize};
+    already_initialized.previous = initialization_prior;
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, later_initialize_statement,
+        already_initialized, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto nonnull_initialize_base{later_initialize};
+    nonnull_initialize_base.authorization_base = initialization_base;
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, later_initialize_statement,
+        nonnull_initialize_base, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto reused_cursor{later_initialize_statement};
+    reused_cursor.previous_btcc_cursor = BTCCursor{860, NonNullHash(9210), NonNullHash(9211)};
+    BOOST_REQUIRE(reused_cursor.IsStructurallyValid());
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, reused_cursor, later_initialize, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto already_receipted{later_initialize_statement};
+    already_receipted.btcc_receipt_state = {
+        .cursor = {865, NonNullHash(9212), NonNullHash(9213)},
+        .cumulative_hash = NonNullHash(9214),
+        .latest_chainlock_target_height = 865,
+        .latest_receipt_carrier_height = 875};
+    BOOST_REQUIRE(already_receipted.IsStructurallyValid());
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, already_receipted, later_initialize, &error));
+    BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
+
+    auto off_round_initialize{later_initialize_statement};
+    off_round_initialize.height += 5;
+    off_round_initialize.accepted_btcc_cursor.sys_height = off_round_initialize.height;
+    SealRosterAuthorization(fixture->genesis_hash,
+                            off_round_initialize,
+                            later_initialize);
+    BOOST_CHECK(!ValidateRosterAuthorizationState(
+        fixture->genesis_hash, off_round_initialize,
         later_initialize, &error));
     BOOST_CHECK(error == ChainLockVerificationError::INVALID_AUTHORIZATION);
 

@@ -147,7 +147,11 @@ struct BTCCCursorReconciliationProof {
                            const BTCCCursorReconciliationProof&) = default;
 };
 
-/** Structural half of one candidate-bound canonical-null carrier recovery. */
+/**
+ * Structural half of candidate-bound cursor recovery. A non-null receipt ID
+ * requires a separately verified first-initialization-receipt capability;
+ * these metadata predicates cannot authorize durable acceptance by themselves.
+ */
 [[nodiscard]] bool IsBTCCCursorReconciliation(
     const FinalChainLock& best,
     const FinalChainLock& candidate,
@@ -217,7 +221,7 @@ struct ChainLockCandidateContext {
     int32_t block_height{-1};
     uint256 block_hash;
     uint256 context_token;
-    /** Exact branch proof authorizing one canonical-null cursor reconciliation. */
+    /** Exact branch proof; first-receipt recovery additionally requires its verified import. */
     std::optional<BTCCCursorReconciliationProof> btcc_cursor_reconciliation;
 
     friend bool operator==(const ChainLockCandidateContext&,

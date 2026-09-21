@@ -229,7 +229,7 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
                 context.reset_policy->chainlock_schedule,
                 context.reset_policy->btcc_schedule,
                 context.reset_policy->activation_predecessor_height,
-                statement.height)};
+                statement.height, context.previous.has_value())};
         const bool initializes{
             statement.roster_transition ==
                 RosterAuthorizationTransitionKind::INITIALIZE ||
@@ -245,7 +245,9 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
             statement.roster_transition ==
                 RosterAuthorizationTransitionKind::INITIALIZE &&
             context.admission ==
-                RosterAuthorizationAdmission::INITIALIZE};
+                RosterAuthorizationAdmission::INITIALIZE &&
+            context.predecessor_height ==
+                context.reset_policy->activation_predecessor_height};
         const bool valid_recover{
             reset_transition &&
             *reset_transition ==
@@ -254,8 +256,13 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
                 RosterAuthorizationTransitionKind::RECOVER &&
             context.admission ==
                 RosterAuthorizationAdmission::RECOVER};
+        const auto first_target{NextEligibleChainLockTargetHeight(
+            context.reset_policy->chainlock_schedule,
+            context.reset_policy->activation_predecessor_height)};
         if ((initializes && !valid_initialize) ||
             (recovers && !valid_recover) ||
+            (first_target && statement.height == *first_target &&
+             !valid_initialize) ||
             (reset_transition &&
              *reset_transition ==
                  RosterAuthorizationTransitionKind::INITIALIZE &&
@@ -280,7 +287,11 @@ std::optional<uint8_t> ValidateRosterAuthorizationStateInternal(
         (context.admission != RosterAuthorizationAdmission::LIVE &&
          context.normal_input) ||
         (context.admission == RosterAuthorizationAdmission::INITIALIZE &&
-         (context.previous || statement.btcc_advance != BTCCAdvance::ADVANCE ||
+         (context.previous || !context.authorization_base.IsNull() ||
+          !statement.roster_authorization_base.IsNull() ||
+          !statement.previous_btcc_cursor.IsNull() ||
+          statement.btcc_receipt_state != BTCCReceiptState{} ||
+          statement.btcc_advance != BTCCAdvance::ADVANCE ||
           !IsInitialNormalRosterBeaconWindow(
               statement.roster_beacons))) ||
         (context.admission == RosterAuthorizationAdmission::RECOVER &&
@@ -712,7 +723,8 @@ bool RosterResetVerificationPolicy::IsStructurallyValid() const noexcept
     if (!first_target) return false;
     const auto first_transition{CanonicalRosterResetTransitionForTarget(
         chainlock_schedule, btcc_schedule,
-        activation_predecessor_height, *first_target)};
+        activation_predecessor_height, *first_target,
+        /*has_prior_authorization=*/false)};
     return first_transition &&
            *first_transition ==
                RosterAuthorizationTransitionKind::INITIALIZE;

@@ -167,7 +167,7 @@ enum class BTCCValidationError : uint8_t {
 /**
  * Return whether this target is receiptable at this carrier. Ordinary
  * certificates retain their exact H+10 slot. Before the first receipt only,
- * the unique INITIALIZE target remains eligible at later carrier slots.
+ * a canonical INITIALIZE target remains eligible at later carrier slots.
  */
 [[nodiscard]] bool IsBTCCReceiptTargetForCarrier(
     const ChainLockScheduleConfig& chainlock_schedule,

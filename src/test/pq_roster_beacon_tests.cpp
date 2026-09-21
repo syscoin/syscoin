@@ -681,7 +681,7 @@ BOOST_AUTO_TEST_CASE(newest_normal_seed_survives_mixed_recovery_windows)
     BOOST_CHECK(!IsRecoveryRosterBeaconWindow(mixed));
 }
 
-BOOST_AUTO_TEST_CASE(reset_target_has_one_objective_transition)
+BOOST_AUTO_TEST_CASE(reset_target_transition_depends_on_prior_authority)
 {
     ChainLockScheduleConfig chainlock;
     chainlock.epoch_origin = 0;
@@ -694,18 +694,31 @@ BOOST_AUTO_TEST_CASE(reset_target_has_one_objective_transition)
     BOOST_REQUIRE(first);
     BOOST_CHECK_EQUAL(*first, 865);
     const auto initialize{CanonicalRosterResetTransitionForTarget(
-        chainlock, btcc, ACTIVATION_PREDECESSOR, *first)};
+        chainlock, btcc, ACTIVATION_PREDECESSOR, *first,
+        /*has_prior_authorization=*/false)};
     BOOST_REQUIRE(initialize);
     BOOST_CHECK(*initialize ==
                 RosterAuthorizationTransitionKind::INITIALIZE);
+    BOOST_CHECK(!CanonicalRosterResetTransitionForTarget(
+        chainlock, btcc, ACTIVATION_PREDECESSOR, *first,
+        /*has_prior_authorization=*/true));
 
     std::optional<int32_t> later_target;
     for (const uint32_t epoch : {7U, 11U, 15U}) {
         const auto target{CanonicalRosterRecoveryTargetHeight(
             chainlock, btcc, epoch)};
         BOOST_REQUIRE(target);
+        BOOST_CHECK(IsCanonicalRosterInitializationTarget(
+            chainlock, btcc, ACTIVATION_PREDECESSOR, *target));
+        const auto later_initialize{CanonicalRosterResetTransitionForTarget(
+            chainlock, btcc, ACTIVATION_PREDECESSOR, *target,
+            /*has_prior_authorization=*/false)};
+        BOOST_REQUIRE(later_initialize);
+        BOOST_CHECK(*later_initialize ==
+                    RosterAuthorizationTransitionKind::INITIALIZE);
         const auto recover{CanonicalRosterResetTransitionForTarget(
-            chainlock, btcc, ACTIVATION_PREDECESSOR, *target)};
+            chainlock, btcc, ACTIVATION_PREDECESSOR, *target,
+            /*has_prior_authorization=*/true)};
         BOOST_REQUIRE(recover);
         BOOST_CHECK(*recover ==
                     RosterAuthorizationTransitionKind::RECOVER);
@@ -715,17 +728,72 @@ BOOST_AUTO_TEST_CASE(reset_target_has_one_objective_transition)
     BOOST_REQUIRE(later_target);
 
     BOOST_CHECK(!CanonicalRosterResetTransitionForTarget(
-        chainlock, btcc, ACTIVATION_PREDECESSOR, *first + 5));
+        chainlock, btcc, ACTIVATION_PREDECESSOR, *first + 5, false));
     BOOST_CHECK(!CanonicalRosterResetTransitionForTarget(
         chainlock, btcc, ACTIVATION_PREDECESSOR,
-        *later_target + chainlock.chainlock_period));
+        *later_target + chainlock.chainlock_period, true));
     BOOST_CHECK(!CanonicalRosterResetTransitionForTarget(
-        chainlock, btcc, ACTIVATION_PREDECESSOR, ACTIVATION_PREDECESSOR));
+        chainlock, btcc, ACTIVATION_PREDECESSOR, ACTIVATION_PREDECESSOR, false));
 
     auto incompatible_btcc{btcc};
     ++incompatible_btcc.candidate_origin;
     BOOST_CHECK(!CanonicalRosterResetTransitionForTarget(
-        chainlock, incompatible_btcc, ACTIVATION_PREDECESSOR, *first));
+        chainlock, incompatible_btcc, ACTIVATION_PREDECESSOR, *first, false));
+}
+
+BOOST_AUTO_TEST_CASE(initialization_advances_only_at_canonical_round_signing_boundaries)
+{
+    const ChainLockScheduleConfig chainlock{.epoch_origin = 0};
+    const BTCCScheduleConfig btcc{.candidate_origin = 865};
+    constexpr int32_t ACTIVATION_PREDECESSOR{864};
+    std::optional<int32_t> previous;
+    for (const uint32_t epoch : {3U, 7U, 11U, 15U, 19U}) {
+        const auto target{CanonicalRosterRecoveryTargetHeight(chainlock, btcc, epoch)};
+        BOOST_REQUIRE(target);
+        const auto signing_height{SigningHeightForTarget(chainlock, *target)};
+        BOOST_REQUIRE(signing_height);
+        // The newest matured round stays current through all ordinary slots,
+        // including the next phase-3 target before its signing lag elapses.
+        BOOST_CHECK(CurrentRosterInitializationTargetHeight(
+            chainlock, btcc, ACTIVATION_PREDECESSOR, *signing_height - 1) == previous);
+        BOOST_CHECK(CurrentRosterInitializationTargetHeight(
+            chainlock, btcc, ACTIVATION_PREDECESSOR, *signing_height) == target);
+        BOOST_CHECK(CurrentRosterInitializationTargetHeight(
+            chainlock, btcc, ACTIVATION_PREDECESSOR,
+            *signing_height + chainlock.epoch_blocks) == target);
+        BOOST_CHECK(!IsCanonicalRosterInitializationTarget(
+            chainlock, btcc, ACTIVATION_PREDECESSOR, *target + 5));
+        BOOST_CHECK(!CanonicalRosterRecoveryTargetHeight(chainlock, btcc, epoch + 1));
+        previous = target;
+    }
+
+    // A deployment cannot skip malformed first-round geometry and silently
+    // make a later canonical round its initial schedule.
+    BOOST_CHECK(!CurrentRosterInitializationTargetHeight(
+        chainlock, btcc, /*activation_predecessor_height=*/865, 10'000));
+    BOOST_CHECK(!CurrentRosterInitializationTargetHeight(
+        chainlock, btcc, ACTIVATION_PREDECESSOR, -1));
+    BOOST_CHECK(!IsCanonicalRosterInitializationTarget(
+        chainlock, btcc, /*activation_predecessor_height=*/-2, 865));
+    BOOST_CHECK(!CanonicalRosterRecoveryTargetHeight(
+        chainlock, btcc, std::numeric_limits<uint32_t>::max()));
+
+    constexpr auto MAX_HEIGHT{std::numeric_limits<int32_t>::max()};
+    const auto near_height_limit{CurrentRosterInitializationTargetHeight(
+        chainlock, btcc, ACTIVATION_PREDECESSOR, MAX_HEIGHT)};
+    BOOST_REQUIRE(near_height_limit);
+    BOOST_CHECK(IsCanonicalRosterInitializationTarget(
+        chainlock, btcc, ACTIVATION_PREDECESSOR, *near_height_limit));
+    BOOST_REQUIRE(SigningHeightForTarget(chainlock, *near_height_limit));
+    BOOST_CHECK_LE(*SigningHeightForTarget(chainlock, *near_height_limit), MAX_HEIGHT);
+    auto invalid_chainlock{chainlock};
+    invalid_chainlock.epoch_origin = MAX_HEIGHT;
+    BOOST_CHECK(!CurrentRosterInitializationTargetHeight(
+        invalid_chainlock, btcc, ACTIVATION_PREDECESSOR, MAX_HEIGHT));
+    auto invalid_btcc{btcc};
+    invalid_btcc.candidate_origin = MAX_HEIGHT;
+    BOOST_CHECK(!CurrentRosterInitializationTargetHeight(
+        chainlock, invalid_btcc, ACTIVATION_PREDECESSOR, MAX_HEIGHT));
 }
 
 BOOST_AUTO_TEST_CASE(recovery_mode_is_objective_from_receipted_progress)

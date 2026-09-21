@@ -717,8 +717,8 @@ For epoch `e`:
    The snapshot must also be at or before the earliest target's signing-boundary
    anchor (`snapshotLag >= signLag`), preventing sibling targets from selecting
    different rosters after their common authority boundary.
-2. Derive a non-serialized authorization mask from the statement's exact
-   predecessor boundary. For bootstrap epochs zero through three, the
+2. For normal transitions, derive a non-serialized authorization mask from the
+   statement's exact predecessor boundary. For bootstrap epochs zero through three, the
    authorization point is the descriptor's exact epoch-base block; for every
    later epoch it is the exact roster-snapshot block. A slot is authorized only
    when that point is on the predecessor's ancestry. Authorized slots must form
@@ -727,7 +727,10 @@ For epoch `e`:
    still has the unchanged three older rosters needed for a certificate;
    `0011` fails closed. The block at `A-1` is at or after the fourth bootstrap
    base, and configuration checks ensure that every roster active at the first
-   eligible target is already authorized by that predecessor height.
+   eligible target is already authorized by that predecessor height. INITIALIZE
+   and RECOVER use their explicit reset authorization policy; a later INITIALIZE
+   authorizes its four frozen rosters without requiring their snapshot heights
+   to precede `A-1`.
 3. Load the deterministic masternode list at the snapshot. After a successful
    PoW refresh, apply the authenticated readiness-admission floor described
    below before scoring candidates; ordinary masternode and key eligibility
@@ -1236,18 +1239,36 @@ selects four fresh absolute-epoch rosters from that group's objective source.
 The disabled refresh profile retains its fixed source across attempts.
 Recovery therefore needs neither Bitcoin RPC on full nodes nor approval from
 the failed active rosters.
-Before the network's first winner, the only admissible target is the first eligible
-target after `A-1`, which configuration also requires to be the canonical
-phase-3 BTCC target. Its predecessor hash is obtained from the fully validated
-candidate branch and its predecessor BTCC cursor is canonically null. The four
-initial roster snapshots and registration cutoffs are at or below `A-1`; all
-four ordinary `NORMAL` roster seeds use that one target's exact BTCPREV anchor
-and its real Bitcoin `H+37` hash. Initialization has no fixed activation
-authority, no alternate target or seed menu, and no epoch rollover. A pending
-initializer may follow a same-height active-branch replacement before it is
-READY, but after READY it remains bound to the exact target block and Bitcoin
-range. If the first certificate is delayed, base-chain mining and most-work
-fork choice continue while initialization remains pinned to that target.
+Before the network's first winner, initialization advances through canonical
+phase-3 BTCC targets, one per four-epoch group. The current attempt is the most
+recent such target whose signing height has arrived. Its predecessor remains
+the fully validated branch's `A-1`, with a null predecessor BTCC cursor. Each
+attempt uses its own four absolute-epoch roster snapshots and registration
+cutoffs, and one exact target BTCPREV/Bitcoin-`H+37` anchor for their NORMAL seeds.
+Operators registered after `A` can therefore enter later initialization rounds;
+there is no one-time pre-activation enrollment deadline. Per-round cutoffs still
+freeze membership and keys before the round's entropy is known.
+
+A PENDING attempt may follow a same-height branch replacement. A READY attempt
+cannot change its anchor within the round. When the next canonical round becomes
+signable, the older attempt expires and may be durably replaced by that round's
+PENDING attempt. Signer-journal reservations are never erased or refunded.
+Base-chain mining and most-work fork choice continue while no certificate forms.
+The ChainLock spork gates participation, not this chain-derived schedule: enabling
+it later starts the current eligible attempt rather than reviving the first one.
+A certificate already accepted durably may still acquire its exact first receipt
+later; historical receipt verification is not limited by live-round expiry.
+
+If nodes accepted different initialization rounds on the same executed ancestry
+before that first receipt, the fully verified first receipt determines authority
+for their later roster transitions. A node retains its own finalized block floor;
+it never replaces that floor with an older initializer. Reconciliation requires
+the exact imported first-receipt capability, an INITIALIZE durable winner whose
+signed receipt state is empty, matching branch/cursor/accumulator facts, and a
+successor above both that winner and the authenticated coverage endpoint. Any
+reconciliation of the provisional Bitcoin cursor is bound to that same proof and
+atomically checked when the successor becomes durable. Ordinary cursor and
+roster-authority regression remain forbidden.
 
 A distinct current `CATCHUP` admission handles an already participating node
 that was offline or missed one or more certificates, a fresh node with an
@@ -1887,10 +1908,12 @@ greater-than-1,728-block null-receipt tail and proves the marker's earliest and
 latest snapshots survive restart.
 
 This retention is temporary and purpose-specific. The replay marker owns the
-lower-only block floor and replay snapshot retention. Before the first durable
-PQ certificate, the activation floor retains the four initialization roster
-snapshots. Each accepted durable certificate thereafter stores its exact
-verified four-roster context. Every durable record whose active roster window
+lower-only block floor and replay snapshot retention. The activation floor
+retains the first initialization snapshots and subsequent bootstrap history
+until a durable successor authenticates the chain's first receipt. An unreceipted
+INITIALIZE alone cannot release that floor: an older round's certificate may
+still supply the first receipt. Each accepted durable certificate also stores
+its exact verified four-roster context. Every durable record whose active roster window
 names a recovery-authority source also owns the exact deduplicated capsule of
 that authenticated source identity universe, regardless of the record's
 transition kind. The capsule replaces only the old source-identity snapshot:
@@ -2403,17 +2426,19 @@ The boundary has deliberately narrow meaning:
   Its signed predecessor and target ancestry bind the actual branch. Invalid,
   incomplete, or merely first-seen data cannot pin a hash.
 - If finality is unavailable at activation, base-chain mining and fork choice
-  continue. The initializer remains pinned to the first target and may finish
-  once its real Bitcoin `H+37` value and threshold shares are available; it
-  cannot roll to a later attacker-selectable roster. The rolling `RECOVER`
-  path exists only after a durable PQ winner already exists.
+  continue. Initialization advances at fixed four-epoch boundaries until a
+  usable round obtains its real Bitcoin `H+37` value and threshold shares.
+  Enrollment can continue after activation. The spork may remain disabled
+  throughout the upgrade and be enabled when operators are ready.
 - Destructive DMN/PQ history GC is disabled until a durable enforced winner
   exists. Thereafter normal branch snapshots, inverse undo, rooted checkpoint
   segments, and restart journals provide the authenticated pruning boundary.
 
 Configuration checks require `A > 0`, `A >= DIP3`, registry preparation
-strictly before `A`, complete bootstrap-roster authorization by `A-1`, and the
-first target after `A-1` to be the canonical phase-3 BTCC target. Regtest exposes only
+strictly before `A`, the first round's snapshot coordinates at or below `A-1`,
+and the first target after `A-1` to be the canonical phase-3 BTCC target. These
+are schedule geometry requirements, not a requirement that those first snapshots
+already contain PQ-enrolled operators. Regtest exposes only
 `-pqactivationheight`; there are no migration block-hash or state-root options.
 Public-network overrides remain forbidden and activation is release-disabled
 until a complete profile is compiled for that network.
@@ -2522,8 +2547,8 @@ readable through the opaque codecs.
 
 ## 12. Rollout versus final activation
 
-Pre-registration and shadow operation are rollout requirements. They are not
-features retained in the final activated protocol. This implementation is
+PQ registration may continue after activation; pre-activation registration and
+shadow operation are optional rollout preparation. This implementation is
 BLS-free. Its current public-network parameters deliberately select an
 all-sentinel compatibility-replay profile: legacy chain data remains replayable
 for sync and reindex, but no legacy or PQ ChainLock finality service starts. It
@@ -2536,66 +2561,33 @@ and activation, BTCC candidate, and receipt-assumption fields remain
 unassigned. That state constructs no finality store and cannot sign, accept,
 restore, or enforce a PQ ChainLock.
 
-Stages A and B require a future, explicitly supported BLS-free public
-preparation profile. It is a complete rollout state in its own right, not a
-partial activation profile inferred by filling selected fields in this release.
-It starts from already-known accepted public-chain data and enables registry
-and shadow operation without finality authority. The regtest preparation state
-remains the deterministic harness for that rollout behavior.
+### Upgrade and optional preparation
 
-### Stage A: preparatory release
+An existing validated legacy datadir captures its exact `A-1` predecessor and
+rebuilds Core and paired Geth state through the migration described above.
+Operators can then enroll their global SLH-DSA keys and scheduled-WOTS+ child-root
+commitments while ChainLocks remain disabled by spork. Their deterministic MN
+identities and historical commitment effects are reconstructed during replay;
+PQ enrollment transactions extend that state on the upgraded chain.
 
-The future preparatory release contains no BLS or DKG implementation. It keeps
-only opaque compatibility replay for accepted legacy chain data and adds:
+As registration reaches each round's cutoffs, later four-quorum sets become
+usable. Once enough eligible operators supply threshold shares and the spork
+allows signing, the current initialization round can establish PQ finality.
+Nodes do not choose roster membership from their local peer counts or the time
+they received the spork. Every node derives the same round and frozen snapshots
+from the validated chain. Operators missing a round can join subsequent rounds.
 
-- global SLH-DSA registration/rotation state;
-- fixed-depth scheduled-WOTS+ child-root commitments and automatic sentry
-  caches;
-- deterministic PQ quorum descriptors;
-- signer journals and shadow share/certificate generation;
-- PQ MNAUTH negotiation in non-authoritative test/shadow mode;
-- metrics and RPC inspection for key coverage, shadow thresholds, certificate
-  size, latency, and verification cost.
+Optional shadow operation can exercise key coverage, threshold shares, latency,
+and restart recovery before enabling finality. A separate public preparation-only
+profile would still require an explicitly supported release; the regtest profile
+is not a public-network override. Such a release and four successful pre-activation
+shadow epochs are not prerequisites for the migrated-datadir rollout.
 
-Operators register each global key and its child root once before the required
-cutoff. There is no periodic key-maintenance transaction. Shadow PQ
-certificates are verified and compared across implementations but do not affect
-fork choice. The release starts no ChainLock finality service and must not be
-operated as though it enforces either legacy or PQ finality.
-
-### Stage B: four complete shadow epochs
-
-The network must complete at least four consecutive usable shadow epochs so the
-later activation boundary has a full four-quorum PQ active set. Each normal
-roster must have all 400 selected identities backed by valid registered roots
-and repeatedly demonstrate 267-member shares. Activation remains unassigned
-during this phase. Missing the
-coverage/readiness criteria delays selecting `A` and the complete activation
-profile; it does not alter the eventual fixed epoch rules.
-
-### Stage C: activation release
-
-After four complete shadow epochs, choose a future height `A` that leaves
-operators time to install the activation release. The profile fixes only the
-height, schedules, roster parameters, and separate receipt assumption `R`; it
-does not predict a future block hash or state root. `A-1` must cover every
-initial roster authorization point and precede the first BTCC candidate source.
-`defaultAssumeValid` must remain below both `A` and `R`. All four initial
-registration cutoffs and roster snapshots must be at or below `A-1`.
-
-The boundary is unambiguous:
-
-- legacy BLS/DKG chain-derived objects are replayed below `A` with opaque
-  codecs and assumed cryptographic validity;
-- no legacy DKG/BLS object is produced or accepted for live authority after
-  `A`;
-- block `A` is the first block requiring PQ-only authorization and
-  root-qualified payments; and
-- the first normal ChainLock target is the unique first eligible target after
-  `A-1`, uses the actual active-branch block at `A-1` as predecessor, and builds
-  its four ordinary rosters from one exact BTCPREV/Bitcoin-`H+37` seed. It does
-  not roll to a later target. Later rolling recovery is available only after a
-  durable PQ winner exists.
+The activation profile fixes the height, schedules, roster parameters, and
+separate receipt assumption `R`. It does not predict a future block hash or state
+root. Legacy BLS/DKG objects are replayed below `A`; none grants live authority
+above `A`. Block `A` begins the new consensus rules independently of when the
+first PQ finality certificate succeeds.
 
 ### Stage D: final BLS-free activation release
 
@@ -2825,10 +2817,12 @@ Expected failures are fail-closed:
   invalid witness caching does not suppress a valid witness.
 - Conflicting statements, previous-ChainLock mismatch, stale context, unknown
   block, headers-only block, and block not valid through scripts.
-- A target that skips the first eligible successor of its declared predecessor
-  is rejected in live, raw-storage, trusted-persistence import, archive, and
-  catch-up admission. Advancing into a new signing window expires the old
-  collector and relay roster and creates the unique current `H = N(P)` view;
+- Ordinary targets that skip the first eligible successor of their declared
+  predecessor are rejected in live, raw-storage, trusted-persistence import,
+  archive, and catch-up admission. INITIALIZE alone may bind `A-1` to a later
+  canonical bootstrap target, with empty prior receipt state and authority.
+  Advancing into a new signing window expires the old collector and relay
+  roster and creates the unique current view;
   accepting its winner clears stale statement variants while preserving any
   concurrently created exact-successor view.
 - Reorg before signing lag, during parallel verification, after witness receipt,
@@ -3161,11 +3155,19 @@ and availability requirements.
 - Before the first winner, accept the valid-most-work branch without a
   configured hash; prove that first-seen invalid data cannot pin `A-1`, while a
   fully verified durable certificate binds its candidate ancestry.
-- Prove that `INITIALIZE` accepts only the first canonical post-`A-1` target,
-  uses four ordinary pre-activation frozen snapshots with one exact delayed
-  Bitcoin seed, rejects activation authority and alternate targets, and never
-  rolls epochs. Separately prove that durable-prior `RECOVER` still rolls only
-  after its pending Bitcoin anchor is stably inactive.
+- Prove that `INITIALIZE` uses the current canonical phase-3 target, with `A-1`
+  as its exact predecessor and four independently frozen roster snapshots.
+  Post-activation registrations may enter later rounds, but cannot alter an
+  earlier round's membership or keys. Test expiry of PENDING and READY attempts,
+  same-round anchor immutability, unchanged signer reservations, and exact
+  historical receipts for older accepted initializers. Separately prove that
+  durable-prior `RECOVER` follows its existing recovery schedule and authority
+  rules.
+- Exercise both orderings of locally accepted initialization rounds versus the
+  first mined receipt. Require the exact verified import for reconciliation,
+  preserve finalized ancestry and used signing leaves, retain older roster
+  inputs through garbage collection, reopen around durable promotion, and
+  continue through the recovery receipt into an ordinary certificate.
 - Exercise higher-work pre-winner reorgs with `-checkpoints=0`, normal sync,
   headers-first sync, reindex, `-reindex-chainstate`, VerifyDB, roll-forward,
   and restart. After a winner is enforced, conflicting ancestry is rejected.
@@ -3204,7 +3206,8 @@ The following must be resolved in code and release artifacts before activation:
   first eligible ChainLock height after `A-1`, including proof that `A-1` covers
   every initially active roster authorization point and precedes the first
   BTCC candidate source;
-- global-key registration start and shadow-protocol start heights;
+- global-key registration start height and, if a separate shadow rollout is
+  used, its start height;
 - maximum future registry horizon and transaction fee/relay policy for the
   8,112-byte tx86 payload;
 - official FIPS 205 SLH-DSA-SHAKE-128s ACVP/KAT evidence for key generation,
@@ -3257,12 +3260,11 @@ The following must be resolved in code and release artifacts before activation:
 - reproducible real-chain migration evidence: differential replay below `A`
   comparing a known-good pre-migration release and the opaque-codec build,
   upgrade of an existing datadir containing retired DKG/vvec/secret-share
-  databases, proof that `A-1` covers all bootstrap roster authorization points,
+  databases, proof that `A-1` covers the first round's snapshot coordinates,
   and independent reproduction of `R` from public chain data;
-- an explicitly supported BLS-free public preparation/shadow release, with
-  reproducible evidence that it begins from already-known chain data, has no
-  finality authority, completes four usable shadow epochs, and coordinates a
-  future activation height with adequate operator notice; and
+- delayed initialization evidence: empty first-round PQ membership, enrollment
+  after activation, spork enablement after several missed rounds, durable restart,
+  and agreement on the first receipted authority; and
 - the single-signer backup and recovery procedure for scheduled child-key
   journals, including rotation to a fresh child-tree generation after loss.
 

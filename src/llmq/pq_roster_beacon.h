@@ -244,6 +244,25 @@ CanonicalRosterRecoveryTargetHeight(
     const BTCCScheduleConfig& btcc,
     uint32_t epoch) noexcept;
 
+/**
+ * A bootstrap round uses the canonical phase-3 target of a four-epoch group.
+ * Before any authorization exists, later groups may initialize with their own
+ * ordinary snapshots and frozen keys; the activation predecessor stays fixed.
+ */
+[[nodiscard]] bool IsCanonicalRosterInitializationTarget(
+    const ChainLockScheduleConfig& chainlock,
+    const BTCCScheduleConfig& btcc,
+    int32_t activation_predecessor_height,
+    int32_t target_height) noexcept;
+
+/** Newest bootstrap round whose signing lag has elapsed, in constant time. */
+[[nodiscard]] std::optional<int32_t>
+CurrentRosterInitializationTargetHeight(
+    const ChainLockScheduleConfig& chainlock,
+    const BTCCScheduleConfig& btcc,
+    int32_t activation_predecessor_height,
+    int32_t tip_height) noexcept;
+
 enum class ObjectiveRosterAuthorizationMode : uint8_t {
     NORMAL = 0,
     RECOVER = 1,
@@ -266,19 +285,20 @@ GetObjectiveRosterAuthorizationMode(
     std::optional<int32_t> latest_receipted_target_height) noexcept;
 
 /**
- * Map an initialization or recovery target to its sole discontinuous
- * transition.
- * The first eligible target after activation is INITIALIZE-only. Every later
- * admissible reset is the unique joint ChainLock/BTCC target of phase 3 and is
- * RECOVER-only from a durable authorization base; all other heights return
- * null.
+ * Map a canonical reset target and exact prior-authority presence to its sole
+ * discontinuous transition. Without a prior authorization, every bootstrap
+ * round is INITIALIZE. With one, only later rounds can RECOVER. The first
+ * round can never replace an existing authorization; all other heights return
+ * null. Receipt policy separately determines whether a normal transition or
+ * recovery is admissible after initialization.
  */
 [[nodiscard]] std::optional<RosterAuthorizationTransitionKind>
 CanonicalRosterResetTransitionForTarget(
     const ChainLockScheduleConfig& chainlock,
     const BTCCScheduleConfig& btcc,
     int32_t activation_predecessor_height,
-    int32_t target_height) noexcept;
+    int32_t target_height,
+    bool has_prior_authorization) noexcept;
 
 /** Hash the next authorization state after validating the exact transition. */
 [[nodiscard]] std::optional<uint256> GetRosterAuthorizationStateHash(

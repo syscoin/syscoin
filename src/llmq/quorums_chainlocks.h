@@ -2710,6 +2710,17 @@ private:
     [[nodiscard]] std::shared_ptr<const HistoricalSyncAuthorization>
     GetPoWHistoricalSyncAuthorization() const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Exact verified first receipt, scoped to an unreceipted initializer. */
+    [[nodiscard]] std::shared_ptr<const HistoricalSyncAuthorization>
+    GetVerifiedInitializationReceiptAuthority(
+        const CBlockIndex& candidate,
+        const pq::FinalChainLockRecordMetadata& durable) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::optional<CurrentChainLockBTCCSelection>
+    SelectCurrentBTCCWithVerifiedInitializationReceipt(
+        const CBlockIndex& candidate,
+        const pq::FinalChainLockRecordMetadata* durable) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     [[nodiscard]] bool PrepareHistoricalSyncSuccessor(
         const pq::FinalChainLock& chainlock,
         std::optional<pq::VerifiedHistoricalSyncSuccessor>& proof) const

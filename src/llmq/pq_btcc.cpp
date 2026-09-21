@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <llmq/pq_btcc.h>
+#include <llmq/pq_roster_beacon.h>
 
 #include <chain.h>
 #include <consensus/params.h>
@@ -413,16 +414,14 @@ bool IsBTCCReceiptTargetForCarrier(
         return false;
     }
 
-    const auto initial_target{NextEligibleChainLockTargetHeight(
-        chainlock_schedule, activation_predecessor_height)};
-    const auto initial_signing_height{initial_target
-        ? SigningHeightForTarget(chainlock_schedule, *initial_target)
-        : std::optional<int32_t>{}};
     if (previous == BTCCReceiptState{}) {
-        return initial_target && initial_signing_height &&
-               IsBTCCCandidateHeight(btcc_schedule, *initial_target) &&
-               receipt_target_height == *initial_target &&
-               static_cast<int64_t>(*initial_signing_height) +
+        const auto signing_height{
+            SigningHeightForTarget(chainlock_schedule, receipt_target_height)};
+        return IsCanonicalRosterInitializationTarget(
+                   chainlock_schedule, btcc_schedule,
+                   activation_predecessor_height, receipt_target_height) &&
+               signing_height &&
+               static_cast<int64_t>(*signing_height) +
                        PQ_BTCC_RECEIPT_PROPAGATION_BUFFER <=
                    carrier_height;
     }

@@ -1187,6 +1187,23 @@ bool IsValidPaymentAuditPresealMarker(
             marker.terminal_receipt.epoch > predecessor.epoch);
 }
 
+bool IsCanonicalChainLockSuccessor(
+    const ChainLockFinalityStoreConfig& config,
+    const ChainLockStatement& statement) noexcept
+{
+    if (statement.roster_transition ==
+        RosterAuthorizationTransitionKind::INITIALIZE) {
+        return statement.previous_chainlock_height ==
+                   config.activation_predecessor_height &&
+               IsCanonicalRosterInitializationTarget(
+                   config.chainlock_schedule, config.btcc_schedule,
+                   config.activation_predecessor_height, statement.height);
+    }
+    const auto next_target{NextEligibleChainLockTargetHeight(
+        config.chainlock_schedule, statement.previous_chainlock_height)};
+    return next_target && statement.height == *next_target;
+}
+
 bool IsValidRosterRecoveryPrecommit(
     const ChainLockFinalityStoreConfig& config,
     const RosterRecoveryPrecommit& precommit) noexcept
@@ -1195,27 +1212,11 @@ bool IsValidRosterRecoveryPrecommit(
     const auto anchor_epoch{EpochForHeight(
         config.chainlock_schedule,
         pending_seed.anchor_cursor.sys_height)};
-    const auto canonical_target{anchor_epoch
-        ? CanonicalRosterRecoveryTargetHeight(
-              config.chainlock_schedule, config.btcc_schedule,
-              *anchor_epoch)
-        : std::optional<int32_t>{}};
-    const auto initial_target{NextEligibleChainLockTargetHeight(
-        config.chainlock_schedule,
-        config.activation_predecessor_height)};
     return precommit.IsStructurallyValid() &&
-           initial_target &&
-           pending_seed.anchor_cursor.sys_height == *initial_target &&
-           pending_seed.anchor_cursor.sys_height >
-               config.activation_predecessor_height &&
-           IsEligibleChainLockTarget(
-               config.chainlock_schedule,
-               pending_seed.anchor_cursor.sys_height) &&
            anchor_epoch && *anchor_epoch == pending_seed.epoch &&
-           canonical_target &&
-           *canonical_target == pending_seed.anchor_cursor.sys_height &&
-           IsBTCCCandidateHeight(
-               config.btcc_schedule,
+           IsCanonicalRosterInitializationTarget(
+               config.chainlock_schedule, config.btcc_schedule,
+               config.activation_predecessor_height,
                pending_seed.anchor_cursor.sys_height);
 }
 
@@ -1468,9 +1469,6 @@ struct PQChainLockPersistence::Impl {
         }
 
         const auto& statement{record.chainlock.statement};
-        const auto next_target{NextEligibleChainLockTargetHeight(
-            config.chainlock_schedule,
-            statement.previous_chainlock_height)};
         const auto initializer_epoch{EpochForHeight(
             config.chainlock_schedule, statement.height)};
         const auto initializer_target{initializer_epoch
@@ -1488,8 +1486,8 @@ struct PQChainLockPersistence::Impl {
                  *initializer_epoch &&
              statement.height == *initializer_target &&
              IsExactRecoveryStatement(record.chainlock))};
-        return exact_initializer && next_target &&
-               statement.height == *next_target &&
+        return exact_initializer &&
+               IsCanonicalChainLockSuccessor(config, statement) &&
                statement.height > config.activation_predecessor_height &&
                statement.previous_chainlock_height >= config.activation_predecessor_height &&
                (statement.previous_chainlock_height != config.activation_predecessor_height ||
@@ -1857,21 +1855,14 @@ struct PQChainLockPersistence::Impl {
 
         const auto& predecessor{authorization.predecessor.statement};
         const auto& owner_statement{authorization.owner.statement};
-        const auto predecessor_target{NextEligibleChainLockTargetHeight(
-            config.chainlock_schedule,
-            predecessor.previous_chainlock_height)};
-        const auto owner_target{NextEligibleChainLockTargetHeight(
-            config.chainlock_schedule,
-            owner_statement.previous_chainlock_height)};
         const bool owner_is_cover{
             owner_statement.height ==
             durable_best->chainlock.statement.height};
-        return predecessor_target &&
-               predecessor.height == *predecessor_target &&
+        return IsCanonicalChainLockSuccessor(config, predecessor) &&
                predecessor.height > config.activation_predecessor_height &&
                predecessor.previous_chainlock_height >=
                    config.activation_predecessor_height &&
-               owner_target && owner_statement.height == *owner_target &&
+               IsCanonicalChainLockSuccessor(config, owner_statement) &&
                (!owner_is_cover ||
                 (authorization.owner.logical_id ==
                      durable_best->logical_id &&
@@ -2811,6 +2802,31 @@ struct PQChainLockPersistence::Impl {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
+        if (btcc_cursor_reconciliation &&
+            !btcc_cursor_reconciliation->receipt_logical_id.IsNull()) {
+            // Only promotion of the exact verified first-receipt import may
+            // replace an unreceipted INITIALIZE cursor. The ordinary catch-up
+            // API and a metadata-shaped proof cannot authorize this change.
+            const auto& proof{*btcc_cursor_reconciliation};
+            if (!historical_successor || !promotes_historical_bootstrap ||
+                !historical_bootstrap || !best ||
+                historical_bootstrap->record.chainlock.statement.roster_transition !=
+                    RosterAuthorizationTransitionKind::INITIALIZE ||
+                historical_bootstrap->record.chainlock.statement.btcc_receipt_state !=
+                    BTCCReceiptState{} ||
+                historical_bootstrap->boundary.durable_prior !=
+                    Metadata(*best).AuthorizationBase() ||
+                historical_bootstrap->boundary.carrier_height != proof.carrier_height ||
+                historical_bootstrap->boundary.carrier_hash != proof.carrier_hash ||
+                historical_bootstrap->boundary.receipt.chainlock_logical_id !=
+                    proof.receipt_logical_id ||
+                historical_bootstrap->boundary.receipt.accepted_cursor !=
+                    proof.current_receipt_state.cursor ||
+                historical_bootstrap->boundary.receipt_state != proof.current_receipt_state) {
+                SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
+                return false;
+            }
+        }
         if (best) {
             if (candidate.chainlock.statement.height <
                 best->chainlock.statement.height) {
@@ -3722,7 +3738,8 @@ struct PQChainLockPersistence::Impl {
     bool ReplaceRosterRecoveryPrecommit(
         const RosterRecoveryPrecommit& expected,
         const RosterRecoveryPrecommit& replacement,
-        ChainLockPersistenceError* error)
+        ChainLockPersistenceError* error,
+        bool advance = false)
         EXCLUSIVE_LOCKS_REQUIRED(mutex)
     {
         SetError(error, ChainLockPersistenceError::NONE);
@@ -3741,7 +3758,7 @@ struct PQChainLockPersistence::Impl {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
-        if (replacement == expected) return true;
+        if (!advance && replacement == expected) return true;
 
         const uint32_t old_epoch{expected.pending_seed.epoch};
         const uint32_t new_epoch{replacement.pending_seed.epoch};
@@ -3750,7 +3767,11 @@ struct PQChainLockPersistence::Impl {
             new_epoch == old_epoch &&
             replacement.pending_seed.anchor_cursor.sys_height ==
                 expected.pending_seed.anchor_cursor.sys_height};
-        if (!same_pending_slot) {
+        const bool later_initialization_round{
+            new_epoch > old_epoch &&
+            replacement.pending_seed.anchor_cursor.sys_height >
+                expected.pending_seed.anchor_cursor.sys_height};
+        if (advance ? !later_initialization_round : !same_pending_slot) {
             SetError(error, ChainLockPersistenceError::INVALID_CHAINLOCK);
             return false;
         }
@@ -4762,6 +4783,16 @@ bool PQChainLockPersistence::ReplaceRosterRecoveryPrecommit(
     LOCK(m_impl->mutex);
     return m_impl->ReplaceRosterRecoveryPrecommit(
         expected, replacement, error);
+}
+
+bool PQChainLockPersistence::AdvanceRosterRecoveryPrecommit(
+    const RosterRecoveryPrecommit& expected,
+    const RosterRecoveryPrecommit& replacement,
+    ChainLockPersistenceError* error)
+{
+    LOCK(m_impl->mutex);
+    return m_impl->ReplaceRosterRecoveryPrecommit(
+        expected, replacement, error, /*advance=*/true);
 }
 
 bool PQChainLockPersistence::PersistBTCCPresealState(

@@ -1101,35 +1101,6 @@ ThresholdCertificateRosterBeaconRange(
         true};
 }
 
-std::optional<pq::ChainLockSigningWindow> RecoverySigningWindowForTarget(
-    const pq::ChainLockScheduleConfig& schedule,
-    int32_t target,
-    int32_t durable_predecessor_height,
-    int32_t tip_height) noexcept
-{
-    const auto signing_height{pq::SigningHeightForTarget(schedule, target)};
-    const auto next{pq::NextEligibleChainLockTargetHeight(
-        schedule, durable_predecessor_height)};
-    if (!signing_height || *signing_height > tip_height || !next ||
-        target < *next) {
-        return std::nullopt;
-    }
-    if (target == *next) {
-        return pq::ChainLockSigningWindow{
-            target, durable_predecessor_height};
-    }
-    const int64_t declared{
-        static_cast<int64_t>(target) - schedule.chainlock_period};
-    if (declared < 0 ||
-        declared > std::numeric_limits<int32_t>::max() ||
-        !pq::IsEligibleChainLockTarget(
-            schedule, static_cast<int32_t>(declared))) {
-        return std::nullopt;
-    }
-    return pq::ChainLockSigningWindow{
-        target, static_cast<int32_t>(declared)};
-}
-
 std::optional<pq::ChainLockSigningWindow> StagedRecoverySigningWindowImpl(
     const pq::ChainLockScheduleConfig& schedule,
     const pq::BTCCScheduleConfig& btcc,
@@ -1140,16 +1111,14 @@ std::optional<pq::ChainLockSigningWindow> StagedRecoverySigningWindowImpl(
     if (!precommit.IsStructurallyValid()) return std::nullopt;
     const int32_t target{
         precommit.pending_seed.anchor_cursor.sys_height};
-    const auto first_target{pq::NextEligibleChainLockTargetHeight(
-        schedule, durable_predecessor_height)};
-    if (!first_target || target != *first_target) {
+    const auto current{pq::CurrentRosterInitializationTargetHeight(
+        schedule, btcc, durable_predecessor_height, tip_height)};
+    const auto epoch{pq::EpochForHeight(schedule, target)};
+    if (!current || target != *current || !epoch ||
+        *epoch != precommit.pending_seed.epoch) {
         return std::nullopt;
     }
-    const auto canonical{pq::CanonicalRosterRecoveryTargetHeight(
-        schedule, btcc, precommit.pending_seed.epoch)};
-    if (!canonical || *canonical != target) return std::nullopt;
-    return RecoverySigningWindowForTarget(
-        schedule, target, durable_predecessor_height, tip_height);
+    return pq::ChainLockSigningWindow{target, durable_predecessor_height};
 }
 
 } // namespace
@@ -5446,13 +5415,16 @@ pq::BTCCReceipt CChainLocksHandler::GetBTCCReceiptForCarrier(
         m_config->btcc_schedule, carrier_height)};
     if (!source_height) return null_receipt;
     const bool needs_initial_receipt{*previous_state == pq::BTCCReceiptState{}};
-    const auto initial_target{needs_initial_receipt
-        ? pq::NextEligibleChainLockTargetHeight(
-              m_config->chainlock_schedule,
-              m_config->activation_predecessor_height)
-        : std::optional<int32_t>{}};
-    const int32_t receipt_target_height{
-        initial_target ? *initial_target : *source_height};
+    const auto initial_certificate{needs_initial_receipt
+        ? m_store->GetUnsealedBTCC()
+        : std::shared_ptr<const pq::FinalChainLock>{}};
+    if (needs_initial_receipt &&
+        (!initial_certificate || initial_certificate->statement.roster_transition !=
+             pq::RosterAuthorizationTransitionKind::INITIALIZE)) {
+        return null_receipt;
+    }
+    const int32_t receipt_target_height{needs_initial_receipt
+        ? initial_certificate->statement.height : *source_height};
     if (!pq::IsBTCCReceiptTargetForCarrier(
             m_config->chainlock_schedule, m_config->btcc_schedule,
             m_config->activation_predecessor_height, *previous_state,
@@ -7256,8 +7228,13 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         }
         if (dependency) inspect_recovery_roster(*dependency);
     };
+    bool retain_bootstrap{true};
     if (m_persistence) {
         const auto durable{m_persistence->GetFinalityState()};
+        retain_bootstrap = !durable.best ||
+            (durable.best->statement.roster_transition ==
+                 pq::RosterAuthorizationTransitionKind::INITIALIZE &&
+             durable.best->statement.btcc_receipt_state == pq::BTCCReceiptState{});
         inspect(durable.best);
         inspect(durable.unsealed_btcc);
         if (durable.receipt_archive_authorization) {
@@ -7279,10 +7256,11 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
             }
         }
     }
-    if (!found_durable && m_config) {
-        // SYSCOIN: The activation predecessor bounds initial roster retention,
-        // but it grants no finality. Only a durable verified winner may later
-        // authorize destructive GC.
+    if ((!found_durable || retain_bootstrap) && m_config) {
+        // SYSCOIN: Retain every potential first-receipt roster until a durable
+        // successor authenticates the chain's chosen initialization receipt.
+        // An unreceipted later INITIALIZE may coexist with an older certificate
+        // whose receipt has not yet reached the chain.
         const auto first_target{m_quorum_build_config
             ? pq::NextEligibleChainLockTargetHeight(
                   m_quorum_build_config->schedule,
@@ -7295,8 +7273,9 @@ void CChainLocksHandler::UpdateDurableChainLockAuxiliaryRetention()
         if (!first_roster_floor) {
             valid = false;
         } else {
-            floor = std::min(m_config->activation_predecessor_height,
-                             *first_roster_floor);
+            const int32_t bootstrap_floor{std::min(
+                m_config->activation_predecessor_height, *first_roster_floor)};
+            floor = floor ? std::min(*floor, bootstrap_floor) : bootstrap_floor;
         }
     }
     if (const auto input{m_historical_sync_revalidation_input.load()}) {
@@ -8227,7 +8206,9 @@ bool CChainLocksHandler::IsExactHistoricalResetCandidate(
     const auto reset_transition{
         pq::CanonicalRosterResetTransitionForTarget(
             chainlock, btcc, activation_predecessor_height,
-            statement.height)};
+            statement.height,
+            statement.roster_transition !=
+                pq::RosterAuthorizationTransitionKind::INITIALIZE)};
     if (!target_epoch || !reset_transition ||
         *reset_transition != statement.roster_transition) {
         return false;
@@ -8238,6 +8219,7 @@ bool CChainLocksHandler::IsExactHistoricalResetCandidate(
     if (*reset_transition ==
         pq::RosterAuthorizationTransitionKind::INITIALIZE) {
         return !has_durable_best &&
+               statement.btcc_receipt_state == pq::BTCCReceiptState{} &&
                pq::IsInitialNormalRosterBeaconWindow(
                    statement.roster_beacons) &&
                statement.previous_chainlock_height ==
@@ -8272,7 +8254,15 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
     const auto expected_target{pq::NextEligibleChainLockTargetHeight(
         m_config->chainlock_schedule,
         statement.previous_chainlock_height)};
-    if (!expected_target || statement.height != *expected_target) {
+    const bool initializes{statement.roster_transition ==
+        pq::RosterAuthorizationTransitionKind::INITIALIZE};
+    if (initializes
+            ? statement.previous_chainlock_height !=
+                  m_config->activation_predecessor_height ||
+                  !pq::IsCanonicalRosterInitializationTarget(
+                      m_config->chainlock_schedule, m_config->btcc_schedule,
+                      m_config->activation_predecessor_height, statement.height)
+            : !expected_target || statement.height != *expected_target) {
         return {};
     }
 
@@ -8323,7 +8313,8 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
         return {};
     }
     const auto imported{GetPoWHistoricalSyncAuthorization()};
-    if (!imported && m_config->btcc_receipt_assumption_anchor.IsDisabled() &&
+    if (!initializes && !imported &&
+        m_config->btcc_receipt_assumption_anchor.IsDisabled() &&
         (payment_audit_preseal.IsEmpty() ||
          !IsPaymentAuditPresealActive())) {
         return {};
@@ -8581,7 +8572,15 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
                     recovery_authority->base.verification_context;
         }
     }
-    if (IsExactHistoricalResetCandidate(
+    // An unreceipted initializer is live only in its objective round. Exact
+    // receipts above remain verifiable after that round, including at startup.
+    const auto current_initial{initializes
+        ? pq::CurrentRosterInitializationTargetHeight(
+              m_config->chainlock_schedule, m_config->btcc_schedule,
+              m_config->activation_predecessor_height, tip->nHeight)
+        : std::optional<int32_t>{}};
+    if ((!initializes || (current_initial && *current_initial == statement.height)) &&
+        IsExactHistoricalResetCandidate(
             statement, m_config->chainlock_schedule,
             m_config->btcc_schedule,
             m_config->activation_predecessor_height,
@@ -8590,6 +8589,10 @@ CChainLocksHandler::GetHistoricalAdmissionLocked(
             target->btcpPrevCommitment, has_verified_historical_recovery)) {
         return {HistoricalAdmission::RECOVERY, {}};
     }
+    // Retaining an authorization verified in an earlier bootstrap round does
+    // not extend that round's live admission lifetime. Its exact mined receipt
+    // can still authorize historical verification through the paths above.
+    if (initializes) return {};
     if (exact_local_successor) {
         // A certificate retained after authorization-only verification may
         // later become the exact next durable state edge after its live round
@@ -9387,6 +9390,95 @@ CChainLocksHandler::GetPoWHistoricalSyncAuthorization() const
     return imported;
 }
 
+std::shared_ptr<const CChainLocksHandler::HistoricalSyncAuthorization>
+CChainLocksHandler::GetVerifiedInitializationReceiptAuthority(
+    const CBlockIndex& candidate,
+    const pq::FinalChainLockRecordMetadata& durable) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_config || !durable.IsInternallyConsistent(m_genesis_hash) ||
+        durable.statement.roster_transition != pq::RosterAuthorizationTransitionKind::INITIALIZE ||
+        durable.statement.btcc_receipt_state != pq::BTCCReceiptState{}) return {};
+    // The immutable import exists only after exact roster/signature verification.
+    // Its getter rechecks persistence identity, durable predecessor and ancestry.
+    const auto imported{GetPoWHistoricalSyncAuthorization()};
+    if (!imported || imported->boundary.durable_prior != durable.AuthorizationBase() ||
+        imported->base.metadata.statement.roster_transition !=
+            pq::RosterAuthorizationTransitionKind::INITIALIZE ||
+        imported->base.metadata.statement.btcc_receipt_state != pq::BTCCReceiptState{} ||
+        imported->base.metadata.AuthorizationBase() == durable.AuthorizationBase() ||
+        candidate.nHeight <= imported->boundary.coverage_height ||
+        candidate.nHeight <= durable.statement.height ||
+        candidate.nHeight < static_cast<int32_t>(m_config->chainlock_schedule.sign_lag)) return {};
+    const auto& boundary{imported->boundary};
+    const auto& base{imported->base.metadata.statement};
+    const CBlockIndex* local{candidate.GetAncestor(durable.statement.height)};
+    const CBlockIndex* source{candidate.GetAncestor(base.height)};
+    const CBlockIndex* carrier{candidate.GetAncestor(boundary.carrier_height)};
+    const CBlockIndex* covered{candidate.GetAncestor(boundary.coverage_height)};
+    const CBlockIndex* anchor{candidate.GetAncestor(candidate.nHeight -
+        static_cast<int32_t>(m_config->chainlock_schedule.sign_lag))};
+    const auto validated = [](const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return index && !(index->nStatus & BLOCK_FAILED_MASK) &&
+            !index->IsAssumedValid() && index->IsValid(BLOCK_VALID_SCRIPTS) &&
+            HasFullReceiptIndexProvenance(*index);
+    };
+    if (!validated(&candidate) || !validated(local) || !validated(source) || !validated(carrier) ||
+        !validated(carrier->pprev) || !validated(covered) || !validated(anchor) ||
+        local->GetBlockHash() != durable.statement.block_hash ||
+        source->GetBlockHash() != base.block_hash ||
+        carrier->GetBlockHash() != boundary.carrier_hash ||
+        covered->GetBlockHash() != boundary.coverage_hash ||
+        boundary.carrier_height <= durable.statement.height ||
+        boundary.receipt.chainlock_logical_id != imported->base.metadata.logical_id ||
+        boundary.receipt.accepted_cursor != base.accepted_btcc_cursor ||
+        base.previous_chainlock_height != m_config->activation_predecessor_height ||
+        base.previous_chainlock_hash != durable.statement.previous_chainlock_hash ||
+        !pq::IsCanonicalRosterInitializationTarget(m_config->chainlock_schedule,
+            m_config->btcc_schedule, m_config->activation_predecessor_height, base.height)) return {};
+    const auto before{IndexedBTCCReceiptState(*carrier->pprev)};
+    const auto after{IndexedBTCCReceiptState(*carrier)};
+    const auto anchor_state{IndexedBTCCReceiptState(*anchor)};
+    const auto target_state{IndexedBTCCReceiptState(candidate)};
+    if (!before || *before != pq::BTCCReceiptState{} || !after ||
+        *after != boundary.receipt_state || !anchor_state || *anchor_state != *after ||
+        !target_state || *target_state != *after) return {};
+    const auto receipt{pq::ReconstructBTCCReceipt(m_genesis_hash,
+        m_config->chainlock_schedule, m_config->btcc_schedule,
+        m_config->activation_predecessor_height, *carrier, *before, *after,
+        carrier->pqBTCCReceiptLogicalId)};
+    return receipt && *receipt == boundary.receipt ? imported : nullptr;
+}
+
+std::optional<CurrentChainLockBTCCSelection>
+CChainLocksHandler::SelectCurrentBTCCWithVerifiedInitializationReceipt(
+    const CBlockIndex& candidate,
+    const pq::FinalChainLockRecordMetadata* durable) const
+{
+    AssertLockHeld(cs_main);
+    if (!m_config) return std::nullopt;
+    const auto ordinary{SelectCurrentChainLockBTCC(m_genesis_hash, *m_config, candidate, durable)};
+    if (ordinary || durable == nullptr) return ordinary;
+    const auto authority{GetVerifiedInitializationReceiptAuthority(candidate, *durable)};
+    if (!authority || authority->boundary.receipt.accepted_cursor.sys_height >=
+            durable->statement.accepted_btcc_cursor.sys_height) return std::nullopt;
+    const auto& boundary{authority->boundary};
+    const CBlockIndex* carrier{candidate.GetAncestor(boundary.carrier_height)};
+    const auto selection{pq::SelectBTCCForChainLock(
+        m_config->btcc_schedule, candidate, boundary.receipt.accepted_cursor)};
+    if (!selection || !carrier || !carrier->pprev) return std::nullopt;
+    pq::BTCCCursorReconciliationProof proof;
+    proof.carrier_height = carrier->nHeight;
+    proof.carrier_hash = carrier->GetBlockHash();
+    proof.carrier_parent_hash = carrier->pprev->GetBlockHash();
+    proof.skipped_cursor = durable->statement.accepted_btcc_cursor;
+    proof.previous_receipt_state = {};
+    proof.current_receipt_state = boundary.receipt_state;
+    proof.receipt_logical_id = boundary.receipt.chainlock_logical_id;
+    if (!proof.IsStructurallyValid()) return std::nullopt;
+    return CurrentChainLockBTCCSelection{boundary.receipt.accepted_cursor, *selection, proof};
+}
+
 bool CChainLocksHandler::PrepareHistoricalSyncSuccessor(
     const pq::FinalChainLock& chainlock,
     std::optional<pq::VerifiedHistoricalSyncSuccessor>& proof) const
@@ -9399,11 +9491,14 @@ bool CChainLocksHandler::PrepareHistoricalSyncSuccessor(
     const auto imported{GetPoWHistoricalSyncAuthorization()};
     if (!imported) return false;
     const auto durable{m_persistence->GetFinalityState().best};
+    const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(chainlock.statement.block_hash)};
+    const bool initialization_convergence{durable && target &&
+        GetVerifiedInitializationReceiptAuthority(*target, *durable) == imported};
     if (durable && imported->base.metadata.statement.height <= durable->statement.height) {
         const auto& base{imported->base.metadata};
         if (base.AuthorizationBase() == durable->AuthorizationBase()) return true;
         const auto ordinary{m_store->GetVerifiedRosterAuthorizationBaseByLogicalId(base.logical_id)};
-        if (ordinary && ordinary->metadata.statement == base.statement &&
+        if (!initialization_convergence && ordinary && ordinary->metadata.statement == base.statement &&
             ordinary->verification_context &&
             ordinary->verification_context->Authorization().admission !=
                 pq::RosterAuthorizationAdmission::POW_HISTORY) {
@@ -9418,9 +9513,11 @@ bool CChainLocksHandler::PrepareHistoricalSyncSuccessor(
     const bool promote_bootstrap{bootstrap &&
         bootstrap->record.RecordIdentity() == imported->record_identity &&
         bootstrap->boundary == imported->boundary};
+    // Reconciliation always carries the private exact-import capability into
+    // the atomic durable publication; a metadata-only proof is insufficient.
+    if (initialization_convergence && !promote_bootstrap) return false;
     if (!promote_bootstrap && (durable || !precommit)) return true;
     const auto& boundary{imported->boundary};
-    const CBlockIndex* target{m_chainman.m_blockman.LookupBlockIndex(chainlock.statement.block_hash)};
     if (!target || target->nHeight != chainlock.statement.height ||
         (target->nStatus & BLOCK_FAILED_MASK) ||
         (!durable && chainlock.statement.roster_transition ==
@@ -12029,8 +12126,8 @@ CChainLocksHandler::BuildCandidateContext(
     bool current_btcc_valid{true};
     if (current_round_candidate) {
         const auto canonical{durable_snapshot_matches
-            ? SelectCurrentChainLockBTCC(
-                  m_genesis_hash, *m_config, *candidate,
+            ? SelectCurrentBTCCWithVerifiedInitializationReceipt(
+                  *candidate,
                   durable_best ? &durable_best->metadata : nullptr)
             : std::optional<CurrentChainLockBTCCSelection>{}};
         current_btcc_valid = canonical &&
@@ -13015,19 +13112,18 @@ CChainLocksHandler::BuildNetworkRosterAuthorizationContext(
     if (transition ==
         pq::RosterAuthorizationTransitionKind::INITIALIZE) {
         if (objective != nullptr ||
+            statement.btcc_receipt_state != pq::BTCCReceiptState{} ||
             !pq::IsInitialNormalRosterBeaconWindow(
                 statement.roster_beacons) ||
             statement.btcc_advance != pq::BTCCAdvance::ADVANCE) {
             return std::nullopt;
         }
-        const auto initial_target{
-            pq::NextEligibleChainLockTargetHeight(
-                m_config->chainlock_schedule,
-                m_config->activation_predecessor_height)};
         const CBlockIndex* activation_predecessor{
             candidate.GetAncestor(
                 m_config->activation_predecessor_height)};
-        if (!initial_target || candidate.nHeight != *initial_target ||
+        if (!pq::IsCanonicalRosterInitializationTarget(
+                m_config->chainlock_schedule, m_config->btcc_schedule,
+                m_config->activation_predecessor_height, candidate.nHeight) ||
             statement.previous_chainlock_height !=
                 m_config->activation_predecessor_height ||
             activation_predecessor == nullptr ||
@@ -13499,8 +13595,8 @@ CChainLocksHandler::BuildHistoricalPreVerificationContext(
             pq::ChainLockCandidateAdmission::CATCHUP &&
         best) {
         LOCK(cs_main);
-        const auto canonical{SelectCurrentChainLockBTCC(
-            m_genesis_hash, *m_config, *candidate, &best->metadata)};
+        const auto canonical{SelectCurrentBTCCWithVerifiedInitializationReceipt(
+            *candidate, &best->metadata)};
         if (canonical) {
             (void)MatchesCurrentChainLockBTCCSelection(
                 *canonical, chainlock.statement,
@@ -13696,8 +13792,34 @@ bool CChainLocksHandler::IsStateAdvancingAuthorizationBaseAdmissible(
         candidate_admission != pq::ChainLockCandidateAdmission::CATCHUP) {
         return true;
     }
-    // Historical import only bridges D < B. Once D advances through B, its
-    // roster decisions must pass the same convergence checks as ordinary D.
+    // A different unreceipted initializer never displaces the block-finality
+    // floor. The exact verified first receipt may authorize only its later
+    // same-ancestry successor, with the private import consumed at persistence.
+    if (candidate_admission == pq::ChainLockCandidateAdmission::CATCHUP &&
+        exact_prior && current) {
+        LOCK(cs_main);
+        const auto imported{GetVerifiedInitializationReceiptAuthority(candidate, current->metadata)};
+        if (imported && exact_prior->metadata == imported->base.metadata &&
+            exact_prior->verification_context == imported->base.verification_context &&
+            statement.roster_authorization_base == exact_prior->metadata.AuthorizationBase() &&
+            statement.btcc_receipt_state == imported->boundary.receipt_state) {
+            const bool regresses{!pq::IsDurableBTCCursorMonotonic(
+                current->metadata.statement.accepted_btcc_cursor, statement.accepted_btcc_cursor)};
+            if (regresses) {
+                const auto selected{SelectCurrentBTCCWithVerifiedInitializationReceipt(
+                    candidate, &current->metadata)};
+                if (!selected || !selected->cursor_reconciliation ||
+                    !btcc_cursor_reconciliation ||
+                    *selected->cursor_reconciliation != *btcc_cursor_reconciliation) return false;
+            }
+            const auto mask{pq::ValidateRosterAuthorizationState(m_genesis_hash, statement, exact_authorization)};
+            return mask && (selected_quorum_mask & ~*mask) == 0 &&
+                exact_authorization.admission != pq::RosterAuthorizationAdmission::POW_HISTORY &&
+                exact_authorization.admission != pq::RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+        }
+    }
+    // Other historical imports only bridge D < B. Once D advances through B,
+    // its roster decisions retain their ordinary convergence checks.
     if (candidate_admission == pq::ChainLockCandidateAdmission::CATCHUP && exact_prior &&
         IsHistoricalAuthorizationBaseAheadOfDurableWinner(
             current ? &current->metadata : nullptr, exact_prior->metadata)) {
@@ -14353,36 +14475,22 @@ CChainLocksHandler::BuildCurrentSigningContexts(
             durable_predecessor.height, tip->nHeight)};
         if (!latest_window) return std::nullopt;
         std::optional<pq::ChainLockSigningWindow> window;
-        if (staged_recovery) {
-            if (finality.best) {
-                return std::nullopt;
+        if (!finality.best && !historical) {
+            const auto initial_target{pq::CurrentRosterInitializationTargetHeight(
+                m_config->chainlock_schedule, m_config->btcc_schedule,
+                m_config->activation_predecessor_height, tip->nHeight)};
+            if (!initial_target) return std::nullopt;
+            if (staged_recovery &&
+                staged_recovery->pending_seed.anchor_cursor.sys_height != *initial_target) {
+                // A later chain-defined round supersedes even a READY attempt.
+                // Its leaves remain burned; the new round uses different epochs.
+                if (staged_recovery->pending_seed.anchor_cursor.sys_height > *initial_target) {
+                    return std::nullopt;
+                }
+                staged_recovery.reset();
             }
-            window = StagedRecoverySigningWindow(
-                m_config->chainlock_schedule,
-                m_config->btcc_schedule, *staged_recovery,
-                durable_predecessor.height, tip->nHeight);
-            reset_path = true;
-        } else if (!finality.best && !historical) {
-            const auto initial_target{
-                pq::NextEligibleChainLockTargetHeight(
-                    m_config->chainlock_schedule,
-                    m_config->activation_predecessor_height)};
-            const auto initial_epoch{initial_target
-                ? pq::EpochForHeight(
-                      m_config->chainlock_schedule, *initial_target)
-                : std::optional<uint32_t>{}};
-            const auto canonical{initial_epoch
-                ? pq::CanonicalRosterRecoveryTargetHeight(
-                      m_config->chainlock_schedule,
-                      m_config->btcc_schedule, *initial_epoch)
-                : std::optional<int32_t>{}};
-            if (!initial_target || !canonical ||
-                *canonical != *initial_target) {
-                return std::nullopt;
-            }
-            window = RecoverySigningWindowForTarget(
-                m_config->chainlock_schedule, *initial_target,
-                durable_predecessor.height, tip->nHeight);
+            window = pq::ChainLockSigningWindow{
+                *initial_target, durable_predecessor.height};
             reset_path = true;
         } else {
             window = latest_window;
@@ -14459,8 +14567,8 @@ CChainLocksHandler::BuildCurrentSigningContexts(
         if (!HasExactLiveSigningTargetEndpoint(*indexed_target)) {
             return std::nullopt;
         }
-        const auto selected{SelectCurrentChainLockBTCC(
-            m_genesis_hash, *m_config, *indexed_target,
+        const auto selected{SelectCurrentBTCCWithVerifiedInitializationReceipt(
+            *indexed_target,
             finality.best ? &*finality.best : nullptr)};
         if (!selected) return std::nullopt;
         btcc = *selected;
@@ -14784,7 +14892,30 @@ CChainLocksHandler::BuildCurrentSigningContexts(
             pq::RosterRecoveryPrecommit precommit;
             precommit.pending_seed = std::move(pending);
             const bool persisted{
-                m_persistence->PersistRosterRecoveryPrecommit(precommit)};
+                m_chainman.ActiveChainstate().RunWithStableActiveChain([&] {
+                    {
+                        LOCK(cs_main);
+                        const auto* tip{m_chainman.ActiveTip()};
+                        const auto current{tip
+                            ? pq::CurrentRosterInitializationTargetHeight(
+                                  m_config->chainlock_schedule,
+                                  m_config->btcc_schedule,
+                                  m_config->activation_predecessor_height,
+                                  tip->nHeight)
+                            : std::optional<int32_t>{}};
+                        const auto* target{current
+                            ? m_chainman.ActiveChain()[*current] : nullptr};
+                        if (!target || *current != anchor_cursor.sys_height ||
+                            target->GetBlockHash() != anchor_cursor.sys_hash ||
+                            target->btcpPrevCommitment != anchor_cursor.btc_hash) {
+                            return false;
+                        }
+                    }
+                    return persisted_recovery
+                        ? m_persistence->AdvanceRosterRecoveryPrecommit(
+                              *persisted_recovery, precommit)
+                        : m_persistence->PersistRosterRecoveryPrecommit(precommit);
+                })};
             if (!persisted) {
                 return std::nullopt;
             }
@@ -19233,14 +19364,12 @@ void CChainLocksHandler::ProcessPaymentAuditResponse(
         return;
     }
     const auto& statement{response.response.GetStatement()};
-    const auto expected_target{
-        m_config ? pq::NextEligibleChainLockTargetHeight(
-                       m_config->chainlock_schedule,
-                       statement.previous_chainlock_height)
-                 : std::nullopt};
     if (response.response.GetStatement().height !=
             definition->row.expected.response_height ||
-        !expected_target || statement.height != *expected_target ||
+        !m_config ||
+        !pq::HasCanonicalPaymentAuditResponsePredecessor(
+            {m_config->chainlock_schedule, m_config->btcc_schedule},
+            m_config->activation_predecessor_height, statement) ||
         statement.block_hash != definition->row.response_block_hash ||
         statement.btcc_advance != definition->row.response_advance ||
         pq::GetLogicalChainLockId(m_genesis_hash, statement) !=

@@ -221,6 +221,28 @@ bool PaymentAuditEpochSchedule::IsStructurallyValid(
     return true;
 }
 
+bool HasCanonicalPaymentAuditResponsePredecessor(
+    const PaymentAuditScheduleConfig& config,
+    int32_t activation_predecessor_height,
+    const ChainLockStatement& statement) noexcept
+{
+    if (!config.IsValid()) return false;
+    if (statement.roster_transition ==
+        RosterAuthorizationTransitionKind::INITIALIZE) {
+        return statement.previous_chainlock_height ==
+                   activation_predecessor_height &&
+               statement.previous_btcc_cursor.IsNull() &&
+               statement.btcc_receipt_state == BTCCReceiptState{} &&
+               statement.roster_authorization_base.IsNull() &&
+               IsCanonicalRosterInitializationTarget(
+                   config.chainlock, config.btcc,
+                   activation_predecessor_height, statement.height);
+    }
+    const auto next{NextEligibleChainLockTargetHeight(
+        config.chainlock, statement.previous_chainlock_height)};
+    return next && statement.height == *next;
+}
+
 std::optional<PaymentAuditEpochSchedule>
 BuildPaymentAuditEpochSchedule(const PaymentAuditScheduleConfig& config,
                                uint32_t epoch) noexcept

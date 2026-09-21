@@ -552,6 +552,128 @@ struct IndexChain {
 
 BOOST_AUTO_TEST_SUITE(pq_quorum_builder_tests)
 
+BOOST_AUTO_TEST_CASE(late_operator_registration_initializes_a_later_round_deterministically)
+{
+    constexpr int32_t ACTIVATION_PREDECESSOR{2304};
+    constexpr int32_t REGISTRATION_HEIGHT{2405};
+    constexpr int32_t FIRST_TARGET{2305};
+    constexpr int32_t LATER_TARGET{3465};
+    const uint256 genesis{NonNullHash(18'900)};
+    const auto config{BuildConfig()};
+    const auto policy{ResetPolicy()};
+    IndexChain chain(LATER_TARGET + PQ_CL_SIGN_LAG, LATER_TARGET + PQ_CL_SIGN_LAG + 1, 0);
+    BOOST_CHECK(CurrentRosterInitializationTargetHeight(
+        config.schedule, policy.btcc_schedule, ACTIVATION_PREDECESSOR,
+        chain.Tip().nHeight) == LATER_TARGET);
+
+    const auto initialization_window = [&](int32_t target_height) {
+        const auto epochs{ActiveEpochsAtHeight(config.schedule, target_height)};
+        BOOST_REQUIRE(epochs);
+        // The production handler supplies one delayed, authenticated Bitcoin
+        // beacon after every roster snapshot; all four epochs share it.
+        auto shared{ReadyBeaconSeed(epochs->back().epoch)};
+        shared.anchor_cursor.sys_hash =
+            chain.At(shared.anchor_cursor.sys_height).GetBlockHash();
+        RosterBeaconWindow window;
+        for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+            window.active.seeds[slot] = shared;
+            window.active.seeds[slot].epoch = (*epochs)[slot].epoch;
+        }
+        window.active.recovery_authority_source.normal_beacon =
+            window.active.seeds.back();
+        window.next.epoch = epochs->back().epoch + 1;
+        BOOST_REQUIRE(IsInitialNormalRosterBeaconWindow(window));
+        return window;
+    };
+    const auto make_lookup = [&](bool reverse) {
+        return QuorumSnapshotLookup{[&, reverse](const CBlockIndex& index) {
+            QuorumSnapshotState state;
+            // The legacy deterministic list already exists. PQ registrations
+            // become visible only in snapshots after the operators upgrade.
+            state.deterministic_mns = Snapshot(
+                index.nHeight, index.GetBlockHash(), QUORUM_SIZE, reverse);
+            std::vector<OperatorKeyState> keys;
+            if (index.nHeight >= REGISTRATION_HEIGHT) {
+                const auto epoch{EpochForHeight(config.schedule,
+                    index.nHeight + config.roster_snapshot_lag_blocks)};
+                BOOST_REQUIRE(epoch);
+                keys = KeyStates(QUORUM_SIZE, *epoch, index.nHeight);
+                for (auto& key : keys) {
+                    key.global_key.activated_height = REGISTRATION_HEIGHT;
+                    BOOST_REQUIRE(key.IsStructurallyValid());
+                }
+            }
+            state.operator_key_states = SharedOperatorStates(std::move(keys));
+            return std::optional<QuorumSnapshotState>{std::move(state)};
+        }};
+    };
+
+    const auto first_cache{FrozenQuorumRosterCache::Create(genesis, config, make_lookup(false))};
+    const auto second_cache{FrozenQuorumRosterCache::Create(genesis, config, make_lookup(true))};
+    BOOST_REQUIRE(first_cache);
+    BOOST_REQUIRE(second_cache);
+    QuorumBuildError build_error{};
+    const auto original_window{initialization_window(FIRST_TARGET)};
+    BOOST_CHECK(!first_cache->GetVerifiedActive(
+        FIRST_TARGET, chain.Tip(), original_window.active, &build_error));
+    BOOST_CHECK(build_error == QuorumBuildError::INSUFFICIENT_ELIGIBLE_MEMBERS);
+
+    const auto later_window{initialization_window(LATER_TARGET)};
+    const auto first_rosters{first_cache->GetVerifiedActive(
+        LATER_TARGET, chain.Tip(), later_window.active, &build_error)};
+    BOOST_REQUIRE_MESSAGE(first_rosters, "quorum build error=" << static_cast<int>(build_error));
+    const auto second_rosters{second_cache->GetVerifiedActive(
+        LATER_TARGET, chain.Tip(), later_window.active, &build_error)};
+    BOOST_REQUIRE_MESSAGE(second_rosters, "quorum build error=" << static_cast<int>(build_error));
+    BOOST_CHECK(SameRosterSet(first_rosters->Rosters(), second_rosters->Rosters()));
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        const auto& roster{first_rosters->Rosters()[slot]};
+        BOOST_CHECK_EQUAL(roster.descriptor.valid_count, QUORUM_SIZE);
+        BOOST_CHECK_GT(roster.descriptor.snapshot_height, REGISTRATION_HEIGHT);
+        descriptors[slot] = roster.descriptor;
+    }
+
+    ChainLockStatement statement;
+    statement.height = LATER_TARGET;
+    statement.block_hash = chain.At(LATER_TARGET).GetBlockHash();
+    statement.previous_chainlock_height = ACTIVATION_PREDECESSOR;
+    statement.previous_chainlock_hash = chain.At(ACTIVATION_PREDECESSOR).GetBlockHash();
+    statement.roster_transition = RosterAuthorizationTransitionKind::INITIALIZE;
+    statement.roster_beacons = later_window;
+    statement.accepted_btcc_cursor = {LATER_TARGET, statement.block_hash, NonNullHash(18'901)};
+    statement.btcc_advance = BTCCAdvance::ADVANCE;
+    statement.payment_probation_state_hash = NonNullHash(18'902);
+    statement.quorum_context_hash = GetQuorumContextHash(
+        genesis, LATER_TARGET, statement.block_hash, descriptors);
+
+    RosterAuthorizationTransition transition;
+    transition.kind = statement.roster_transition;
+    transition.target_height = statement.height;
+    transition.target_block_hash = statement.block_hash;
+    transition.predecessor_height = statement.previous_chainlock_height;
+    transition.predecessor_block_hash = statement.previous_chainlock_hash;
+    transition.new_window = statement.roster_beacons;
+    const auto state_hash{GetRosterAuthorizationStateHash(genesis, transition)};
+    BOOST_REQUIRE(state_hash);
+    statement.roster_authorization_state_hash = *state_hash;
+    RosterAuthorizationVerificationContext initialize;
+    initialize.admission = RosterAuthorizationAdmission::INITIALIZE;
+    initialize.predecessor_height = statement.previous_chainlock_height;
+    initialize.predecessor_block_hash = statement.previous_chainlock_hash;
+    initialize.reset_policy = policy;
+    ChainLockVerificationError verify_error{};
+    const auto first_context{PreparedChainLockContext::Create(
+        config.schedule, statement, first_rosters, initialize, &verify_error)};
+    BOOST_REQUIRE_MESSAGE(first_context, "verification error=" << static_cast<int>(verify_error));
+    const auto second_context{PreparedChainLockContext::Create(
+        config.schedule, statement, second_rosters, initialize, &verify_error)};
+    BOOST_REQUIRE_MESSAGE(second_context, "verification error=" << static_cast<int>(verify_error));
+    BOOST_CHECK(first_context->Statement() == second_context->Statement());
+    BOOST_CHECK_EQUAL(first_context->AuthorizationMask(), 0b1111);
+    BOOST_CHECK_EQUAL(second_context->AuthorizationMask(), 0b1111);
+}
+
 BOOST_AUTO_TEST_CASE(pow_refresh_requires_snapshot_key_horizon_and_excludes_missing_roots)
 {
     constexpr uint32_t GROUP{2};

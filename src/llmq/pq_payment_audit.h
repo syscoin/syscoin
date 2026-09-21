@@ -154,6 +154,16 @@ struct PaymentAuditScheduleConfig {
                            const PaymentAuditScheduleConfig&) = default;
 };
 
+/**
+ * Scheduling check for a response already bound to its verified audit row.
+ * Ordinary responses follow the exact predecessor; an INITIALIZE response
+ * can be the first row of a later canonical bootstrap round.
+ */
+[[nodiscard]] bool HasCanonicalPaymentAuditResponsePredecessor(
+    const PaymentAuditScheduleConfig& config,
+    int32_t activation_predecessor_height,
+    const ChainLockStatement& statement) noexcept;
+
 struct PaymentAuditRowSchedule {
     int32_t response_height{-1};
     int32_t deadline_height{-1};

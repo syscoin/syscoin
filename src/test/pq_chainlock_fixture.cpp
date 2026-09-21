@@ -554,11 +554,12 @@ bool GenerateMemberKeys(
     std::vector<scheduled_wots::PublicKey>& public_keys,
     std::vector<std::shared_ptr<const scheduled_wots::SecretKey>>& secret_keys,
     std::map<uint256, std::size_t>& member_indices,
-    std::size_t key_epochs = MAX_FIXTURE_EPOCHS)
+    std::size_t key_epochs = MAX_FIXTURE_EPOCHS,
+    std::size_t first_key_epoch = 0)
 {
     if (public_keys.size() != CHILD_KEY_COUNT ||
         secret_keys.size() != CHILD_KEY_COUNT ||
-        key_epochs > MAX_FIXTURE_KEY_EPOCHS) {
+        key_epochs > MAX_FIXTURE_KEY_EPOCHS || first_key_epoch >= key_epochs) {
         return false;
     }
     for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
@@ -570,7 +571,9 @@ bool GenerateMemberKeys(
     static std::vector<std::shared_ptr<const scheduled_wots::SecretKey>>
         cached_keys(CHILD_KEY_COUNT);
     const std::size_t key_count{key_epochs * QUORUM_MIN_VALID};
-    if (!ParallelFor(key_count, [&](std::size_t key_index) {
+    const std::size_t first_key{first_key_epoch * QUORUM_MIN_VALID};
+    if (!ParallelFor(key_count - first_key, [&](std::size_t index) {
+        const std::size_t key_index{first_key + index};
         if (cached_keys[key_index]) return true;
         scheduled_wots::KeyGenerationSeed seed{};
         FillKeySeed(key_index, seed);
@@ -582,7 +585,7 @@ bool GenerateMemberKeys(
         return true;
     })) return false;
     secret_keys = cached_keys;
-    for (std::size_t key_index{0}; key_index < key_count; ++key_index) {
+    for (std::size_t key_index{first_key}; key_index < key_count; ++key_index) {
         if (!secret_keys[key_index]->GetPublicKey(public_keys[key_index])) {
             return false;
         }
@@ -590,10 +593,17 @@ bool GenerateMemberKeys(
     return true;
 }
 
-bool GenerateMemberKeys(FullDimensionFixture& fixture)
+bool GenerateMemberKeys(FullDimensionFixture& fixture,
+                        bool retain_epoch_snapshots = false)
 {
+    const auto active{ActiveEpochsAtHeight(
+        fixture.args.build_config.schedule, fixture.args.target_height)};
+    if (!active) return false;
     return GenerateMemberKeys(fixture.public_keys, fixture.secret_keys,
-                              fixture.member_indices);
+        fixture.member_indices,
+        static_cast<std::size_t>(active->back().epoch) + 1 +
+            (retain_epoch_snapshots ? 1 : 0),
+        active->front().epoch);
 }
 
 bool IsBitSetLocal(const QuorumBitmap& bitmap, std::size_t member)
@@ -1219,8 +1229,13 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
     const auto next_target{NextEligibleChainLockTargetHeight(
         fixture.args.build_config.schedule,
         fixture.args.predecessor_height)};
-    if (!active_epochs || !next_target ||
-        *next_target != fixture.args.target_height ||
+    const bool valid_target{next_target && (fixture.args.authorizer
+        ? *next_target == fixture.args.target_height
+        : IsCanonicalRosterInitializationTarget(
+              fixture.args.build_config.schedule,
+              BTCCScheduleConfig{.candidate_origin = *next_target},
+              fixture.args.predecessor_height, fixture.args.target_height))};
+    if (!active_epochs || !valid_target ||
         !fixture.chain.SetExactHash(fixture.args.target_height,
                                     fixture.args.target_hash) ||
         !fixture.chain.SetExactHash(fixture.args.predecessor_height,
@@ -1489,11 +1504,13 @@ bool BuildSnapshotsAndRosters(FullDimensionFixture& fixture)
         fixture.statement.roster_authorization_state_hash = *state_hash;
         authorization = FixtureAuthorizationFor(fixture.statement);
     }
-    const int32_t reset_origin{
-        authority_source.normal_beacon.anchor_cursor.sys_height};
-    const int64_t reset_predecessor{
-        static_cast<int64_t>(reset_origin) -
-        fixture.args.build_config.schedule.chainlock_period};
+    const int32_t reset_origin{fixture.args.authorizer
+        ? authority_source.normal_beacon.anchor_cursor.sys_height
+        : *next_target};
+    const int64_t reset_predecessor{fixture.args.authorizer
+        ? static_cast<int64_t>(reset_origin) -
+              fixture.args.build_config.schedule.chainlock_period
+        : fixture.args.predecessor_height};
     if (reset_origin < 0 || reset_predecessor < -1 ||
         reset_predecessor > std::numeric_limits<int32_t>::max()) {
         std::cerr << "invalid fixture reset policy\n";
@@ -2426,6 +2443,12 @@ std::optional<GeneratorArguments> ParseArguments(int argc, char* argv[],
     }
     const auto next_target{NextEligibleChainLockTargetHeight(
         args.build_config.schedule, args.predecessor_height)};
+    const bool valid_target{next_target && (args.authorizer
+        ? *next_target == args.target_height
+        : IsCanonicalRosterInitializationTarget(
+              args.build_config.schedule,
+              BTCCScheduleConfig{.candidate_origin = *next_target},
+              args.predecessor_height, args.target_height))};
     if (!args.snapshot_output.is_absolute() ||
         !args.shares_output.is_absolute() ||
         !args.build_config.IsValid() ||
@@ -2434,7 +2457,7 @@ std::optional<GeneratorArguments> ParseArguments(int argc, char* argv[],
         (args.authorizer &&
          (args.authorizer->height < 0 ||
           args.authorizer->height > args.predecessor_height)) ||
-        !next_target || *next_target != args.target_height ||
+        !valid_target ||
         !IsEligibleChainLockTarget(args.build_config.schedule,
                                    args.target_height)) {
         error = "invalid full-dimension fixture geometry";
@@ -3098,7 +3121,7 @@ int GeneratePaymentAuditPost(const PaymentAuditPostArguments& args)
 int Generate(const GeneratorArguments& args, bool retain_epoch_snapshots = false)
 {
     auto fixture{std::make_unique<FullDimensionFixture>(args)};
-    if (!GenerateMemberKeys(*fixture)) {
+    if (!GenerateMemberKeys(*fixture, retain_epoch_snapshots)) {
         throw std::runtime_error(
             "unable to generate full-dimension ChainLock member keys");
     }

@@ -659,20 +659,24 @@ std::optional<int32_t> CanonicalRosterRecoveryTargetHeight(
     const BTCCScheduleConfig& btcc,
     uint32_t epoch) noexcept
 {
-    if (epoch % ACTIVE_QUORUMS != ACTIVE_QUORUMS - 1) {
+    if (!chainlock.IsValid() || !btcc.IsValid() ||
+        epoch % ACTIVE_QUORUMS != ACTIVE_QUORUMS - 1 ||
+        (static_cast<int64_t>(btcc.candidate_origin) -
+         chainlock.epoch_origin) % chainlock.chainlock_period != 0) {
         return std::nullopt;
     }
     const auto base{EpochBaseHeight(chainlock, epoch)};
     const auto end{EpochEndHeightExclusive(chainlock, epoch)};
     if (!base || !end) return std::nullopt;
-    for (int64_t height{*base}; height < *end; ++height) {
-        const auto candidate{static_cast<int32_t>(height)};
-        if (IsEligibleChainLockTarget(chainlock, candidate) &&
-            IsBTCCCandidateHeight(btcc, candidate)) {
-            return candidate;
-        }
-    }
-    return std::nullopt;
+    // The fixed BTCC period is a multiple of the ChainLock period. Round up
+    // directly to their first joint boundary instead of scanning the epoch.
+    const int64_t start{std::max(*base, btcc.candidate_origin)};
+    const int64_t remainder{
+        (start - btcc.candidate_origin) % btcc.candidate_period};
+    const int64_t candidate{start +
+        (remainder == 0 ? 0 : btcc.candidate_period - remainder)};
+    if (candidate >= *end) return std::nullopt;
+    return static_cast<int32_t>(candidate);
 }
 
 std::optional<ObjectiveRosterAuthorizationMode>
@@ -715,8 +719,7 @@ GetObjectiveRosterAuthorizationMode(
         : ObjectiveRosterAuthorizationMode::PAUSE;
 }
 
-std::optional<RosterAuthorizationTransitionKind>
-CanonicalRosterResetTransitionForTarget(
+bool IsCanonicalRosterInitializationTarget(
     const ChainLockScheduleConfig& chainlock,
     const BTCCScheduleConfig& btcc,
     int32_t activation_predecessor_height,
@@ -725,7 +728,7 @@ CanonicalRosterResetTransitionForTarget(
     if (!chainlock.IsValid() || !btcc.IsValid() ||
         activation_predecessor_height < -1 ||
         target_height <= activation_predecessor_height) {
-        return std::nullopt;
+        return false;
     }
     const auto first_target{NextEligibleChainLockTargetHeight(
         chainlock, activation_predecessor_height)};
@@ -738,22 +741,64 @@ CanonicalRosterResetTransitionForTarget(
         : std::optional<int32_t>{}};
     if (!first_target || !first_canonical ||
         *first_target != *first_canonical) {
-        return std::nullopt;
+        return false;
     }
-    if (target_height == *first_target) {
-        return RosterAuthorizationTransitionKind::INITIALIZE;
-    }
-    if (target_height < *first_target) return std::nullopt;
+    if (target_height < *first_target) return false;
 
     const auto target_epoch{EpochForHeight(chainlock, target_height)};
     const auto canonical{target_epoch
         ? CanonicalRosterRecoveryTargetHeight(
               chainlock, btcc, *target_epoch)
         : std::optional<int32_t>{}};
-    if (!canonical || *canonical != target_height) {
+    return canonical && *canonical == target_height;
+}
+
+std::optional<int32_t> CurrentRosterInitializationTargetHeight(
+    const ChainLockScheduleConfig& chainlock,
+    const BTCCScheduleConfig& btcc,
+    int32_t activation_predecessor_height,
+    int32_t tip_height) noexcept
+{
+    const auto latest{LatestEligibleChainLockTargetHeight(chainlock, tip_height)};
+    const auto epoch{latest ? EpochForHeight(chainlock, *latest)
+                            : std::optional<uint32_t>{}};
+    if (!epoch || *epoch < ACTIVE_QUORUMS - 1) return std::nullopt;
+    uint32_t canonical_epoch{
+        *epoch - (*epoch + 1) % static_cast<uint32_t>(ACTIVE_QUORUMS)};
+    auto target{CanonicalRosterRecoveryTargetHeight(chainlock, btcc, canonical_epoch)};
+    if (!target || *target > *latest) {
+        if (canonical_epoch < 2 * ACTIVE_QUORUMS - 1) return std::nullopt;
+        canonical_epoch -= ACTIVE_QUORUMS;
+        target = CanonicalRosterRecoveryTargetHeight(chainlock, btcc, canonical_epoch);
+    }
+    if (!target || *target > *latest ||
+        !IsCanonicalRosterInitializationTarget(
+            chainlock, btcc, activation_predecessor_height, *target)) {
         return std::nullopt;
     }
-    return RosterAuthorizationTransitionKind::RECOVER;
+    return target;
+}
+
+std::optional<RosterAuthorizationTransitionKind>
+CanonicalRosterResetTransitionForTarget(
+    const ChainLockScheduleConfig& chainlock,
+    const BTCCScheduleConfig& btcc,
+    int32_t activation_predecessor_height,
+    int32_t target_height,
+    bool has_prior_authorization) noexcept
+{
+    if (!IsCanonicalRosterInitializationTarget(
+            chainlock, btcc, activation_predecessor_height, target_height)) {
+        return std::nullopt;
+    }
+    if (!has_prior_authorization) {
+        return RosterAuthorizationTransitionKind::INITIALIZE;
+    }
+    const auto first_target{NextEligibleChainLockTargetHeight(
+        chainlock, activation_predecessor_height)};
+    return target_height > *first_target
+        ? std::optional{RosterAuthorizationTransitionKind::RECOVER}
+        : std::nullopt;
 }
 
 std::optional<uint256> GetRosterAuthorizationStateHash(
