@@ -145,7 +145,8 @@ bool InspectLegacyHistory(ChainstateManager& chainman,
     record = {.genesis_hash = consensus.hashGenesisBlock,
               .activation_height = consensus.nPQActivationHeight,
               .legacy_tip_height = tip.nHeight,
-              .legacy_tip_hash = best};
+              .legacy_tip_hash = best,
+              .predecessor_hash = {}};
     const int32_t predecessor_height{record.activation_height - 1};
     std::unordered_map<int, uintmax_t> block_file_sizes;
     uint256 hash{best};
