@@ -1561,6 +1561,130 @@ BOOST_AUTO_TEST_CASE(recovery_retirement_requires_exact_durable_coverage)
     BOOST_CHECK(reopened.GetRetentionSnapshot()->retained.empty());
 }
 
+BOOST_AUTO_TEST_CASE(recovery_retirement_preserves_other_slot_across_reopen)
+{
+    using Access = llmq_tests::PaymentAuditStoreTestAccess;
+    const auto genesis{NonNullHash(54'010)};
+    const std::array audits{Audit(16, 0x07, 54'011), Audit(17, 0x07, 54'012)};
+    const std::array identities{
+        RecoveryIdentity(genesis, audits[0], 54'013),
+        RecoveryIdentity(genesis, audits[1], 54'014)};
+
+    // Retiring in either order exercises both occupied slots with two records,
+    // then reuse of each freed slot and retirement of either remaining record.
+    for (std::size_t first{0}; first < identities.size(); ++first) {
+        BOOST_TEST_CONTEXT("first retired audit " << first) {
+            const std::size_t survivor{1 - first};
+            const fs::path path{m_path_root / fs::PathFromString(
+                "recovery_raw_retire_order_" + std::to_string(first))};
+            const auto check_raw = [&](PaymentAuditRecoveryStore& store, std::size_t index) {
+                BOOST_CHECK(store.Has(identities[index].witness_id));
+                const auto raw{store.GetRaw(identities[index].witness_id)};
+                BOOST_REQUIRE(raw);
+                BOOST_CHECK(raw->identity == identities[index]);
+                BOOST_CHECK(raw->audit == audits[index]);
+                DataStream expected;
+                DataStream actual;
+                expected << audits[index];
+                actual << raw->audit;
+                BOOST_CHECK_EQUAL(actual.size(), FinalPaymentAudit::WIRE_SIZE);
+                BOOST_CHECK(actual.str() == expected.str());
+            };
+            const auto check_survivor = [&](PaymentAuditRecoveryStore& store) {
+                BOOST_REQUIRE(store.IsHealthy());
+                BOOST_CHECK(!store.Has(identities[first].witness_id));
+                BOOST_CHECK(!store.GetRaw(identities[first].witness_id));
+                const auto retained{store.GetRetentionSnapshot()};
+                BOOST_REQUIRE(retained);
+                BOOST_REQUIRE_EQUAL(retained->retained.size(), 1U);
+                BOOST_CHECK(retained->retained.front() == identities[survivor]);
+                check_raw(store, survivor);
+            };
+            const auto check_both = [&](PaymentAuditRecoveryStore& store) {
+                BOOST_REQUIRE(store.IsHealthy());
+                const auto retained{store.GetRetentionSnapshot()};
+                BOOST_REQUIRE(retained);
+                BOOST_REQUIRE_EQUAL(retained->retained.size(), 2U);
+                BOOST_CHECK((retained->retained[0] == identities[0] &&
+                             retained->retained[1] == identities[1]) ||
+                            (retained->retained[0] == identities[1] &&
+                             retained->retained[1] == identities[0]));
+                check_raw(store, 0);
+                check_raw(store, 1);
+            };
+            {
+                PaymentAuditRecoveryStore store{path, genesis};
+                BOOST_REQUIRE(store.IsHealthy());
+                for (std::size_t i{0}; i < identities.size(); ++i) {
+                    BOOST_REQUIRE(store.Persist(VerifiedRecovery(identities[i], audits[i])) ==
+                                  PaymentAuditRecoveryStoreResult::ACCEPTED);
+                }
+                check_both(store);
+                const auto before{store.GetRetentionSnapshot()};
+                BOOST_REQUIRE(before);
+                BOOST_REQUIRE_EQUAL(before->retained.size(), 2U);
+                const auto& identity{identities[first]};
+                const auto checkpoint{Checkpoint(identity.epoch, 54'015,
+                                                  identity.carrier_height + 2)};
+                BOOST_REQUIRE(store.RetireCovered(Access::Retirement(
+                                  identity, checkpoint, before->revision)) ==
+                              PaymentAuditRecoveryStoreResult::ACCEPTED);
+                check_survivor(store);
+                BOOST_CHECK_GT(store.GetRetentionSnapshot()->revision, before->revision);
+            }
+            BOOST_CHECK_EQUAL(CountDatabaseRecords(path), 3U);
+            {
+                PaymentAuditRecoveryStore reopened{path, genesis};
+                check_survivor(reopened);
+                const auto before{reopened.GetRetentionSnapshot()};
+                BOOST_REQUIRE(before);
+                BOOST_REQUIRE(reopened.Persist(VerifiedRecovery(identities[first], audits[first])) ==
+                              PaymentAuditRecoveryStoreResult::ACCEPTED);
+                check_both(reopened);
+                BOOST_CHECK_GT(reopened.GetRetentionSnapshot()->revision, before->revision);
+            }
+            BOOST_CHECK_EQUAL(CountDatabaseRecords(path), 4U);
+            {
+                PaymentAuditRecoveryStore reopened{path, genesis};
+                check_both(reopened);
+                const auto refilled{reopened.GetRetentionSnapshot()};
+                BOOST_REQUIRE(refilled);
+                const auto repeated_checkpoint{Checkpoint(identities[first].epoch, 54'015,
+                                                           identities[first].carrier_height + 2)};
+                BOOST_REQUIRE(reopened.RetireCovered(Access::Retirement(
+                                  identities[first], repeated_checkpoint, refilled->revision)) ==
+                              PaymentAuditRecoveryStoreResult::ACCEPTED);
+                check_survivor(reopened);
+                const auto before{reopened.GetRetentionSnapshot()};
+                BOOST_REQUIRE(before);
+                BOOST_CHECK_GT(before->revision, refilled->revision);
+                const auto& identity{identities[survivor]};
+                const auto checkpoint{Checkpoint(identity.epoch, 54'016,
+                                                  identity.carrier_height + 2)};
+                BOOST_REQUIRE(reopened.RetireCovered(Access::Retirement(
+                                  identity, checkpoint, before->revision)) ==
+                              PaymentAuditRecoveryStoreResult::ACCEPTED);
+                BOOST_CHECK(!reopened.Has(identity.witness_id));
+                BOOST_CHECK(!reopened.GetRaw(identity.witness_id));
+                const auto empty{reopened.GetRetentionSnapshot()};
+                BOOST_REQUIRE(empty);
+                BOOST_CHECK(empty->retained.empty());
+                BOOST_CHECK_GT(empty->revision, before->revision);
+            }
+            BOOST_CHECK_EQUAL(CountDatabaseRecords(path), 2U);
+            PaymentAuditRecoveryStore reopened{path, genesis};
+            BOOST_REQUIRE(reopened.IsHealthy());
+            const auto empty{reopened.GetRetentionSnapshot()};
+            BOOST_REQUIRE(empty);
+            BOOST_CHECK(empty->retained.empty());
+            for (const auto& identity : identities) {
+                BOOST_CHECK(!reopened.Has(identity.witness_id));
+                BOOST_CHECK(!reopened.GetRaw(identity.witness_id));
+            }
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(recovery_schema_genesis_and_corrupt_records_fail_closed)
 {
     const auto genesis{NonNullHash(55'000)};

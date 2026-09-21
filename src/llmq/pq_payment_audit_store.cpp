@@ -2173,8 +2173,14 @@ PaymentAuditRecoveryStoreResult PaymentAuditRecoveryStore::Persist(
         record.identity = admission.m_identity;
         record.audit = std::move(admission.m_audit);
         record.checksum = RecoveryRecordChecksum(m_genesis_hash, *selected_slot, record);
-        auto retained{m_retained};
-        retained[*selected_slot] = record.identity;
+        // Avoid the optional-array copy/mutation that GCC 12 can miscompile
+        // (also relevant to retirement below).
+        std::array<std::optional<PaymentAuditRecoveryIdentity>,
+                   MAX_RETAINED_AUDITS> retained{};
+        for (std::size_t slot{0}; slot < MAX_RETAINED_AUDITS; ++slot) {
+            if (slot == *selected_slot) retained[slot] = record.identity;
+            else retained[slot] = m_retained[slot];
+        }
         CDBBatch batch{m_db};
         batch.Write(RecoverySlotKey(*selected_slot), record);
         batch.Write(RECOVERY_MANIFEST_KEY, MakeRecoveryManifest(m_genesis_hash, retained));
@@ -2182,7 +2188,7 @@ PaymentAuditRecoveryStoreResult PaymentAuditRecoveryStore::Persist(
             m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
             return *m_failure;
         }
-        m_retained = std::move(retained);
+        m_retained[*selected_slot] = record.identity;
         ++m_revision;
         return PaymentAuditRecoveryStoreResult::ACCEPTED;
     } catch (const std::exception&) {
@@ -2210,8 +2216,14 @@ PaymentAuditRecoveryStoreResult PaymentAuditRecoveryStore::RetireCovered(
         if (m_retained[slot] != identity) continue;
         if (!GetRawLocked(slot) || !CanAdvanceRevision()) return *m_failure;
         try {
-            auto retained{m_retained};
-            retained[slot].reset();
+            // GCC 12 can miscompile copy-then-reset of this optional array,
+            // leaving the manifest pointing to the payload being erased.
+            // Build it directly from the surviving identities instead.
+            std::array<std::optional<PaymentAuditRecoveryIdentity>,
+                       MAX_RETAINED_AUDITS> retained{};
+            for (std::size_t other{0}; other < MAX_RETAINED_AUDITS; ++other) {
+                if (other != slot) retained[other] = m_retained[other];
+            }
             CDBBatch batch{m_db};
             batch.Erase(RecoverySlotKey(slot));
             batch.Write(RECOVERY_MANIFEST_KEY, MakeRecoveryManifest(m_genesis_hash, retained));
@@ -2219,7 +2231,7 @@ PaymentAuditRecoveryStoreResult PaymentAuditRecoveryStore::RetireCovered(
                 m_failure = PaymentAuditRecoveryStoreResult::DATABASE_ERROR;
                 return *m_failure;
             }
-            m_retained = std::move(retained);
+            m_retained[slot].reset();
             ++m_revision;
             return PaymentAuditRecoveryStoreResult::ACCEPTED;
         } catch (const std::exception&) {
