@@ -14,6 +14,7 @@
 #include <flatfile.h>
 #include <hash.h>
 #include <logging.h>
+#include <nevm/nevm.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
 #include <node/chainstate.h>
@@ -181,7 +182,7 @@ bool InspectLegacyBlock(const ChainstateManager& chainman,
             block.hashPrevBlock != index.hashPrev || block.vtx.size() != index.nTx) {
             return fail("block record does not match its index");
         }
-        // Check committed Core data and the AuxPoW wrapper without loading
+        // Check committed Core/NEVM data and the AuxPoW wrapper without loading
         // PoDA sidecars, executing Geth, or applying new contextual PQ rules
         // to the legacy suffix. Those checks belong to the subsequent replay.
         BlockValidationState state;
@@ -190,6 +191,14 @@ bool InspectLegacyBlock(const ChainstateManager& chainman,
         }
         if (!CheckLegacyWitnessCommitment(block, index.nHeight, chainman.GetConsensus())) {
             return fail("witness commitment mismatch");
+        }
+        if (block.IsNEVM()) {
+            CNEVMHeader commitment;
+            if (!GetNEVMData(state, block, commitment)) return fail(state.ToString());
+            std::string payload_error;
+            if (!CheckNEVMBlockPayloadIntegrity(block.vchNEVMBlockData, commitment, payload_error)) {
+                return fail(payload_error);
+            }
         }
         return true;
     } catch (const std::exception& exception) {

@@ -24,6 +24,7 @@
 #include <services/nevmconsensus.h>
 #include <util/fs.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 // SYSCOIN: overflow boundary coverage for deferred NEVM disconnects.
@@ -53,6 +54,211 @@ MapPoDAPayloadMeta MakePoDAMeta(const uint256& txid, uint32_t size, int64_t medi
     meta.vchNEVMData = std::make_shared<const std::vector<uint8_t>>(size, uint8_t{0});
     return meta;
 }
+
+// Independent known-answer fixtures generated with syscoin/go-ethereum
+// 2ce420e7892f7400296ad209dbe8efe3536e3f79: types.NewTx (legacy, EIP-2930,
+// EIP-1559), types.DeriveSha(..., trie.NewStackTrie(nil)), types.CalcUncleHash,
+// and rlp.EncodeToBytes(types.NewBlockWithHeader(header).WithBody(body)).
+// Transactions cycle through the three fixed samples; receipts use matching
+// types, status=1, cumulative gas=(index+1)*21000, and empty logs/bloom.
+// Expected hashes are fixed Geth outputs, not a second C++ trie implementation.
+const std::array<const char*, 3> GETH_INTEGRITY_TRANSACTIONS{{
+    "df070b82520894000000000000000000000000000000000000123413421b0102",
+    "a501e3821644080c8259d89400000000000000000000000000000000000012341443c0010203",
+    "a602e482164409020e825dc09400000000000000000000000000000000000012341544c0010304",
+}};
+const char* const GETH_INTEGRITY_EMPTY_HEADER =
+    "f901f7a00000000000000000000000000000000000000000000000000000000000000011a01dcc4de8dec75d7aab85b5"
+    "67b6ccd41ad312451b948a7413f0a142fd40d49347940000000000000000000000000000000000000022a00000000000"
+    "000000000000000000000000000000000000000000000000000033a056e81f171bcc55a6ff8345e692c0f86e5b48e01b"
+    "996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b90100"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "00000000000000000000000000000000012a8401c9c38080846553f10082a1b2a0000000000000000000000000000000"
+    "0000000000000000000000000000000044880000000000000000";
+const char* const GETH_INTEGRITY_WITHDRAWALS =
+    "f864d8808094000000000000000000000000000000000000000080d80101940000000000000000000000000000000000"
+    "00000080d8020294000000000000000000000000000000000000000080d8030394000000000000000000000000000000"
+    "000000000080";
+
+struct GethIntegrityVector {
+    const char* name;
+    unsigned count;
+    unsigned mode;
+    const char* hash;
+    const char* tx_root;
+    const char* receipt_root;
+    const char* payload_hash;
+};
+const GethIntegrityVector GETH_INTEGRITY_VECTORS[]{
+    {"empty", 0, 0,
+        "9ad95c0544d8ee05d22dcfc00492ece945e1f6d9626fa14ba2042bddccd3c707",
+        "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "c561c93625128e43251ac0f3a5ef63c846f94c2793e97a5b4e6dc23019e46681"},
+    {"legacy", 1, 0,
+        "6e10ea3ca8f516a45dde6e81482fb5c89d700966b7fd1630c96b23a888da8c25",
+        "7194fe6103c5b692ff8c2a4b7c6c8d63d4435005163c4904c556572d564ea019",
+        "056b23fbba480696b65fe5a59b8f2148a1299103c4f57df839233af2cf4ca2d2",
+        "198331e1737283643c62007cb290dcaff261ce75e4086705b2fdd0cd8ff15574"},
+    {"access_list", 1, 1,
+        "8e8e37c9b4c812ddf39d63e7c7f7f8dbfc6b65a3bd782c506751765dbdb0e702",
+        "19eb071c8a7905d149722223f505d9c70848d0b0901bf9210cb46de7068ea17d",
+        "d3a6acf9a244d78b33831df95d472c4128ea85bf079a1d41e32ed0b7d2244c9e",
+        "437299669136a1ffdc32d73b19f86ad39cd06fc8bb291045a8eb73926671ca14"},
+    {"dynamic_fee", 1, 2,
+        "c30ba882de3fe92eedb1b4b87afc04bd24ec2d48c9041c5cbb8e4caa7e98eb98",
+        "c38475c3d10ceb94f1db4207b419a179aa75ec85f4f86fbcf0e40ee9801a5b77",
+        "f78dfb743fbd92ade140711c8bbc542b5e307f0ab7984eff35d751969fe57efa",
+        "81b8fafa97c5243cdbfb36684d22c8e946fef97454bd6251db827bc3466e57c3"},
+    {"mixed", 3, 3,
+        "14ee3df77ec5eeb8e38a5906f7ba580bb6b05bf068012c2b21444b301d7c4916",
+        "02e0f16a80c772e4f59d025f9f6d1da3a230882fb3fdad4ad1050b44e7f95ffc",
+        "75e70ade70d5adf91c651c207f7a6b91cbf69f7b90c37ffbab12479c27e6ad7e",
+        "01f926f3dae07a0c166054ac385bc039652a268e684da153ae2dccade6a90cfe"},
+    {"mixed127", 127, 3,
+        "530dbaa884143c2b61c09b8590a4fe1399d66735dd51f0770d69de724a45516f",
+        "3c27ea7e24d2e75e3f938028357d6bcd816eb4e8c1caf8f5351091d6181fcb7e",
+        "c32824464906c244d0816d3cad1b7cdcda1fe8e61619920e31eb94c5561de9f1",
+        "54d776925be5e4cf4dfa35491f31d806624a118e1c01844543fcff24f0d5cbea"},
+    {"mixed128", 128, 3,
+        "ae0c2b569113f6bb15fb9da85dfe87c955403ce0f77bfc284019683763621e49",
+        "1cdbda4e0193ced95247e8c4a291545432709719b36476eadcbe590d76000f02",
+        "282f27b326e02cc670b4306e83c707951e26fbf323b96b97c5d59b9779e2111a",
+        "2feca3bceea7a40579ef1cd20200ba6402d28032df9f78a9e60522e2013baddf"},
+    {"mixed129", 129, 3,
+        "fc628f902762a35b954428f98e15b24686ffedbc2291c025a397be84d66a5844",
+        "69053443267ee4917a101ffd221b3cb133351370d9beafc8fe311999547dd0d2",
+        "372e1ebfca87139452fad483e11a2541b6dfb6449944394d791730a03f2711c9",
+        "7308c7929abb76d64a218a5c0c8ec4641aa5f872be9595f396000077719ccbe5"},
+    {"mixed255", 255, 3,
+        "3a0695ca0f5b02f8750ac9d7997fa2049c23137af6cd1d224d7afaa4733b1c2e",
+        "55d3ce9cad6bcdd85b0b152ee745a797552e529e4583666441cc7fd116047c29",
+        "7104c19f285864fac5cd7e469d04bab1d4c5cf0d220f287b4c339915cc00f7aa",
+        "9f756b4ee98f79579c29d5da6020cc732c07b2beb1bc212a39b3f36b0d29c46e"},
+    {"mixed256", 256, 3,
+        "96888a3b303fa3c4d0492009db1c975a3482c9bfbbf816a53719617f345e1a17",
+        "463f557d04e1082aae98cfe27949d33608b080481c493a41b36e45ca3f8d1680",
+        "9aded182deb7d43151a1722a83f05187735b46b288b2f3b37f25fb77da619375",
+        "5743a11673f686048d9d30f38cc58206edc30851691661f3eaa6858ae0c0b2bb"},
+    {"mixed257", 257, 3,
+        "23adffad6eb4cde9794c749436c74dac9abfe02f420e158ce88a0beb1a4ff95d",
+        "300c50b13adb7378f4fd5882430b4d27971d4e99183a03e0feafbca53fc984f1",
+        "89b1c07c677f264194c031c4bfbcba85a869ef265def5c156601c1528df67132",
+        "e9b4845dcb8c2a6afa93c659d4dcc242a9219daaccb7a81ec0e2cfeea55ac568"},
+    {"withdrawals", 0, 4,
+        "f33ef7b22c1839146b513847e3d936a75469c2077219f34c1b45645953a84ccc",
+        "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "c15981703eb17f7cf70207d30ebb2c3b14a2ab597abf22a13985ff6635d7dc84"},
+    {"uncles", 1, 5,
+        "3c293b0e8e6b5adaeafb07c7994642fd6c5190c7b9057ca1d8155d0b18c396df",
+        "7194fe6103c5b692ff8c2a4b7c6c8d63d4435005163c4904c556572d564ea019",
+        "056b23fbba480696b65fe5a59b8f2148a1299103c4f57df839233af2cf4ca2d2",
+        "00337c2aeb7814bde4db0b4c8b92c5d48cfba633435c26a32bc81a7e5128b793"},
+    {"absent_withdrawals_placeholder", 1, 6,
+        "56096eefb570079515a101357ac6e4dc1ee1fcc554dc5f4565809b3062adc303",
+        "7194fe6103c5b692ff8c2a4b7c6c8d63d4435005163c4904c556572d564ea019",
+        "056b23fbba480696b65fe5a59b8f2148a1299103c4f57df839233af2cf4ca2d2",
+        "66672bbe9cfe45196e6588a72da1e63fc5b9a722c9ef184273bf0a74c0e4bc74"},
+    {"complete_optional_header", 1, 7,
+        "020bd14d5cc98a12bf5f6596ac67b080be10ce4a08eb28fccd4dc1ec088f2ead",
+        "7194fe6103c5b692ff8c2a4b7c6c8d63d4435005163c4904c556572d564ea019",
+        "056b23fbba480696b65fe5a59b8f2148a1299103c4f57df839233af2cf4ca2d2",
+        "8e5b3f0891fef58796efb4b5ac720d3869ae7b4a1270ed45e3bcac09ef14f1a8"},
+};
+
+std::vector<dev::bytes> NEVMIntegrityItems(const dev::bytes& encoded)
+{
+    const dev::RLP list{encoded};
+    std::vector<dev::bytes> result;
+    for (size_t i{0}; i < list.itemCount(); ++i) result.push_back(list[i].data().toBytes());
+    return result;
+}
+
+dev::bytes NEVMIntegrityList(const std::vector<dev::bytes>& items)
+{
+    dev::RLPStream stream{items.size()};
+    for (const auto& item : items) stream.appendRaw(item);
+    return stream.out();
+}
+
+dev::bytes NEVMIntegrityString(const dev::bytes& bytes)
+{
+    dev::RLPStream stream;
+    stream.append(bytes);
+    return stream.out();
+}
+
+uint256 NEVMIntegrityHash(const char* hex)
+{
+    const auto bytes{ParseHex(hex)};
+    uint256 result;
+    std::copy(bytes.begin(), bytes.end(), result.begin());
+    return result;
+}
+
+CNEVMHeader NEVMIntegrityCommitment(const GethIntegrityVector& vector)
+{
+    CNEVMHeader header;
+    header.nBlockHash = NEVMIntegrityHash(vector.hash);
+    header.nTxRoot = NEVMIntegrityHash(vector.tx_root);
+    header.nReceiptRoot = NEVMIntegrityHash(vector.receipt_root);
+    return header;
+}
+
+dev::bytes NEVMIntegrityPayload(const GethIntegrityVector& vector)
+{
+    auto header{NEVMIntegrityItems(ParseHex(GETH_INTEGRITY_EMPTY_HEADER))};
+    header[4] = NEVMIntegrityString(ParseHex(vector.tx_root));
+    header[5] = NEVMIntegrityString(ParseHex(vector.receipt_root));
+    dev::RLPStream gas;
+    gas.append(vector.count * 21000);
+    header[10] = gas.out();
+    if (vector.mode >= 1) header.push_back({7});
+    std::vector<dev::bytes> txs;
+    for (unsigned i{0}; i < vector.count; ++i) {
+        const unsigned type{vector.mode == 3 ? i % 3 : vector.mode <= 2 ? vector.mode : 0};
+        txs.push_back(ParseHex(GETH_INTEGRITY_TRANSACTIONS[type]));
+    }
+    dev::bytes uncles{0xc0};
+    if (vector.mode == 4) {
+        header.push_back(NEVMIntegrityString(ParseHex("5e9c3572c4766d45b3c31df94da8779190a6736f7841700a3526a3cb52b4bf88")));
+    } else if (vector.mode == 5) {
+        auto uncle{NEVMIntegrityItems(ParseHex(GETH_INTEGRITY_EMPTY_HEADER))};
+        uncle[8] = {41};
+        uncle[12] = {0x81, 0x99};
+        uncles = NEVMIntegrityList({NEVMIntegrityList(uncle)});
+        header[1] = NEVMIntegrityString(ParseHex("b9b81d0122ce7c4019b97a5d13e20cfe4977cae2fae9d4d14dd6b9a337430b85"));
+    } else if (vector.mode == 6) {
+        // Geth can encode this nil optional placeholder, but cannot decode it as
+        // common.Hash. Preflight must not authorize replay of that encoding.
+        header.insert(header.end(), {{0x80}, {0x80}, {0x80}});
+        header.push_back(NEVMIntegrityString(ParseHex(std::string(62, '0') + "66")));
+    } else if (vector.mode == 7) {
+        // Include every current optional field with an empty withdrawals body:
+        // withdrawals root, blob gas, excess blob gas, beacon root, requests hash.
+        header.push_back(NEVMIntegrityString(ParseHex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")));
+        header.insert(header.end(), {{7}, {8}});
+        header.push_back(NEVMIntegrityString(ParseHex(std::string(62, '0') + "66")));
+        header.push_back(NEVMIntegrityString(ParseHex(std::string(62, '0') + "77")));
+    }
+    std::vector<dev::bytes> block{NEVMIntegrityList(header), NEVMIntegrityList(txs), uncles};
+    if (vector.mode == 4) block.push_back(ParseHex(GETH_INTEGRITY_WITHDRAWALS));
+    if (vector.mode == 7) block.push_back({0xc0});
+    return NEVMIntegrityList(block);
+}
+
+void NEVMIntegrityRebindHeader(const dev::bytes& payload, CNEVMHeader& header)
+{
+    const auto block{NEVMIntegrityItems(payload)};
+    const auto hash{dev::sha3(block[0])};
+    std::copy(hash.begin(), hash.end(), header.nBlockHash.begin());
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(nevm_tests, BasicTestingSetup)
@@ -127,6 +333,150 @@ BOOST_AUTO_TEST_CASE(nevm_payload_rejection_is_distinct_and_binds_exact_bytes)
         nevm_hash, tx_root, receipt_root, syscoin_hash, different));
     BOOST_CHECK(fingerprint != NEVMPayloadFingerprint(
         nevm_hash, receipt_root, tx_root, syscoin_hash, bytes));
+}
+
+
+BOOST_AUTO_TEST_CASE(nevm_payload_integrity_matches_geth_trie_vectors)
+{
+    // Index RLP changes at 0/1, 127/128 and 255/256. Four small withdrawal
+    // records additionally exercise inline (<32-byte) trie child references.
+    for (const auto& vector : GETH_INTEGRITY_VECTORS) {
+        BOOST_TEST_CONTEXT(vector.name) {
+            const auto payload{NEVMIntegrityPayload(vector)};
+            const auto hash{dev::sha3(payload)};
+            BOOST_CHECK_EQUAL(HexStr(hash.asBytes()), vector.payload_hash);
+            auto header{NEVMIntegrityCommitment(vector)};
+            std::string error;
+            if (vector.mode == 6) {
+                BOOST_CHECK(!CheckNEVMBlockPayloadIntegrity(payload, header, error));
+                BOOST_CHECK(!error.empty());
+            } else {
+                BOOST_CHECK_MESSAGE(CheckNEVMBlockPayloadIntegrity(payload, header, error), error);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(nevm_payload_integrity_rejects_changed_body_and_commitments)
+{
+    const auto& vector{GETH_INTEGRITY_VECTORS[4]};
+    const auto original{NEVMIntegrityPayload(vector)};
+    const auto reject{[&](const dev::bytes& payload) {
+        auto header{NEVMIntegrityCommitment(vector)};
+        std::string error;
+        BOOST_CHECK(!CheckNEVMBlockPayloadIntegrity(payload, header, error));
+        BOOST_CHECK(!error.empty());
+    }};
+    // A transaction's RLP remains valid while its committed content changes.
+    auto block{NEVMIntegrityItems(original)};
+    auto txs{NEVMIntegrityItems(block[1])};
+    txs[0].back() ^= 1;
+    block[1] = NEVMIntegrityList(txs);
+    reject(NEVMIntegrityList(block));
+    block = NEVMIntegrityItems(original);
+    txs = NEVMIntegrityItems(block[1]);
+    std::swap(txs[0], txs[1]);
+    block[1] = NEVMIntegrityList(txs);
+    reject(NEVMIntegrityList(block));
+
+    for (unsigned field{0}; field < 3; ++field) {
+        auto header{NEVMIntegrityCommitment(vector)};
+        const std::array<uint256*, 3> hashes{&header.nBlockHash, &header.nTxRoot, &header.nReceiptRoot};
+        hashes[field]->begin()[0] ^= 1;
+        std::string error;
+        BOOST_CHECK(!CheckNEVMBlockPayloadIntegrity(original, header, error));
+    }
+    // Match Core's changed header hash/root while retaining the old body: the
+    // transaction commitment must still be independently recomputed.
+    block = NEVMIntegrityItems(original);
+    auto header_items{NEVMIntegrityItems(block[0])};
+    auto header{NEVMIntegrityCommitment(vector)};
+    header.nTxRoot.begin()[0] ^= 1;
+    header_items[4] = NEVMIntegrityString(dev::bytes{header.nTxRoot.begin(), header.nTxRoot.end()});
+    block[0] = NEVMIntegrityList(header_items);
+    const auto changed{NEVMIntegrityList(block)};
+    NEVMIntegrityRebindHeader(changed, header);
+    std::string error;
+    BOOST_CHECK(!CheckNEVMBlockPayloadIntegrity(changed, header, error));
+
+    for (const unsigned index : {11U, 12U}) {
+        const auto& body_vector{GETH_INTEGRITY_VECTORS[index]};
+        auto body{NEVMIntegrityPayload(body_vector)};
+        // Last byte belongs to a withdrawal amount or uncle nonce.
+        body.back() ^= 1;
+        auto body_header{NEVMIntegrityCommitment(body_vector)};
+        BOOST_CHECK(!CheckNEVMBlockPayloadIntegrity(body, body_header, error));
+    }
+    // A committed withdrawals root requires the corresponding body list.
+    auto withdrawals{NEVMIntegrityItems(NEVMIntegrityPayload(GETH_INTEGRITY_VECTORS[11]))};
+    withdrawals.pop_back();
+    auto withdrawal_header{NEVMIntegrityCommitment(GETH_INTEGRITY_VECTORS[11])};
+    BOOST_CHECK(!CheckNEVMBlockPayloadIntegrity(NEVMIntegrityList(withdrawals), withdrawal_header, error));
+}
+
+BOOST_AUTO_TEST_CASE(nevm_payload_integrity_rejects_noncanonical_and_incomplete_rlp)
+{
+    const auto& vector{GETH_INTEGRITY_VECTORS[4]};
+    const auto original{NEVMIntegrityPayload(vector)};
+    const auto reject{[&](const dev::bytes& payload, bool rebind = false) {
+        auto header{NEVMIntegrityCommitment(vector)};
+        if (rebind) NEVMIntegrityRebindHeader(payload, header);
+        std::string error;
+        BOOST_CHECK(!CheckNEVMBlockPayloadIntegrity(payload, header, error));
+        BOOST_CHECK(!error.empty());
+    }};
+    reject({});
+    reject({0xc0});
+    reject({0x80});
+    reject({0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff});
+    auto malformed{original};
+    malformed.push_back(0x80);
+    reject(malformed);
+    for (const size_t size : {size_t{1}, size_t{3}, original.size() / 2, original.size() - 1}) {
+        reject(dev::bytes{original.begin(), original.begin() + size});
+    }
+    // Non-minimal outer length and transaction-list length encode unchanged
+    // body bytes, so rejection cannot be attributed to a changed trie root.
+    malformed = original;
+    ++malformed[0];
+    malformed.insert(malformed.begin() + 1, 0);
+    reject(malformed);
+    auto block{NEVMIntegrityItems(original)};
+    ++block[1][0];
+    block[1].insert(block[1].begin() + 1, 0);
+    reject(NEVMIntegrityList(block));
+
+    // A typed transaction's RLP string wrapper must use minimal length form.
+    block = NEVMIntegrityItems(original);
+    auto txs{NEVMIntegrityItems(block[1])};
+    const auto typed_size{static_cast<uint8_t>(txs[1][0] - 0x80)};
+    txs[1][0] = 0xb8;
+    txs[1].insert(txs[1].begin() + 1, typed_size);
+    block[1] = NEVMIntegrityList(txs);
+    reject(NEVMIntegrityList(block));
+
+    block = NEVMIntegrityItems(original);
+    block.push_back({0xc0}); // withdrawals without a header commitment
+    reject(NEVMIntegrityList(block));
+    block.push_back({0xc0}); // excess top-level field
+    reject(NEVMIntegrityList(block));
+    block = NEVMIntegrityItems(original);
+    block[1] = {0x80}; // transaction body must be a list
+    reject(NEVMIntegrityList(block));
+    block = NEVMIntegrityItems(original);
+    block[2] = {0x80}; // uncle body must be a list
+    reject(NEVMIntegrityList(block));
+
+    // Even a matching Core header hash does not authorize a noncanonical
+    // scalar encoding or incomplete Ethereum header.
+    for (unsigned mutation{0}; mutation < 2; ++mutation) {
+        block = NEVMIntegrityItems(original);
+        auto fields{NEVMIntegrityItems(block[0])};
+        if (mutation == 0) fields[7] = {0x81, 1}; // noncanonical single byte
+        if (mutation == 1) fields.resize(14); // missing nonce
+        block[0] = NEVMIntegrityList(fields);
+        reject(NEVMIntegrityList(block), true);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(preseal_disconnect_tracks_only_geth_applied_prefix)

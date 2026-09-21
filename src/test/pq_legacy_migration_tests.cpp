@@ -13,6 +13,8 @@
 #include <evo/deterministicmns.h>
 #include <flatfile.h>
 #include <hash.h>
+#include <nevm/rlp.h>
+#include <nevm/sha3.h>
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
 #include <node/pq_legacy_upgrade.h>
@@ -26,6 +28,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -76,7 +79,70 @@ struct LegacyMigrationSetup : ChainTestingSetup {
         return m_node.chainman->m_blockman.GetBlockPosFilename({0, 0});
     }
 
-    void MakeLegacy(int32_t height = 5, bool with_witness = false)
+    void AttachNEVMPayload(CBlock& block, CMutableTransaction& coinbase, int32_t height)
+    {
+        block.SetNEVMVersion();
+        CNEVMHeader parent;
+        if (blocks.back().IsNEVM()) {
+            BlockValidationState state;
+            BOOST_REQUIRE(GetNEVMData(state, blocks.back(), parent));
+        }
+        const uint64_t number{static_cast<uint64_t>(height - consensus.nNEVMStartBlock + 1)};
+        // An ordinary nine-field legacy transaction. This fixture checks body
+        // integrity, not execution or the transaction's signing authority.
+        dev::RLPStream transaction(9);
+        transaction.append(0U);
+        transaction.append(1U);
+        transaction.append(50000U);
+        transaction.append(dev::bytes(20, 1));
+        transaction.append(0U);
+        transaction.append(dev::bytes{0x11});
+        transaction.append(27U);
+        transaction.append(1U);
+        transaction.append(1U);
+        // Index zero is RLP 0x80. Its single-leaf hex-prefix path is 0x2080;
+        // constructing that leaf directly avoids duplicating a trie builder.
+        dev::RLPStream leaf(2);
+        leaf.append(dev::bytes{0x20, 0x80});
+        leaf.append(dev::bytes{transaction.out()});
+        const auto tx_root{dev::sha3(leaf.out()).asBytes()};
+        const auto empty_root{dev::sha3(dev::bytes{0x80}).asBytes()};
+        dev::RLPStream header(15);
+        header.append(dev::bytes(parent.nBlockHash.begin(), parent.nBlockHash.end()));
+        header.append(dev::EmptyListSHA3.asBytes());
+        header.append(dev::bytes(20, 0));
+        header.append(empty_root);
+        header.append(tx_root);
+        header.append(empty_root);
+        header.append(dev::bytes(256, 0));
+        header.append(1U);
+        header.append(number);
+        header.append(30000000U);
+        header.append(25000U);
+        header.append(number);
+        header.append(dev::bytes{});
+        header.append(dev::bytes(32, 0));
+        header.append(dev::bytes(8, 0));
+        CNEVMHeader commitment;
+        const auto digest{dev::sha3(header.out()).asBytes()};
+        std::copy(digest.begin(), digest.end(), commitment.nBlockHash.begin());
+        std::copy(tx_root.begin(), tx_root.end(), commitment.nTxRoot.begin());
+        std::copy(empty_root.begin(), empty_root.end(), commitment.nReceiptRoot.begin());
+        CDataStream serialized{SER_NETWORK, PROTOCOL_VERSION};
+        serialized << commitment;
+        std::vector<unsigned char> payload(std::begin(NEVM_MAGIC_BYTES), std::end(NEVM_MAGIC_BYTES));
+        const auto commitment_bytes{MakeUCharSpan(serialized)};
+        payload.insert(payload.end(), commitment_bytes.begin(), commitment_bytes.end());
+        coinbase.vout.emplace_back(0, CScript{} << OP_RETURN << payload);
+        dev::RLPStream body(3);
+        body.appendRaw(header.out());
+        body.appendList(1);
+        body.appendRaw(transaction.out());
+        body.appendList(0);
+        block.vchNEVMBlockData = dev::bytes{body.out()};
+    }
+
+    void MakeLegacy(int32_t height = 5, bool with_witness = false, bool with_nevm = false)
     {
         LOCK(cs_main);
         if (with_witness) consensus.SegwitHeight = 1;
@@ -104,6 +170,9 @@ struct LegacyMigrationSetup : ChainTestingSetup {
                 std::vector<unsigned char> commitment_bytes{0xaa, 0x21, 0xa9, 0xed};
                 commitment_bytes.insert(commitment_bytes.end(), commitment.begin(), commitment.end());
                 coinbase.vout.emplace_back(0, CScript{} << OP_RETURN << commitment_bytes);
+            }
+            if (with_nevm && h >= consensus.nNEVMStartBlock) {
+                AttachNEVMPayload(block, coinbase, h);
             }
             block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
             block.hashMerkleRoot = BlockMerkleRoot(block);
@@ -205,6 +274,29 @@ struct LegacyMigrationSetup : ChainTestingSetup {
         BOOST_REQUIRE(file.good());
     }
 
+    void ReplaceNEVMPayloadOnly(std::size_t height, CBlock& corrupt)
+    {
+        const auto& original{blocks[height]};
+        BOOST_REQUIRE(original.IsNEVM());
+        BOOST_CHECK(corrupt.GetHash() == hashes[height]);
+        BOOST_CHECK(corrupt.vtx == original.vtx);
+        BOOST_CHECK(BlockMerkleRoot(corrupt) == original.hashMerkleRoot);
+        BOOST_CHECK(BlockWitnessMerkleRoot(corrupt) == BlockWitnessMerkleRoot(original));
+        BOOST_CHECK(corrupt.vchNEVMBlockData != original.vchNEVMBlockData);
+        BOOST_REQUIRE_EQUAL(corrupt.vchNEVMBlockData.size(), original.vchNEVMBlockData.size());
+        // Do not accidentally exercise CheckBlock's cached success shortcut.
+        corrupt.fChecked = false;
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(CheckBlock(corrupt, state, consensus), state.ToString());
+        CNEVMHeader expected, supplied;
+        BOOST_REQUIRE(GetNEVMData(state, original, expected));
+        BOOST_REQUIRE(GetNEVMData(state, corrupt, supplied));
+        BOOST_CHECK(expected.nBlockHash == supplied.nBlockHash);
+        BOOST_CHECK(expected.nTxRoot == supplied.nTxRoot);
+        BOOST_CHECK(expected.nReceiptRoot == supplied.nReceiptRoot);
+        ReplaceBody(height, corrupt);
+    }
+
     void ReplaceRecordSize(std::size_t height, uint32_t size)
     {
         CDataStream bytes{SER_DISK, CLIENT_VERSION};
@@ -265,6 +357,60 @@ BOOST_AUTO_TEST_CASE(witness_only_corruption_fails_before_capture)
     BOOST_CHECK(BlockMerkleRoot(corrupt) == corrupt.hashMerkleRoot);
     BOOST_CHECK(corrupt.vtx.front()->GetWitnessHash() != blocks[2].vtx.front()->GetWitnessHash());
     ReplaceBody(2, corrupt);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(intact_nevm_payload_history_can_be_captured)
+{
+    MakeLegacy(/*height=*/5, /*with_witness=*/false, /*with_nevm=*/true);
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+    node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+    BOOST_REQUIRE(journal.ReadUpgrade());
+    BOOST_CHECK(journal.ReadUpgrade()->legacy_tip_hash == hashes.back());
+}
+
+BOOST_AUTO_TEST_CASE(malformed_nevm_rlp_fails_before_capture)
+{
+    MakeLegacy(/*height=*/5, /*with_witness=*/false, /*with_nevm=*/true);
+    CBlock corrupt{blocks[2]};
+    // Claim an impossible eight-byte RLP list length without changing the
+    // Core record extent, transaction commitments or proof of work.
+    corrupt.vchNEVMBlockData.front() = 0xff;
+    BOOST_CHECK_THROW(dev::RLP{corrupt.vchNEVMBlockData}, std::exception);
+    ReplaceNEVMPayloadOnly(2, corrupt);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(nevm_header_hash_corruption_fails_before_capture)
+{
+    MakeLegacy(/*height=*/5, /*with_witness=*/false, /*with_nevm=*/true);
+    CBlock corrupt{blocks[2]};
+    const dev::RLP encoded{corrupt.vchNEVMBlockData};
+    const auto offset{encoded[0][0].toBytesConstRef().data() - corrupt.vchNEVMBlockData.data()};
+    corrupt.vchNEVMBlockData[offset] ^= 1;
+    // It remains parseable Ethereum RLP; only its binding to the coinbase's
+    // committed NEVM header hash is broken.
+    BOOST_CHECK_EQUAL(dev::RLP{corrupt.vchNEVMBlockData}[0].itemCount(), 15U);
+    ReplaceNEVMPayloadOnly(2, corrupt);
+    CheckRejectedWithoutReset();
+}
+
+BOOST_AUTO_TEST_CASE(nevm_transaction_body_corruption_fails_before_capture)
+{
+    MakeLegacy(/*height=*/5, /*with_witness=*/false, /*with_nevm=*/true);
+    CBlock corrupt{blocks[2]};
+    const dev::RLP encoded{corrupt.vchNEVMBlockData};
+    const auto offset{encoded[1][0][5].toBytesConstRef().data() - corrupt.vchNEVMBlockData.data()};
+    corrupt.vchNEVMBlockData[offset] ^= 1;
+    // The authenticated Ethereum header itself is unchanged. Detecting this
+    // corruption therefore requires checking the transaction trie root.
+    BOOST_CHECK(dev::RLP{corrupt.vchNEVMBlockData}[0].data().toBytes() ==
+                dev::RLP{blocks[2].vchNEVMBlockData}[0].data().toBytes());
+    ReplaceNEVMPayloadOnly(2, corrupt);
     CheckRejectedWithoutReset();
 }
 
@@ -405,6 +551,43 @@ BOOST_AUTO_TEST_CASE(interrupted_capture_rechecks_bodies_but_replay_ready_preser
     BOOST_CHECK(!fReindexGeth);
     node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
     captured.phase = node::PQLegacyUpgradePhase::REPLAY_READY;
+    BOOST_CHECK(*journal.ReadUpgrade() == captured);
+}
+
+BOOST_AUTO_TEST_CASE(interrupted_capture_rechecks_nevm_payload_before_reset)
+{
+    MakeLegacy(/*height=*/5, /*with_witness=*/false, /*with_nevm=*/true);
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    node::PQLegacyUpgradeRecord captured;
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.ReadUpgrade());
+        captured = *journal.ReadUpgrade();
+        BOOST_CHECK(captured.phase == node::PQLegacyUpgradePhase::REBUILD_REQUIRED);
+    }
+    CBlock corrupt{blocks[2]};
+    const dev::RLP encoded{corrupt.vchNEVMBlockData};
+    const auto offset{encoded[1][0][5].toBytesConstRef().data() - corrupt.vchNEVMBlockData.data()};
+    corrupt.vchNEVMBlockData[offset] ^= 1;
+    ReplaceNEVMPayloadOnly(2, corrupt);
+    options = {};
+    fReindexGeth = false;
+    BOOST_CHECK(!Plan(options, error));
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK(!options.reindex);
+    BOOST_CHECK(!options.reindex_chainstate);
+    BOOST_CHECK(!options.fReindexGeth);
+    BOOST_CHECK(!fReindexGeth);
+    {
+        CDBWrapper coins{DB("chainstate")};
+        uint256 best;
+        BOOST_REQUIRE(coins.Read(uint8_t{'B'}, best));
+        BOOST_CHECK(best == hashes.back());
+    }
+    node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+    BOOST_REQUIRE(journal.ReadUpgrade());
     BOOST_CHECK(*journal.ReadUpgrade() == captured);
 }
 

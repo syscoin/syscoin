@@ -2469,12 +2469,17 @@ hash. A datadir already replayed by the BLS-free binary cannot supply it.
 
 Before authorizing the automatic reset, preflight reads each complete framed
 block record and checks its indexed identity, proof of work, transaction Merkle
-root and witness commitment. Truncated or malformed records therefore fail
-before coins are erased. Interrupted preparation repeats this check while the
-original coins endpoint remains; ordinary `REPLAY_READY` restarts do not scan
-history again. These are disk-integrity checks, not a second execution of Core
-scripts or Geth, and cannot guarantee subsequent execution succeeds or protect
-against disk damage occurring after inspection.
+root and witness commitment. For NEVM blocks it also binds the complete encoded
+Ethereum header to the coinbase commitment, checks its transaction and receipt
+roots, and recomputes the transaction trie, uncle-list hash and optional
+withdrawals trie from the retained payload. These checks use the bytes already
+read; they do not start Geth or add another disk pass. Truncated, malformed or
+commitment-mismatched records therefore fail before coins are erased.
+Interrupted preparation repeats this check while the original coins endpoint
+remains; ordinary `REPLAY_READY` restarts do not scan history again. These are
+disk-integrity checks under the captured legacy validation provenance, not a
+second execution of Core scripts or Geth. They cannot guarantee subsequent
+execution succeeds or protect against disk damage occurring after inspection.
 
 - Stop the old node cleanly at `A-1`, then start the activation release with
   its complete deployment profile. The first launch automatically rebuilds
