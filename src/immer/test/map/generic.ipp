@@ -18,7 +18,7 @@
 #include "test/dada.hpp"
 #include "test/util.hpp"
 
-#include <catch2/catch.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <random>
 #include <unordered_map>
@@ -265,6 +265,7 @@ TEST_CASE("accumulate")
 
 TEST_CASE("update a lot")
 {
+    IMMER_GC_TEST_GUARD;
     auto v = make_test_map(666u);
 
     SECTION("immutable")
@@ -293,6 +294,7 @@ TEST_CASE("update a lot")
 
 TEST_CASE("update_if_exists a lot")
 {
+    IMMER_GC_TEST_GUARD;
     auto v = make_test_map(666u);
 
     SECTION("immutable")
@@ -312,9 +314,9 @@ TEST_CASE("update_if_exists a lot")
     }
 }
 
-#if !IMMER_IS_LIBGC_TEST
 TEST_CASE("update boxed move string")
 {
+    IMMER_GC_TEST_GUARD;
     constexpr auto N = 666u;
     constexpr auto S = 7;
     auto s = MAP_T<std::string, immer::box<std::string, memory_policy_t>>{};
@@ -375,11 +377,10 @@ TEST_CASE("update boxed move string")
         }
     }
 }
-#endif
 
-#if !IMMER_IS_LIBGC_TEST
 TEST_CASE("update_if_exists boxed move string")
 {
+    IMMER_GC_TEST_GUARD;
     constexpr auto N = 666u;
     constexpr auto S = 7;
     auto s = MAP_T<std::string, immer::box<std::string, memory_policy_t>>{};
@@ -417,7 +418,6 @@ TEST_CASE("update_if_exists boxed move string")
         }
     }
 }
-#endif
 
 TEST_CASE("exception safety")
 {
@@ -439,7 +439,8 @@ TEST_CASE("exception safety")
                 auto s = d.next();
                 v      = v.update(i, [](auto x) { return x + 1; });
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(i) == i + 1);
             for (auto i : test_irange(i, n))
@@ -460,7 +461,8 @@ TEST_CASE("exception safety")
                 auto s = d.next();
                 v      = v.update_if_exists(i, [](auto x) { return x + 1; });
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(i) == i + 1);
             for (auto i : test_irange(i, n))
@@ -482,7 +484,8 @@ TEST_CASE("exception safety")
                 auto s = d.next();
                 v      = v.update(vals[i].first, [](auto x) { return x + 1; });
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(vals[i].first) == vals[i].second + 1);
             for (auto i : test_irange(i, n))
@@ -505,7 +508,8 @@ TEST_CASE("exception safety")
                 v      = v.update_if_exists(vals[i].first,
                                        [](auto x) { return x + 1; });
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(vals[i].first) == vals[i].second + 1);
             for (auto i : test_irange(i, n))
@@ -528,7 +532,8 @@ TEST_CASE("exception safety")
                 auto x = vals[i].second;
                 v      = v.set(vals[i].first, x + 1);
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(vals[i].first) == vals[i].second + 1);
             for (auto i : test_irange(i, n))
@@ -551,7 +556,8 @@ TEST_CASE("exception safety")
                 auto x = vals[i].second;
                 v      = std::move(v).set(vals[i].first, x + 1);
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(vals[i].first) == vals[i].second + 1);
             for (auto i : test_irange(i, n))
@@ -574,7 +580,8 @@ TEST_CASE("exception safety")
                 v      = std::move(v).update(vals[i].first,
                                         [](auto x) { return x + 1; });
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(vals[i].first) == vals[i].second + 1);
             for (auto i : test_irange(i, n))
@@ -597,7 +604,8 @@ TEST_CASE("exception safety")
                 v      = std::move(v).update_if_exists(vals[i].first,
                                                   [](auto x) { return x + 1; });
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.at(vals[i].first) == vals[i].second + 1);
             for (auto i : test_irange(i, n))
@@ -619,7 +627,8 @@ TEST_CASE("exception safety")
                 // auto s = d.next();
                 v = std::move(v).erase(vals[i].first);
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             for (auto i : test_irange(0u, i))
                 CHECK(v.count(vals[i].first) == 0);
             for (auto i : test_irange(i, n))
@@ -635,7 +644,8 @@ struct KeyType
 {
     explicit KeyType(unsigned v)
         : value(v)
-    {}
+    {
+    }
     unsigned value;
 };
 
@@ -643,7 +653,8 @@ struct LookupType
 {
     explicit LookupType(unsigned v)
         : value(v)
-    {}
+    {
+    }
     unsigned value;
 };
 
@@ -724,6 +735,7 @@ void test_diff(unsigned old_num,
                unsigned remove_num,
                unsigned change_num)
 {
+    IMMER_GC_TEST_GUARD;
     auto values = make_values_with_collisions(old_num + add_num);
     std::vector<std::pair<conflictor, unsigned>> initial_values(
         values.begin(), values.begin() + old_num);
@@ -740,7 +752,9 @@ void test_diff(unsigned old_num,
 
     // remove
     auto shuffle = old_keys;
-    std::random_shuffle(shuffle.begin(), shuffle.end());
+    std::random_device rd{};
+    auto g = std::mt19937{rd()};
+    std::shuffle(shuffle.begin(), shuffle.end(), g);
     std::vector<conflictor> remove_keys(shuffle.begin(),
                                         shuffle.begin() + remove_num);
     std::vector<conflictor> rest_keys(shuffle.begin() + remove_num,

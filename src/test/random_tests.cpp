@@ -11,6 +11,8 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <array> // SYSCOIN: fixed-width PQ entropy buffers.
+#include <cstdint> // SYSCOIN: fixed-width PQ entropy buffers.
 #include <random>
 
 BOOST_FIXTURE_TEST_SUITE(random_tests, BasicTestingSetup)
@@ -18,6 +20,27 @@ BOOST_FIXTURE_TEST_SUITE(random_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(osrandom_tests)
 {
     BOOST_CHECK(Random_SanityCheck());
+}
+
+// SYSCOIN: SLH-DSA key generation needs 48 random bytes even though each
+// underlying strong extraction is intentionally capped at 32 bytes.
+BOOST_AUTO_TEST_CASE(strong_random_chunked_tests)
+{
+    const auto check = [](auto& bytes) {
+        GetStrongRandBytesChunked(bytes);
+        BOOST_CHECK(std::any_of(bytes.begin(), bytes.end(), [](uint8_t byte) {
+            return byte != 0;
+        }));
+    };
+
+    std::array<uint8_t, 0> empty{};
+    GetStrongRandBytesChunked(empty);
+    std::array<uint8_t, 32> exact{};
+    std::array<uint8_t, 33> one_over{};
+    std::array<uint8_t, 48> slh_seed{};
+    check(exact);
+    check(one_over);
+    check(slh_seed);
 }
 
 BOOST_AUTO_TEST_CASE(fastrandom_tests)

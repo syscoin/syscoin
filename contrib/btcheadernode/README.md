@@ -1,13 +1,19 @@
 # BTC header-node helper build
 
-This directory provides an **optional** build path for Bitcoin Core binaries used by sentry
-nodes that perform BTC header-chain policy checks for BTCC signing.
+This directory builds the pinned Bitcoin Core binaries used by the managed
+BTC-header policy backend. Managed mode is the runtime default for miners and
+sentries that participate in BTCC. Official supported Linux and macOS release
+packages bundle the helper. Ordinary developer source builds may opt out.
 
 ## What it does
 
-- Pins upstream Bitcoin source in `bitcoin.lock`.
-- Optionally applies a local patch (for a headers-only fork workflow).
+- Pins both the upstream Bitcoin Git commit and source-archive SHA-256 in
+  `bitcoin.lock`.
+- Applies the audited headers-only patch.
 - Auto-detects Bitcoin build system (Autotools for older releases, CMake for newer releases).
+- Generates an explicit CMake cross-toolchain from the complete outer
+  `HOST`/compiler/sysroot/depends environment instead of reducing `CC` and
+  `CXX` to their first argv element.
 - Builds `bitcoind` and `bitcoin-cli`.
 - Writes outputs to:
   - `<build-root>/src/bin/btcheadernode/bin/bitcoind`
@@ -23,14 +29,29 @@ From the Syscoin root:
 make -j$(nproc)
 ```
 
-If the option is not enabled, this build path is skipped.
+If the option is not enabled, this build path is skipped. A source build that
+omits the helper can still run an ordinary full node. A configured miner or
+sentry must either rebuild with the helper or explicitly select external mode
+with `-btcheadermanaged=0 -btcheadercmd=<path>`; startup otherwise fails.
 
-When enabled for Linux x86_64 release builds, the produced `bitcoind` and
+When enabled for Linux or macOS release builds, the produced `bitcoind` and
 `bitcoin-cli` are installed into the final package `bin/` directory so sentry
-operators can use the shipped binaries directly.
+operators can use the shipped binaries directly. The macOS application bundle
+also contains both executables below
+`Contents/Resources/btcheadernode/bin`, where managed runtime discovery looks
+for them before startup.
 
-Guix release builds pre-stage a pinned Bitcoin source archive and pass it to the
-helper script, so the in-container build does not perform live VCS fetches.
+The exact Bitcoin notice is installed as
+`share/doc/syscoin/btcheadernode/COPYING.bitcoin-core` on Linux and as
+`Contents/Resources/btcheadernode/COPYING.bitcoin-core` in the macOS app. The
+build verifies that it is byte-identical to `COPYING` from the pinned Bitcoin
+commit before compilation, so source or packaging drift fails closed. Refresh
+and verify the notice whenever `bitcoin.lock` changes.
+
+Guix release builds download the pinned HTTPS source archive before entering
+the network-isolated container, verify its SHA-256 even when a same-named cache
+file already exists, and pass that authenticated file to the helper. A digest
+mismatch aborts the release build.
 
 ## Lock file
 
@@ -39,11 +60,15 @@ helper script, so the in-container build does not perform live VCS fetches.
 - `BITCOIN_REPO`: upstream Git URL
 - `BITCOIN_REF`: human-readable tag/branch (optional validation anchor)
 - `BITCOIN_COMMIT`: immutable commit to build
+- `BITCOIN_SOURCE_ARCHIVE_URL`: pinned HTTPS archive location
+- `BITCOIN_SOURCE_ARCHIVE_SHA256`: required archive content digest
 - `BITCOIN_PATCH`: optional path (relative to `contrib/btcheadernode/`) to apply with `git apply`
 - `BITCOIN_PATCH_FORK_REPO`: optional fork repo for patch generation workflow
 - `BITCOIN_PATCH_FORK_REF`: optional fork ref for patch generation workflow
 
-The build script validates that `BITCOIN_REF` resolves to `BITCOIN_COMMIT` when `BITCOIN_REF` is set.
+Clone mode validates that `BITCOIN_REF` resolves to `BITCOIN_COMMIT`. Archive
+mode accepts only content matching `BITCOIN_SOURCE_ARCHIVE_SHA256`; a filename
+or locally recomputed but unpinned digest is never sufficient provenance.
 
 ## Patch workflow
 
@@ -79,6 +104,44 @@ Use `--force-clean` if you want to discard the cached Bitcoin source/build workd
 
 Optional environment variables for direct invocation:
 
-- `BTCHEADERNODE_SOURCE_ARCHIVE`: path to local Bitcoin source archive to use instead of cloning.
-- `BTCHEADERNODE_STATIC_LINK_FLAGS`: linker flags for `bitcoind`/`bitcoin-cli` (defaults to `-static-libstdc++`).
+- `BTCHEADERNODE_SOURCE_ARCHIVE`: local copy of the exact pinned archive. Its
+  SHA-256 is always verified before extraction.
+- `BTCHEADERNODE_STATIC_LINK_FLAGS`: linker flags for `bitcoind`/`bitcoin-cli`
+  (defaults to `-static-libstdc++` on non-macOS hosts and empty on macOS).
 - `LDFLAGS`: optional base linker flags inherited from the outer build (for Guix alignment).
+
+## Security contract tests
+
+The lightweight cross-matrix smoke test verifies that Darwin and Linux target,
+SDK/sysroot, compiler, linker, and depends settings survive toolchain
+generation:
+
+```bash
+contrib/btcheadernode/test-toolchain-generation.sh
+```
+
+Given a downloaded copy of the pinned archive, the provenance regression also
+proves that a same-named cache artifact with modified content is rejected
+before extraction or compilation:
+
+```bash
+contrib/btcheadernode/test-source-provenance.sh /path/to/bitcoin-v30.2.tar.gz
+```
+
+After building the pinned helper, run the black-box contract test:
+
+```bash
+python3 contrib/btcheadernode/test-headers-only.py \
+  --bitcoind ./src/bin/btcheadernode/bin/bitcoind \
+  --bitcoin-cli ./src/bin/btcheadernode/bin/bitcoin-cli
+```
+
+It starts the real patched binary, submits valid competing regtest header
+branches beyond genesis, checks canonical `getblockhash`, confirmation and
+`getchaintips` semantics, proves `-blocksonly=0` cannot defeat the managed
+profile, and repeats the checks after restart. CI downloads only the pinned
+archive digest and runs the same native build and contract.
+
+Managed signet is intentionally not supported: header proof of work cannot
+authenticate the required signet coinbase solution. Use external mode with a
+fully validating Bitcoin signet node instead.

@@ -297,12 +297,16 @@ void StartRPC()
 
 void InterruptRPC()
 {
+    // SYSCOIN: Every interruption must stop the current RPC lifecycle, even
+    // if an earlier lifecycle already consumed the one-time shutdown log.
+    g_rpc_running = false;
     static std::once_flag g_rpc_interrupt_flag;
     // This function could be called twice if the GUI has been started with -server=1.
     std::call_once(g_rpc_interrupt_flag, []() {
         LogPrint(BCLog::RPC, "Interrupting RPC\n");
         // Interrupt e.g. running longpolls
-        g_rpc_running = false;
+        // SYSCOIN: Moved above call_once so a later StartRPC is interruptible.
+        // g_rpc_running = false;
     });
 }
 

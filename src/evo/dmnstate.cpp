@@ -43,8 +43,19 @@ void CDeterministicMNState::ToJson(UniValue& obj) const
     obj.pushKV("PoSeRevivedHeight", nPoSeRevivedHeight);
     obj.pushKV("PoSeBanHeight", nPoSeBanHeight);
     obj.pushKV("revocationReason", nRevocationReason);
-    obj.pushKV("ownerAddress", EncodeDestination(WitnessV0KeyHash(keyIDOwner)));
+    if (!keyIDOwner.IsNull()) obj.pushKV("ownerAddress", EncodeDestination(WitnessV0KeyHash(keyIDOwner)));
     obj.pushKV("votingAddress", EncodeDestination(WitnessV0KeyHash(keyIDVoting)));
+    obj.pushKV("ownerKeyType", pqOwnerKey.HasActiveKey() ? "slh-dsa" : "ecdsa");
+    if (pqOwnerKey.HasActiveKey()) {
+        obj.pushKV("pqOwnerPublicKey", HexStr(pqOwnerKey.public_key));
+        obj.pushKV("pqOwnerKeyVersion", pqOwnerKey.key_version);
+        obj.pushKV("pqOwnerKeyActivationHeight", pqOwnerKey.activated_height);
+    }
+    if (pqVotingKey.key_version != 0) {
+        obj.pushKV("pqVotingPublicKey", HexStr(pqVotingKey.public_key));
+        obj.pushKV("pqVotingKeyVersion", pqVotingKey.key_version);
+        obj.pushKV("pqVotingKeyActivationHeight", pqVotingKey.activated_height);
+    }
 
     CTxDestination dest;
     if (ExtractDestination(scriptPayout, dest)) {
@@ -92,6 +103,16 @@ UniValue CDeterministicMNStateDiff::ToJson() const
     }
     if (fields & Field_keyIDVoting) {
         obj.pushKV("votingAddress", EncodeDestination(WitnessV0KeyHash(state.keyIDVoting)));
+    }
+    if (fields & Field_pqOwnerKey) {
+        obj.pushKV("pqOwnerPublicKey", HexStr(state.pqOwnerKey.public_key));
+        obj.pushKV("pqOwnerKeyVersion", state.pqOwnerKey.key_version);
+        obj.pushKV("pqOwnerKeyActivationHeight", state.pqOwnerKey.activated_height);
+    }
+    if (fields & Field_pqVotingKey) {
+        obj.pushKV("pqVotingPublicKey", HexStr(state.pqVotingKey.public_key));
+        obj.pushKV("pqVotingKeyVersion", state.pqVotingKey.key_version);
+        obj.pushKV("pqVotingKeyActivationHeight", state.pqVotingKey.activated_height);
     }
     if (fields & Field_scriptPayout) {
         CTxDestination dest;

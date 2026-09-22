@@ -33,6 +33,23 @@ struct ConnmanTestMsg : public CConnman {
         if (node.IsManualOrFullOutboundConn()) ++m_network_conn_counts[node.addr.GetNetwork()];
     }
 
+    // Run the normal retention sweep without starting socket threads.
+    void DisconnectTestNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex)
+    {
+        DisconnectNodes();
+    }
+
+    // SYSCOIN: Expose endpoint reservations to fork-specific net tests.
+    bool ReserveTestOutboundAddress(const CService& addr)
+    {
+        return ReservePendingOutboundAddress(addr);
+    }
+
+    void ReleaseTestOutboundAddress(const CService& addr)
+    {
+        ReleasePendingOutboundAddress(addr);
+    }
+
     void ClearTestNodes()
     {
         LOCK(m_nodes_mutex);

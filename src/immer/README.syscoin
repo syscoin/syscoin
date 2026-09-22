@@ -1,0 +1,25 @@
+Immer vendoring notes
+=====================
+
+Upstream: https://github.com/arximboldi/immer
+Revision: 71813305ed1af2173f199e8ee209df5d6a16e766 (2026-01-29)
+Archive SHA-256: 470a1926a1ff57d0de42bc6f68710d988eda31e30ac142c81bcea9a59cdb7828
+
+This revision follows v0.9.1. It includes the upstream GCC warning fixes,
+compiler-specific diagnostic guards, and the trailing-storage correction for
+the undersized-node UBSan report (upstream issue #274 / pull request #323).
+The v0.9.1 release tag itself points to 160f0d7025321e5dc1fc3f0b7742ca7621d43981.
+
+The previous import was upstream v0.8.1,
+5875f7739a6c642ad58cbedadb509c86d421217e.
+
+Syscoin includes the header-only library through src/Makefile.am; the vendored
+CMake project, examples, and optional experimental persistence integrations are
+not part of the Syscoin build. There are no Syscoin implementation patches.
+
+The existing packaging adaptations are retained:
+- .gitmodules is empty; upstream development submodules are not initialized.
+- BUILD, doc/Makefile, and extra/js/makefile are omitted.
+- One trailing space in an immer/algorithm.hpp documentation comment is removed.
+
+Preserve LICENSE and the upstream copyright/license notices when updating.

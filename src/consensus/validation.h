@@ -79,7 +79,9 @@ enum class BlockValidationResult {
     BLOCK_CACHED_INVALID,    //!< this block was cached as being invalid and we didn't store the reason why
     BLOCK_INVALID_HEADER,    //!< invalid proof of work or time too old
     BLOCK_MUTATED,           //!< the block's data didn't match the data committed to by the PoW
+    // SYSCOIN BEGIN: Classify replaceable auxiliary failures independently of block identity.
     BLOCK_AUX_DATA_INVALID,  //!< replaceable auxiliary data failed validation independently of block identity
+    // SYSCOIN END: Classify replaceable auxiliary failures.
     BLOCK_MISSING_PREV,      //!< We don't have the previous block the checked one is built on
     BLOCK_INVALID_PREV,      //!< A block this one builds on is invalid
     BLOCK_TIME_FUTURE,       //!< block timestamp was > 2 hours in the future (or our clock is bad)
@@ -148,6 +150,7 @@ public:
 class TxValidationState : public ValidationState<TxValidationResult> {};
 class BlockValidationState : public ValidationState<BlockValidationResult> {};
 
+// SYSCOIN BEGIN: Preserve NEVM/PoDA representation identity in rejection caching.
 /** Whether a rejection can be retained under the transaction's witness identity. */
 inline bool IsTxRejectionCacheable(TxValidationResult result, const CTransaction& tx)
 {
@@ -178,6 +181,7 @@ inline bool HasNEVMAuxiliaryData(const CBlock& block)
         return HasNEVMAuxiliaryData(*tx);
     });
 }
+// SYSCOIN END: Preserve NEVM/PoDA representation identity in rejection caching.
 
 // These implement the weight = (stripped_size * 4) + witness_size formula,
 // using only serialization with and without witness data. As witness_size

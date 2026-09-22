@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name != 'pull_request' && github.run_id || github.ref }}-sanitizers
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -36,12 +36,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: ASan + LSan + UBSan
+          # SYSCOIN: Build plus both test phases exceeded three hours while
+          # tests were still progressing. Run the complete native and
+          # functional coverage in separate jobs with the same instrumentation.
+          - name: ASan + LSan + UBSan (native)
             file_env: ./ci/test/00_setup_env_native_asan.sh
             timeout: 180
-          - name: TSan
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+          # SYSCOIN: The full functional batch exceeded four hours even after
+          # separating native tests. Partition the same enabled scripts so
+          # long histories start immediately and retain all existing coverage.
+          - name: ASan + LSan + UBSan (functional governance)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            test_filter: '^(feature_governance|feature_governance_dynamic|feature_governance_objects)\.py'
+          - name: ASan + LSan + UBSan (functional NEVM and PQ)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            # Keep this group to one wave of four long fixtures. Voting,
+            # header policy and MN RPC tests run in the shorter remaining job.
+            test_filter: '^(feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key)\.py'
+          - name: ASan + LSan + UBSan (functional remaining)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            test_filter: '^(?!(feature_governance|feature_governance_dynamic|feature_governance_objects|feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key)\.py)'
+          - name: TSan (native)
             file_env: ./ci/test/00_setup_env_native_tsan.sh
             timeout: 180
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+          - name: TSan (functional)
+            file_env: ./ci/test/00_setup_env_native_tsan.sh
+            timeout: 180
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
           - name: MSan
             file_env: ./ci/test/00_setup_env_native_msan.sh
             timeout: 300
@@ -51,6 +86,9 @@ jobs:
             timeout: 180
     env:
       FILE_ENV: ${{ matrix.file_env }}
+      RUN_UNIT_TESTS: ${{ matrix.run_unit_tests }}
+      RUN_FUNCTIONAL_TESTS: ${{ matrix.run_functional_tests }}
+      TEST_RUNNER_FILTER: ${{ matrix.test_filter }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

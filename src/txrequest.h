@@ -186,6 +186,11 @@ public:
     /** Count how many REQUESTED announcements a peer has. */
     size_t CountInFlight(NodeId peer) const;
 
+    /** SYSCOIN: True only for the exact object currently requested from this
+     * peer, allowing large fixed-size inventory responses to be matched before
+     * parsing or cryptographic work. */
+    bool IsRequested(NodeId peer, const uint256& txhash) const;
+
     /** Count how many CANDIDATE announcements a peer has. */
     size_t CountCandidates(NodeId peer) const;
 

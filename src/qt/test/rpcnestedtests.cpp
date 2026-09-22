@@ -87,6 +87,10 @@ void RPCNestedTests::rpcNestedTests()
 
     RPCConsole::RPCParseCommandLine(nullptr, result, "importprivkey", false, &filtered);
     QVERIFY(filtered == "importprivkey(…)");
+    RPCConsole::RPCParseCommandLine(nullptr, result, "importpqkey(syspqkey1:secret)", false, &filtered);
+    QVERIFY(filtered == "importpqkey(…)");
+    RPCConsole::RPCParseCommandLine(nullptr, result, "help(IMPORTPQKEY(syspqkey1:secret))", false, &filtered);
+    QVERIFY(filtered == "help(IMPORTPQKEY(…))");
     RPCConsole::RPCParseCommandLine(nullptr, result, "signmessagewithprivkey abc", false, &filtered);
     QVERIFY(filtered == "signmessagewithprivkey(…)");
     RPCConsole::RPCParseCommandLine(nullptr, result, "signmessagewithprivkey abc,def", false, &filtered);

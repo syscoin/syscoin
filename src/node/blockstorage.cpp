@@ -33,6 +33,7 @@
 #include <primitives/block.h>
 #include <node/context.h>
 #include <masternode/activemasternode.h>
+#include <algorithm>
 #include <map>
 #include <unordered_map>
 
@@ -99,6 +100,30 @@ bool BlockTreeDB::ReadFlag(const std::string& name, bool& fValue)
     return true;
 }
 
+// SYSCOIN BEGIN: Persist the local BLS-to-PQ activation handoff atomically.
+namespace {
+const std::string DB_PQ_ACTIVATION_HANDOFF{"pq_activation_handoff_v1"};
+}
+
+bool BlockTreeDB::HasPQActivationHandoff() const
+{
+    return Exists(std::make_pair(DB_FLAG, DB_PQ_ACTIVATION_HANDOFF));
+}
+
+bool BlockTreeDB::WritePQActivationHandoff(
+    const node::PQActivationHandoffRecord& record)
+{
+    return Write(std::make_pair(DB_FLAG, DB_PQ_ACTIVATION_HANDOFF), record,
+                 /*fSync=*/true);
+}
+
+bool BlockTreeDB::ReadPQActivationHandoff(
+    node::PQActivationHandoffRecord& record)
+{
+    return Read(std::make_pair(DB_FLAG, DB_PQ_ACTIVATION_HANDOFF), record);
+}
+// SYSCOIN END: Persist the local BLS-to-PQ activation handoff atomically.
+
 bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
 {
     AssertLockHeld(::cs_main);
@@ -112,6 +137,16 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
         if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
             CDiskBlockIndex diskindex;
             if (pcursor->GetValue(diskindex)) {
+                // SYSCOIN: The final payment-audit cursor binds both the
+                // logical statement and the exact 801-report witness. A
+                // partial local record cannot be reconstructed safely.
+                if (diskindex.pqPaymentAuditReceiptCursorLogicalId.IsNull() !=
+                    diskindex.pqPaymentAuditReceiptCursorWitnessId.IsNull()) {
+                    return error(
+                        "%s: incomplete payment-audit block index; restart "
+                        "with -reindex",
+                        __func__);
+                }
                 // Construct block index object
                 CBlockIndex* pindexNew = insertBlockIndex(diskindex.ConstructBlockHash());
                 pindexNew->pprev          = insertBlockIndex(diskindex.hashPrev);
@@ -124,7 +159,38 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
+                // SYSCOIN: Restore BTCPREV and the receipt accumulators before
+                // ChainLock import or NEVM replay inspects the block index.
                 pindexNew->btcpPrevCommitment = diskindex.btcpPrevCommitment;
+                pindexNew->pqBTCCReceiptCursorHeight = diskindex.pqBTCCReceiptCursorHeight;
+                pindexNew->pqBTCCReceiptCursorSysHash = diskindex.pqBTCCReceiptCursorSysHash;
+                pindexNew->pqBTCCReceiptCursorBTCHash = diskindex.pqBTCCReceiptCursorBTCHash;
+                pindexNew->pqBTCCReceiptStateHash = diskindex.pqBTCCReceiptStateHash;
+                pindexNew->pqBTCCReceiptLatestTargetHeight =
+                    diskindex.pqBTCCReceiptLatestTargetHeight;
+                pindexNew->pqBTCCReceiptLatestCarrierHeight =
+                    diskindex.pqBTCCReceiptLatestCarrierHeight;
+                pindexNew->pqBTCCReceiptLogicalId =
+                    diskindex.pqBTCCReceiptLogicalId;
+                pindexNew->pqPaymentAuditReceiptCursorHeight =
+                    diskindex.pqPaymentAuditReceiptCursorHeight;
+                pindexNew->pqPaymentAuditReceiptCursorEpoch =
+                    diskindex.pqPaymentAuditReceiptCursorEpoch;
+                pindexNew->pqPaymentAuditReceiptCursorSealHash =
+                    diskindex.pqPaymentAuditReceiptCursorSealHash;
+                pindexNew->pqPaymentAuditReceiptCursorLogicalId =
+                    diskindex.pqPaymentAuditReceiptCursorLogicalId;
+                pindexNew->pqPaymentAuditReceiptCursorWitnessId =
+                    diskindex.pqPaymentAuditReceiptCursorWitnessId;
+                pindexNew->pqPaymentAuditReceiptStateHash =
+                    diskindex.pqPaymentAuditReceiptStateHash;
+                pindexNew->pqPaymentProbationStateHash =
+                    diskindex.pqPaymentProbationStateHash;
+                pindexNew->pqRecoveryRefreshGroup = diskindex.pqRecoveryRefreshGroup;
+                pindexNew->pqRecoveryRefreshEntropyBlockHash = diskindex.pqRecoveryRefreshEntropyBlockHash;
+                pindexNew->pqRecoveryRefreshParentWorkHash = diskindex.pqRecoveryRefreshParentWorkHash;
+                pindexNew->pqRecoveryRefreshCommitmentHash = diskindex.pqRecoveryRefreshCommitmentHash;
+                pindexNew->pqRecoveryRefreshWorkValidated = diskindex.pqRecoveryRefreshWorkValidated;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
@@ -309,11 +375,13 @@ void BlockManager::FindFilesToPruneManual(
             continue;
         }
 
-        PruneOneBlockFile(fileNumber);
+        // SYSCOIN BEGIN: Defer Bitcoin's index mutation until coins are durable.
+        // PruneOneBlockFile(fileNumber);
+        // SYSCOIN END: Defer Bitcoin's index mutation until coins are durable.
         setFilesToPrune.insert(fileNumber);
         count++;
     }
-    LogPrintf("[%s] Prune (Manual): prune_height=%d removed %d blk/rev pairs\n",
+    LogPrintf("[%s] Prune (Manual): prune_height=%d selected %d blk/rev pairs\n",
         chain.GetRole(), last_block_can_prune, count);
 }
 
@@ -373,7 +441,9 @@ void BlockManager::FindFilesToPrune(
                 continue;
             }
 
-            PruneOneBlockFile(fileNumber);
+            // SYSCOIN BEGIN: Defer Bitcoin's index mutation until coins are durable.
+            // PruneOneBlockFile(fileNumber);
+            // SYSCOIN END: Defer Bitcoin's index mutation until coins are durable.
             // Queue up the files for removal
             setFilesToPrune.insert(fileNumber);
             nCurrentUsage -= nBytesToPrune;
@@ -381,7 +451,7 @@ void BlockManager::FindFilesToPrune(
         }
     }
 
-    LogPrint(BCLog::PRUNE, "[%s] target=%dMiB actual=%dMiB diff=%dMiB min_height=%d max_prune_height=%d removed %d blk/rev pairs\n",
+    LogPrint(BCLog::PRUNE, "[%s] target=%dMiB actual=%dMiB diff=%dMiB min_height=%d max_prune_height=%d selected %d blk/rev pairs\n",
              chain.GetRole(), target / 1024 / 1024, nCurrentUsage / 1024 / 1024,
              (int64_t(target) - int64_t(nCurrentUsage)) / 1024 / 1024,
              min_block_to_prune, last_block_can_prune, count);
@@ -390,6 +460,30 @@ void BlockManager::FindFilesToPrune(
 void BlockManager::UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) {
     AssertLockHeld(::cs_main);
     m_prune_locks[name] = lock_info;
+}
+
+// SYSCOIN: A marker refresh may only retain more history. In particular, a
+// deep reorg first rewinds every live lock to the fork height; replay metadata
+// must not subsequently raise that conservative rollback floor.
+int BlockManager::UpdatePruneLockLowerOnly(
+    const std::string& name,
+    const PruneLockInfo& lock_info)
+{
+    AssertLockHeld(::cs_main);
+    const auto [entry, inserted]{m_prune_locks.try_emplace(name, lock_info)};
+    if (!inserted) {
+        entry->second.height_first = std::min(
+            entry->second.height_first, lock_info.height_first);
+    }
+    return entry->second.height_first;
+}
+
+// SYSCOIN: Erasing is distinct from setting an unbounded height because reorg
+// handling deliberately rewinds every live prune lock.
+void BlockManager::RemovePruneLock(const std::string& name)
+{
+    AssertLockHeld(::cs_main);
+    m_prune_locks.erase(name);
 }
 
 CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
@@ -495,22 +589,37 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
 bool BlockManager::WriteBlockIndexDB()
 {
     AssertLockHeld(::cs_main);
+    // File metadata may name unfinished undo in an older download file.
+    // Persist those streams before publishing their positions or forgetting
+    // the dirty entries, including across a later process restart.
+    if (!m_dirty_fileinfo.empty() && !FlushBlockFilesForDurability()) return false;
     std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
     vFiles.reserve(m_dirty_fileinfo.size());
-    for (std::set<int>::iterator it = m_dirty_fileinfo.begin(); it != m_dirty_fileinfo.end();) {
-        vFiles.emplace_back(*it, &m_blockfile_info[*it]);
-        m_dirty_fileinfo.erase(it++);
+    // SYSCOIN BEGIN: Retain dirty file entries while collecting the Bitcoin database batch.
+    for (const int file : m_dirty_fileinfo) {
+        vFiles.emplace_back(file, &m_blockfile_info[file]);
+        // SYSCOIN: Bitcoin erased here; defer clearing until WriteBatchSync succeeds.
+        // m_dirty_fileinfo.erase(it++);
     }
+    // SYSCOIN END: Retain dirty file entries while collecting the Bitcoin database batch.
     std::vector<const CBlockIndex*> vBlocks;
     vBlocks.reserve(m_dirty_blockindex.size());
-    for (std::set<CBlockIndex*>::iterator it = m_dirty_blockindex.begin(); it != m_dirty_blockindex.end();) {
-        vBlocks.push_back(*it);
-        m_dirty_blockindex.erase(it++);
+    // SYSCOIN BEGIN: Retain dirty block entries while collecting the Bitcoin database batch.
+    for (const CBlockIndex* block : m_dirty_blockindex) {
+        vBlocks.push_back(block);
+        // SYSCOIN: Bitcoin erased here; defer clearing until WriteBatchSync succeeds.
+        // m_dirty_blockindex.erase(it++);
     }
+    // SYSCOIN END: Retain dirty block entries while collecting the Bitcoin database batch.
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
     }
+    // SYSCOIN: A failed batch must remain retryable. This method holds
+    // cs_main, so no caller can add new dirty entries between the snapshots
+    // above and here.
+    m_dirty_fileinfo.clear();
+    m_dirty_blockindex.clear();
     return true;
 }
 
@@ -576,12 +685,12 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     return true;
 }
 
-void BlockManager::ScanAndUnlinkAlreadyPrunedFiles()
+bool BlockManager::ScanAndUnlinkAlreadyPrunedFiles()
 {
     AssertLockHeld(::cs_main);
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
     if (!m_have_pruned) {
-        return;
+        return true;
     }
 
     std::set<int> block_files_to_prune;
@@ -592,6 +701,7 @@ void BlockManager::ScanAndUnlinkAlreadyPrunedFiles()
     }
 
     UnlinkPrunedFiles(block_files_to_prune);
+    return true;
 }
 
 const CBlockIndex* BlockManager::GetLastCheckpoint(const CCheckpointData& data)
@@ -808,6 +918,48 @@ bool BlockManager::FlushChainstateBlockFile(int tip_height)
         return FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false);
     }
     // No need to log warnings in this case.
+    return true;
+}
+
+// SYSCOIN: Recovery markers must fence all streams whose metadata the next
+// index batch can publish. Undo writes can still target older files after a
+// download cursor advances, including during AssumeUTXO background validation.
+bool BlockManager::FlushBlockFilesForDurability()
+{
+    AssertLockHeld(::cs_main);
+    LOCK(cs_LastBlockFile);
+    if (m_blockfile_info.empty()) return true;
+
+    std::set<int> files{m_dirty_fileinfo};
+    for (const auto& cursor : m_blockfile_cursors) {
+        if (cursor) files.insert(cursor->file_num);
+    }
+    for (const int file : files) {
+        const auto& info{m_blockfile_info.at(file)};
+        const auto flush = [&](FlatFileSeq sequence, unsigned int size) {
+            // Pruning leaves zero-size tombstones in the dirty batch. A
+            // not-yet-connected block can also have no undo stream at all.
+            if (size == 0) return true;
+            const FlatFilePos pos{file, size};
+            std::error_code ec;
+            const auto path{sequence.FileName(pos)};
+            const auto disk_size{fs::file_size(path, ec)};
+            // FlatFileSeq::Open can create an absent file. That must not turn
+            // missing or truncated recovery evidence into a successful fence.
+            if (ec || disk_size < size) {
+                m_opts.notifications.flushError("Recovery block or undo file is missing or truncated.");
+                return error("%s: incomplete recovery stream %s", __func__, fs::PathToString(path));
+            }
+            if (!sequence.Flush(pos, /*finalize=*/false)) {
+                m_opts.notifications.flushError("Flushing recovery block or undo file to disk failed.");
+                return false;
+            }
+            return true;
+        };
+        if (!flush(BlockFileSeq(), info.nSize) ||
+            !flush(UndoFileSeq(), info.nUndoSize)) return false;
+    }
+    // Leave dirty index/file metadata intact until WriteBlockIndexDB succeeds.
     return true;
 }
 
@@ -1046,6 +1198,7 @@ bool BlockManager::WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValid
     return true;
 }
 
+// SYSCOIN: Factor Bitcoin disk reading into a shared block/AuxPoW-header template.
 /* Generic implementation of block reading that can handle
    both a block and its header.  */
 
@@ -1069,6 +1222,7 @@ bool BlockManager::ReadBlockOrHeader(T& block, const FlatFilePos& pos) const
     }
     const auto& consensus = GetConsensus();
     // Check the header
+    // SYSCOIN: Replace Bitcoin CheckProofOfWork with AuxPoW-aware header validation.
     if (!HasValidProofOfWork({block}, consensus))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
@@ -1079,6 +1233,7 @@ bool BlockManager::ReadBlockOrHeader(T& block, const FlatFilePos& pos) const
 
     return true;
 }
+// SYSCOIN: Adapt the Bitcoin index-based reader to the block/header template.
 template<typename T>
 bool BlockManager::ReadBlockOrHeader(T& block, const CBlockIndex& pindex) const
 {
@@ -1092,6 +1247,7 @@ bool BlockManager::ReadBlockOrHeader(T& block, const CBlockIndex& pindex) const
     return true;
 }
 
+// SYSCOIN BEGIN: Wrap shared disk readers with optional NEVM auxiliary-data loading.
 bool BlockManager::ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) const
 {
     auto res = ReadBlockOrHeader(block, pos);
@@ -1113,6 +1269,7 @@ bool BlockManager::ReadBlockFromDisk(CBlock& block, const CBlockIndex& index, bo
     }
     return res;
 }
+// SYSCOIN END: Wrap shared disk readers with optional NEVM auxiliary-data loading.
 
 bool BlockManager::ReadBlockHeaderFromDisk(CBlockHeader& block, const CBlockIndex* pindex) const
 {
@@ -1180,6 +1337,120 @@ FlatFilePos BlockManager::SaveBlockToDisk(const CBlock& block, int nHeight, cons
     return blockPos;
 }
 
+// SYSCOIN BEGIN: Durable NEVM payload replacement and reindex adoption.
+bool BlockManager::ReplaceNEVMBlockData(BlockValidationState& state,
+                                       CBlockIndex& index,
+                                       Span<const uint8_t> payload)
+{
+    AssertLockHeld(cs_main);
+    if (!(index.nStatus & BLOCK_HAVE_DATA) || !m_block_tree_db) {
+        return state.Error("nevm-payload-replacement-storage-unavailable");
+    }
+    if (payload.empty() || payload.size() > MAX_NEVM_BLOCK_SIZE) {
+        return state.Error("nevm-payload-replacement-size");
+    }
+    try {
+        // A selective replacement batch must not publish a newly accepted
+        // child before normal flushing has persisted its indexed ancestry.
+        if (!m_block_tree_db->Exists(
+                std::make_pair(kernel::DB_BLOCK_INDEX, index.GetBlockHash()))) {
+            return state.Error("nevm-payload-replacement-index-not-persisted");
+        }
+        CBlock block;
+        if (!ReadBlockFromDisk(block, index, /*load_auxiliary_data=*/false) ||
+            !block.IsNEVM()) {
+            return state.Error("nevm-payload-replacement-block-unavailable");
+        }
+        CBlockUndo undo;
+        const bool have_undo{(index.nStatus & BLOCK_HAVE_UNDO) != 0};
+        if (have_undo && (index.pprev == nullptr || !UndoReadFromDisk(undo, index))) {
+            return state.Error("nevm-payload-replacement-undo-unavailable");
+        }
+        block.vchNEVMBlockData.assign(payload.begin(), payload.end());
+
+        LOCK(cs_LastBlockFile);
+        const FlatFilePos pos{SaveBlockToDisk(block, index.nHeight, nullptr)};
+        if (pos.IsNull()) return state.Error("nevm-payload-replacement-write-failed");
+
+        CDiskBlockIndex replacement{&index};
+        replacement.nFile = pos.nFile;
+        replacement.nDataPos = pos.nPos;
+        // Block and undo positions share nFile. Moving the block therefore
+        // requires copying its undo before either new position is published.
+        if (have_undo && pos.nFile != index.nFile) {
+            FlatFilePos undo_pos;
+            if (!FindUndoPos(state, pos.nFile, undo_pos,
+                             GetSerializeSize(undo, CLIENT_VERSION) + 40) ||
+                !UndoWriteToDisk(undo, undo_pos, index.pprev->GetBlockHash())) {
+                return state.Error("nevm-payload-replacement-undo-write-failed");
+            }
+            replacement.nUndoPos = undo_pos.nPos;
+        }
+        if (!FlushBlockFile(pos.nFile, /*fFinalize=*/false, /*finalize_undo=*/false)) {
+            return state.Error("nevm-payload-replacement-flush-failed");
+        }
+        // Do not publish other dirty indexes, whose backing files may not
+        // have been flushed. Retain their dirty entries for the usual flush.
+        if (!m_block_tree_db->WriteBatchSync(
+                {{pos.nFile, &m_blockfile_info[pos.nFile]}}, MaxBlockfileNum(),
+                {&replacement})) {
+            return state.Error("nevm-payload-replacement-index-write-failed");
+        }
+        index.nFile = replacement.nFile;
+        index.nDataPos = replacement.nDataPos;
+        index.nUndoPos = replacement.nUndoPos;
+        m_dirty_blockindex.erase(&index);
+        m_dirty_fileinfo.erase(pos.nFile);
+        return true;
+    } catch (const std::exception& e) {
+        return state.Error(strprintf("nevm-payload-replacement-storage-error:%s", e.what()));
+    }
+}
+
+bool BlockManager::AdoptNEVMBlockDataForReindex(BlockValidationState& state,
+                                              CBlockIndex& index,
+                                              const CBlock& candidate,
+                                              const FlatFilePos& known_pos)
+{
+    AssertLockHeld(cs_main);
+    if (!fReindex || !(index.nStatus & BLOCK_HAVE_DATA) ||
+        (index.nStatus & BLOCK_HAVE_UNDO) || known_pos.nFile < 0 ||
+        known_pos.nPos < BLOCK_SERIALIZATION_HEADER_SIZE) {
+        return state.Error("nevm-payload-reindex-adoption-unavailable");
+    }
+    if (candidate.vchNEVMBlockData.empty() ||
+        candidate.vchNEVMBlockData.size() > MAX_NEVM_BLOCK_SIZE) {
+        return state.Error("nevm-payload-reindex-adoption-size");
+    }
+    try {
+        CBlock original;
+        if (!ReadBlockFromDisk(original, index, /*load_auxiliary_data=*/false) ||
+            !original.IsNEVM()) {
+            return state.Error("nevm-payload-reindex-original-unavailable");
+        }
+        // A shared pure-header hash does not authenticate the mutable AuxPoW
+        // wrapper. Compare the entire disk record after changing only payload.
+        original.vchNEVMBlockData = candidate.vchNEVMBlockData;
+        CDataStream original_bytes{SER_DISK, CLIENT_VERSION};
+        CDataStream candidate_bytes{SER_DISK, CLIENT_VERSION};
+        original_bytes << original;
+        candidate_bytes << candidate;
+        if (!std::equal(original_bytes.begin(), original_bytes.end(),
+                        candidate_bytes.begin(), candidate_bytes.end())) {
+            return state.Error("nevm-payload-reindex-core-block-mismatch");
+        }
+        const FlatFilePos pos{SaveBlockToDisk(candidate, index.nHeight, &known_pos)};
+        if (pos.IsNull()) return state.Error("nevm-payload-reindex-position-failed");
+        m_dirty_blockindex.insert(&index);
+        index.nFile = pos.nFile;
+        index.nDataPos = pos.nPos;
+        return true;
+    } catch (const std::exception& e) {
+        return state.Error(strprintf("nevm-payload-reindex-storage-error:%s", e.what()));
+    }
+}
+// SYSCOIN END: Durable NEVM payload replacement and reindex adoption.
+
 class ImportingNow
 {
     std::atomic<bool>& m_importing;
@@ -1203,9 +1474,12 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
 
     {
         ImportingNow imp{chainman.m_blockman.m_importing};
+        // SYSCOIN: Retain the starting reindex state through activation handling.
+        const bool reindexing{fReindex.load()};
 
         // -reindex
-        if (fReindex) {
+        // SYSCOIN: Use the retained reindex state while the durable marker remains set.
+        if (reindexing) {
             int nFile = 0;
             // Map of disk positions for blocks with unknown parent (only used for reindex);
             // parent hash -> child disk position, multiple children can have the same parent.
@@ -1227,9 +1501,11 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
                 }
                 nFile++;
             }
-            WITH_LOCK(::cs_main, chainman.m_blockman.m_block_tree_db->WriteReindexing(false));
-            fReindex = false;
-            LogPrintf("Reindexing finished\n");
+            // SYSCOIN BEGIN: Move Bitcoin reindex completion after best-chain activation handling.
+            // WITH_LOCK(::cs_main, chainman.m_blockman.m_block_tree_db->WriteReindexing(false));
+            // fReindex = false;
+            // LogPrintf("Reindexing finished\n");
+            // SYSCOIN END: Move Bitcoin reindex completion after best-chain activation handling.
             // To avoid ending up in a situation without genesis block, re-try initializing (no-op if reindexing worked):
             chainman.ActiveChainstate().LoadGenesisBlock();
         }
@@ -1256,11 +1532,42 @@ void ImportBlocks(ChainstateManager& chainman, std::vector<fs::path> vImportFile
         // the relevant pointers before the ABC call.
         for (Chainstate* chainstate : WITH_LOCK(::cs_main, return chainman.GetAll())) {
             BlockValidationState state;
-            if (!chainstate->ActivateBestChain(state, nullptr)) {
+            const bool activated{chainstate->ActivateBestChain(state, nullptr)};
+            // Interrupted activation can return success after only a prefix.
+            if (chainman.m_interrupt) return;
+            if (!activated) {
+                // SYSCOIN BEGIN: Allow durable NEVM repair to defer best-chain activation after import.
+                if (state.IsError() &&
+                    state.GetRejectReason() == "nevm-payload-repair-pending" &&
+                    WITH_LOCK(::cs_main, return chainman.HasDurableNEVMPayloadRepair())) {
+                    // The durable repair marker protects the indexed ancestry
+                    // and active coins. Finish the completed import/reindex
+                    // scan so LoadingBlocks() releases the peer network needed
+                    // to fetch replacement payload bytes.
+                    LogPrintf("Best-chain activation deferred while durable NEVM payload repair is pending\n");
+                    continue;
+                }
+                // SYSCOIN END: Allow durable NEVM repair to defer best-chain activation after import.
                 chainman.GetNotifications().fatalError(strprintf("Failed to connect best block (%s)", state.ToString()));
                 return;
             }
         }
+        // SYSCOIN BEGIN: Complete reindex after activation handling and check durable marker clearing.
+        if (reindexing) {
+            const bool marker_cleared{WITH_LOCK(
+                ::cs_main,
+                return chainman.m_blockman.m_block_tree_db->WriteReindexing(
+                    false))};
+            if (!marker_cleared) {
+                chainman.GetNotifications().fatalError(
+                    "Failed to clear durable reindex marker after best-chain "
+                    "activation");
+                return;
+            }
+            fReindex = false;
+            LogPrintf("Reindexing finished\n");
+        }
+        // SYSCOIN END: Complete reindex after activation handling and check durable marker clearing.
         // SYSCOIN
         if(pdsNotificationInterface)
             pdsNotificationInterface->InitializeCurrentBlockTip(chainman);
@@ -1298,3 +1605,25 @@ std::ostream& operator<<(std::ostream& os, const BlockfileCursor& cursor) {
     return os;
 }
 } // namespace node
+
+// SYSCOIN: AuxPoW header reconstruction is a block-storage operation. Keeping
+// it beside BlockManager prevents the generic chain index from importing the
+// validation/storage graph, which would make every PQ branch helper cyclic.
+CBlockHeader CBlockIndex::GetBlockHeader(
+    const node::BlockManager& blockman) const
+{
+    CBlockHeader block;
+    block.nVersion = nVersion;
+
+    if (block.IsAuxpow()) {
+        blockman.ReadBlockHeaderFromDisk(block, this);
+        return block;
+    }
+
+    if (pprev) block.hashPrevBlock = pprev->GetBlockHash();
+    block.hashMerkleRoot = hashMerkleRoot;
+    block.nTime = nTime;
+    block.nBits = nBits;
+    block.nNonce = nNonce;
+    return block;
+}

@@ -12,6 +12,7 @@
 #define IMMER_HAS_CPP17 1
 #endif
 
+#if IMMER_HAS_CPP17
 #if defined(__has_cpp_attribute)
 #if __has_cpp_attribute(nodiscard)
 #define IMMER_NODISCARD [[nodiscard]]
@@ -21,10 +22,17 @@
 #define IMMER_NODISCARD [[nodiscard]]
 #endif
 #endif
+#endif
 
-#ifdef __has_feature
-#if !__has_feature(cxx_exceptions)
+#if !defined(IMMER_USE_EXCEPTIONS) && !defined(IMMER_NO_EXCEPTIONS)
+#if defined(_MSC_VER)
+#if !_HAS_EXCEPTIONS
 #define IMMER_NO_EXCEPTIONS
+#endif
+#else
+#if !__cpp_exceptions
+#define IMMER_NO_EXCEPTIONS
+#endif
 #endif
 #endif
 
@@ -33,7 +41,7 @@
 #define IMMER_CATCH(expr) else
 #define IMMER_THROW(expr)                                                      \
     do {                                                                       \
-        assert(!#expr);                                                        \
+        assert((#expr, false));                                                \
         std::terminate();                                                      \
     } while (false)
 #define IMMER_RETHROW
@@ -119,6 +127,23 @@
 #else
 #define IMMER_ENABLE_DEBUG_SIZE_HEAP 1
 #endif
+#endif
+
+#ifndef IMMER_THROW_ON_INVALID_STATE
+#define IMMER_THROW_ON_INVALID_STATE 0
+#endif
+
+#if defined(__has_feature)
+#define IMMER_COMPILER_HAS_FEATURE __has_feature
+#else
+#define IMMER_COMPILER_HAS_FEATURE(x) 0
+#endif
+
+#if defined(__SANITIZE_ADDRESS__) ||                                           \
+    IMMER_COMPILER_HAS_FEATURE(address_sanitizer)
+#define IMMER_ASAN_ENABLED 1
+#else
+#define IMMER_ASAN_ENABLED 0
 #endif
 
 namespace immer {

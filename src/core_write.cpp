@@ -21,9 +21,25 @@
 // SYSCOIN
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
-#include <llmq/quorums_commitment.h>
+#include <llmq/legacy_quorum_commitment.h>
 #include <services/assetconsensus.h>
 #include <math.h>
+
+namespace {
+
+// SYSCOIN: Keep historical commitment JSON independent of live quorum
+// plumbing while preserving the legacy least-significant-bit-first encoding.
+std::string LegacyQuorumBitsToHex(const std::vector<bool>& bits)
+{
+    std::vector<uint8_t> bytes((bits.size() + 7) / 8);
+    for (size_t index{0}; index < bits.size(); ++index) {
+        bytes[index / 8] |= static_cast<uint8_t>(bits[index]) << (index % 8);
+    }
+    return HexStr(bytes);
+}
+
+} // namespace
+
 UniValue ValueFromAmount(const CAmount amount)
 {
     static_assert(COIN > 1);
@@ -339,10 +355,36 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
             entry.pushKV("proUpRevTx", obj);
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT) {
-        llmq::CFinalCommitmentTxPayload qcTx;
+        llmq::legacy::FinalCommitmentTxPayload qcTx;
         if (GetTxPayload(tx, qcTx)) {
-            UniValue obj;
-            qcTx.ToJson(obj);
+            UniValue commitment{UniValue::VOBJ};
+            commitment.pushKV("version", qcTx.commitment.version);
+            commitment.pushKV("quorumHash",
+                              qcTx.commitment.quorum_hash.ToString());
+            commitment.pushKV("signersCount",
+                              qcTx.commitment.CountSigners());
+            commitment.pushKV(
+                "signers",
+                LegacyQuorumBitsToHex(qcTx.commitment.signers));
+            commitment.pushKV("validMembersCount",
+                              qcTx.commitment.CountValidMembers());
+            commitment.pushKV(
+                "validMembers",
+                LegacyQuorumBitsToHex(qcTx.commitment.valid_members));
+            commitment.pushKV(
+                "quorumPublicKey",
+                qcTx.commitment.quorum_public_key.ToString());
+            commitment.pushKV("quorumVvecHash",
+                              qcTx.commitment.quorum_vvec_hash.ToString());
+            commitment.pushKV("quorumSig",
+                              qcTx.commitment.quorum_signature.ToString());
+            commitment.pushKV("membersSig",
+                              qcTx.commitment.members_signature.ToString());
+
+            UniValue obj{UniValue::VOBJ};
+            obj.pushKV("version", qcTx.version);
+            obj.pushKV("height", qcTx.height);
+            obj.pushKV("commitment", commitment);
             entry.pushKV("qcTx", obj);
         }
     }
