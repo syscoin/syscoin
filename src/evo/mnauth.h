@@ -148,6 +148,7 @@ public:
     struct AsyncConfig {
         std::size_t verify_threads{2};
         std::size_t max_verify_queue{16};
+        std::size_t reserved_outbound_verify_queue_slots{1};
         std::size_t sign_threads{1};
         std::size_t max_sign_queue{8};
         std::size_t max_initiator_sign_queue{6};
@@ -160,7 +161,10 @@ public:
             std::chrono::seconds{60}};
         std::chrono::microseconds sign_timeout{
             std::chrono::seconds{120}};
+        // State caps apply per direction; the global attempt budget is split
+        // between the two directions, never duplicated.
         llmq::pq::MNAUTHRuntimeConfig verification_admission;
+        uint32_t outbound_verify_attempts_per_window{8};
         llmq::pq::MNAUTHSigningRuntimeConfig signing_admission;
         uint32_t initiator_sign_attempts_per_window{6};
         uint32_t responder_sign_attempts_per_window{2};

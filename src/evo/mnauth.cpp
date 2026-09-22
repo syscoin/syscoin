@@ -185,6 +185,22 @@ bool IsAdmissionLimit(llmq::pq::MNAUTHVerificationError error) noexcept
            error == Error::INFLIGHT_LIMIT;
 }
 
+llmq::pq::MNAUTHRuntimeConfig VerificationLaneConfig(
+    llmq::pq::MNAUTHRuntimeConfig config,
+    uint32_t outbound_attempts,
+    bool outbound)
+{
+    const uint32_t inbound_attempts{
+        config.global_attempts_per_window > outbound_attempts
+            ? config.global_attempts_per_window - outbound_attempts
+            : 0};
+    config.global_attempts_per_window =
+        outbound ? outbound_attempts : inbound_attempts;
+    config.source_attempts_per_window = std::min(
+        config.source_attempts_per_window, config.global_attempts_per_window);
+    return config;
+}
+
 bool BuildContextToken(CNode& node,
                        ChainstateManager& chainman,
                        CMNAuth::ContextToken& token,
@@ -372,6 +388,8 @@ bool CMNAuth::ContextToken::IsStructurallyValid() const noexcept
 bool CMNAuth::AsyncConfig::IsValid() const noexcept
 {
     if (verify_threads == 0 || max_verify_queue == 0 || sign_threads != 1 ||
+        reserved_outbound_verify_queue_slots == 0 ||
+        reserved_outbound_verify_queue_slots >= max_verify_queue ||
         max_sign_queue == 0 || max_initiator_sign_queue == 0 ||
         max_responder_sign_queue == 0 ||
         max_completion_queue == 0 || reserved_sign_completion_slots == 0 ||
@@ -380,6 +398,17 @@ bool CMNAuth::AsyncConfig::IsValid() const noexcept
         verify_timeout <= std::chrono::microseconds::zero() ||
         sign_timeout <= std::chrono::microseconds::zero() ||
         !verification_admission.IsValid() || !signing_admission.IsValid()) {
+        return false;
+    }
+    if (outbound_verify_attempts_per_window == 0 ||
+        outbound_verify_attempts_per_window >=
+            verification_admission.global_attempts_per_window ||
+        !VerificationLaneConfig(verification_admission,
+                                outbound_verify_attempts_per_window,
+                                false).IsValid() ||
+        !VerificationLaneConfig(verification_admission,
+                                outbound_verify_attempts_per_window,
+                                true).IsValid()) {
         return false;
     }
     if (max_initiator_sign_queue >
@@ -442,6 +471,7 @@ struct CMNAuth::AsyncProcessor::Impl {
     struct PeerRegistration {
         std::shared_ptr<std::atomic_bool> cancelled;
         uint64_t generation{0};
+        bool verification_admitted{false};
     };
 
     struct VerifyWork {
@@ -479,7 +509,12 @@ struct CMNAuth::AsyncProcessor::Impl {
     explicit Impl(AsyncConfig config_in, AsyncHooks hooks_in)
         : config{std::move(config_in)},
           hooks{std::move(hooks_in)},
-          verifier{config.verification_admission},
+          inbound_verifier{VerificationLaneConfig(
+              config.verification_admission,
+              config.outbound_verify_attempts_per_window, false)},
+          outbound_verifier{VerificationLaneConfig(
+              config.verification_admission,
+              config.outbound_verify_attempts_per_window, true)},
           initiator_signing_admission{SigningLaneConfig(
               config.signing_admission,
               config.initiator_sign_attempts_per_window,
@@ -645,8 +680,20 @@ struct CMNAuth::AsyncProcessor::Impl {
                 verify_ready.wait(
                     lock, [this] { return stopping || !verify_queue.empty(); });
                 if (stopping && verify_queue.empty()) return;
-                work.emplace(std::move(verify_queue.front()));
-                verify_queue.pop_front();
+                // Preserve FIFO within each direction. Give outbound work
+                // bounded priority without starving queued inbound proofs.
+                auto next = std::find_if(
+                    verify_queue.begin(), verify_queue.end(),
+                    [this](const VerifyWork& queued) {
+                        return queued.context.local_is_initiator ==
+                               (outbound_verify_streak < 2);
+                    });
+                if (next == verify_queue.end()) next = verify_queue.begin();
+                outbound_verify_streak = next->context.local_is_initiator
+                    ? std::min(outbound_verify_streak + 1, std::size_t{2})
+                    : 0;
+                work.emplace(std::move(*next));
+                verify_queue.erase(next);
                 ++stats.verify_inflight;
             }
 
@@ -848,7 +895,8 @@ struct CMNAuth::AsyncProcessor::Impl {
 
     AsyncConfig config;
     AsyncHooks hooks;
-    llmq::pq::MNAUTHVerificationManager verifier;
+    llmq::pq::MNAUTHVerificationManager inbound_verifier;
+    llmq::pq::MNAUTHVerificationManager outbound_verifier;
     llmq::pq::MNAUTHSigningAdmissionManager initiator_signing_admission;
     llmq::pq::MNAUTHSigningAdmissionManager responder_signing_admission;
     const bool valid_config{false};
@@ -861,6 +909,7 @@ struct CMNAuth::AsyncProcessor::Impl {
     bool stopping{false};
     std::map<int64_t, PeerRegistration> peers;
     std::deque<VerifyWork> verify_queue;
+    std::size_t outbound_verify_streak{0};
     std::deque<SignWork> initiator_sign_queue;
     std::deque<SignWork> responder_sign_queue;
     std::size_t initiator_streak{0};
@@ -944,7 +993,8 @@ void CMNAuth::AsyncProcessor::CancelPeer(int64_t peer_id) noexcept
         // Keep the executor->verifier lock order used by EnqueueVerify so a
         // reused NodeId cannot have its new verifier session erased by an old
         // connection's cancellation.
-        m_impl->verifier.ForgetPeer(peer_id);
+        m_impl->inbound_verifier.ForgetPeer(peer_id);
+        m_impl->outbound_verifier.ForgetPeer(peer_id);
     }
     m_impl->verify_ready.notify_all();
     m_impl->sign_ready.notify_all();
@@ -966,6 +1016,13 @@ CMNAuth::EnqueueResult CMNAuth::AsyncProcessor::EnqueueVerify(
 
     const int64_t peer_id{request.context.peer_id};
     const bool local_is_initiator{request.context.local_is_initiator};
+    // Only locally dialed registry endpoints may use the outbound reserve.
+    // Inbound VERSION claims and wire signer roles cannot select this lane.
+    if (local_is_initiator && request.context.connected_service !=
+                                  request.context.remote_service) {
+        result.error = AsyncError::INVALID_REQUEST;
+        return result;
+    }
     const auto& initiator_key{local_is_initiator
                                   ? request.context.local_key
                                   : request.context.remote_key};
@@ -994,7 +1051,18 @@ CMNAuth::EnqueueResult CMNAuth::AsyncProcessor::EnqueueVerify(
         result.error = AsyncError::CANCELLED;
         return result;
     }
-    if (m_impl->verify_queue.size() >= m_impl->config.max_verify_queue) {
+    if (registration->verification_admitted) {
+        result.error = AsyncError::VERIFY_ADMISSION;
+        result.verification_error =
+            llmq::pq::MNAUTHVerificationError::DUPLICATE_PEER;
+        return result;
+    }
+    const std::size_t queue_limit{
+        local_is_initiator
+            ? m_impl->config.max_verify_queue
+            : m_impl->config.max_verify_queue -
+                  m_impl->config.reserved_outbound_verify_queue_slots};
+    if (m_impl->verify_queue.size() >= queue_limit) {
         ++m_impl->stats.verify_saturation_drops;
         result.error = AsyncError::VERIFY_QUEUE_FULL;
         return result;
@@ -1003,7 +1071,9 @@ CMNAuth::EnqueueResult CMNAuth::AsyncProcessor::EnqueueVerify(
     // Admission and queue insertion share the registration lock. CancelPeer
     // cannot erase the generation between Prepare() and insertion, which
     // would otherwise leave a verifier peer-session behind permanently.
-    auto task = m_impl->verifier.Prepare(
+    auto& verifier{local_is_initiator ? m_impl->outbound_verifier
+                                    : m_impl->inbound_verifier};
+    auto task = verifier.Prepare(
         peer_id, request.context.keyed_net_group,
         request.genesis_hash, initiator_key, responder_key,
         request.transcript, request.expected_signer_role,
@@ -1028,9 +1098,10 @@ CMNAuth::EnqueueResult CMNAuth::AsyncProcessor::EnqueueVerify(
             registration->generation, now, deadline});
     } catch (...) {
         task.reset();
-        m_impl->verifier.ForgetPeer(peer_id);
+        verifier.ForgetPeer(peer_id);
         throw;
     }
+    m_impl->peers.at(peer_id).verification_admitted = true;
     result.deadline_micros = deadline;
     m_impl->verify_ready.notify_one();
     return result;

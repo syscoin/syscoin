@@ -1705,6 +1705,10 @@ verification, implementation requires all of the following:
   the same budget dimensions, so an unauthenticated claim cannot debit an
   arbitrary operator's budget and connection churn cannot reset an
   expensive-work allowance;
+- a bounded verification allowance and queue reserve for locally initiated
+  connections to exact registry endpoints, with bounded scheduling priority;
+  inbound attempts cannot consume that reserve, and the total verification
+  attempt, worker, and queue limits remain bounded;
 - cheap structure, service-bit, proTxHash, key-version, and duplicate checks
   before SLH verification;
 - mandatory random VERSION cookies plus initiator-first response gating before

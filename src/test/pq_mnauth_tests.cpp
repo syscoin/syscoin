@@ -290,21 +290,24 @@ CMNAuth::VerifyRequest AsyncVerifyRequest(
     const uint256& genesis,
     const GlobalKeyRecord& initiator_key,
     const GlobalKeyRecord& responder_key,
-    MNAUTHTranscript transcript)
+    MNAUTHTranscript transcript,
+    bool local_is_initiator = false)
 {
+    transcript.signer_role = local_is_initiator
+        ? MNAUTHSignerRole::RESPONDER : MNAUTHSignerRole::INITIATOR;
     CMNAuth::VerifyRequest request;
     request.context = AsyncContext(
         peer_id, source_key, initiator_key, responder_key, transcript,
-        /*local_is_initiator=*/false);
+        local_is_initiator);
     request.genesis_hash = genesis;
-    request.expected_signer_role = MNAUTHSignerRole::INITIATOR;
+    request.expected_signer_role = transcript.signer_role;
     request.required_service_flags = REQUIRED_SERVICES;
     request.transcript = std::move(transcript);
     request.message.signer_pro_tx_hash =
-        request.transcript.initiator_pro_tx_hash;
+        request.context.connection.remote.pro_tx_hash;
     request.message.signer_global_key_version =
-        request.transcript.initiator_global_key_version;
-    request.message.signer_role = MNAUTHSignerRole::INITIATOR;
+        request.context.connection.remote.global_key_version;
+    request.message.signer_role = request.expected_signer_role;
     request.message.signature[0] = 1;
     BOOST_REQUIRE(request.message.IsStructurallyValid());
     return request;
@@ -2865,6 +2868,275 @@ BOOST_AUTO_TEST_CASE(async_config_rejects_unserviceable_lane_and_completion_boun
     auto multiple_signers = config;
     multiple_signers.sign_threads = 2;
     BOOST_CHECK(!multiple_signers.IsValid());
+
+    for (const std::size_t reserve : {std::size_t{0}, config.max_verify_queue}) {
+        auto invalid_reserve = config;
+        invalid_reserve.reserved_outbound_verify_queue_slots = reserve;
+        BOOST_CHECK(!invalid_reserve.IsValid());
+    }
+    for (const uint32_t reserve : {uint32_t{0},
+                                  config.verification_admission.global_attempts_per_window}) {
+        auto invalid_reserve = config;
+        invalid_reserve.outbound_verify_attempts_per_window = reserve;
+        BOOST_CHECK(!invalid_reserve.IsValid());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(async_inbound_exhaustion_preserves_bounded_outbound_verification)
+{
+    const uint256 genesis{NonNullHash(1)};
+    auto initiator_secret{DeterministicKey(0)};
+    auto responder_secret{DeterministicKey(64)};
+    const auto initiator_key{StoredKey(initiator_secret, 1, 100)};
+    const auto responder_key{StoredKey(responder_secret, 2, 101)};
+    std::atomic<int64_t> now_micros{1'000'000};
+    CMNAuth::AsyncHooks hooks;
+    hooks.now_micros = [&] { return now_micros.load(); };
+    // Keep the production task() verifier, including for the valid responder.
+    CMNAuth::AsyncProcessor async{CMNAuth::AsyncConfig{}, std::move(hooks)};
+    const auto request = [&](int64_t peer_id, uint64_t source, bool outbound = false) {
+        return AsyncVerifyRequest(
+            peer_id, source, genesis, initiator_key, responder_key,
+            Transcript(initiator_key, responder_key, static_cast<uint32_t>(peer_id)),
+            outbound);
+    };
+    const auto finish = [&](int64_t peer_id, bool success = false) {
+        const auto completions{async.WaitForCompletions(std::chrono::seconds{5})};
+        BOOST_REQUIRE_EQUAL(completions.size(), 1U);
+        BOOST_CHECK_EQUAL(completions.front().context.peer_id, peer_id);
+        BOOST_CHECK(completions.front().error == (success
+            ? CMNAuth::CompletionError::NONE : CMNAuth::CompletionError::CRYPTO_FAILED));
+        async.CancelPeer(peer_id);
+    };
+    const auto rate_limited = [&](CMNAuth::VerifyRequest candidate) {
+        const auto result{async.EnqueueVerify(std::move(candidate))};
+        BOOST_REQUIRE(result.error == CMNAuth::AsyncError::VERIFY_ADMISSION);
+        BOOST_CHECK(result.verification_error == MNAUTHVerificationError::RATE_LIMIT);
+    };
+
+    // Drain until the inbound budget rejects an attempt, with at most 64
+    // admitted jobs so the old shared budget also reaches actual exhaustion.
+    // Cancelling each peer must not refund either rate budget.
+    unsigned admitted_inbound{0};
+    for (int64_t peer_id{1}; peer_id <= 64; ++peer_id) {
+        BOOST_REQUIRE(async.RegisterPeer(peer_id));
+        const auto result{async.EnqueueVerify(request(peer_id, 100 + (peer_id - 1) / 8))};
+        if (!result.Accepted()) {
+            BOOST_REQUIRE(result.error == CMNAuth::AsyncError::VERIFY_ADMISSION);
+            BOOST_REQUIRE(result.verification_error == MNAUTHVerificationError::RATE_LIMIT);
+            break;
+        }
+        ++admitted_inbound;
+        finish(peer_id);
+        if (peer_id == 8) {
+            BOOST_REQUIRE(async.RegisterPeer(1'000));
+            rate_limited(request(1'000, 100));
+        }
+    }
+    BOOST_CHECK_EQUAL(admitted_inbound, 56U);
+    BOOST_REQUIRE(async.RegisterPeer(1'001));
+    rate_limited(request(1'001, 999));
+
+    // A registry-attributed outbound responder still authenticates from the
+    // very same source group that exhausted its inbound allowance.
+    BOOST_REQUIRE(async.RegisterPeer(2'000));
+    auto outbound{request(2'000, 100, true)};
+    outbound.message = SignMessage(genesis, responder_secret, initiator_key,
+                                   responder_key, outbound.transcript);
+    BOOST_REQUIRE(async.EnqueueVerify(std::move(outbound)).Accepted());
+    finish(2'000, true);
+    for (int64_t peer_id{2'001}; peer_id <= 2'007; ++peer_id) {
+        BOOST_REQUIRE(async.RegisterPeer(peer_id));
+        BOOST_REQUIRE(async.EnqueueVerify(request(peer_id, 100, true)).Accepted());
+        finish(peer_id);
+    }
+    BOOST_REQUIRE(async.RegisterPeer(2'008));
+    rate_limited(request(2'008, 888, true));
+    rate_limited(request(1'001, 999));
+    BOOST_CHECK_EQUAL(async.GetStats().verify_completed, 64U);
+    BOOST_CHECK_EQUAL(async.GetStats().verify_failed, 63U);
+
+    now_micros = 61'000'000;
+    BOOST_REQUIRE(async.EnqueueVerify(request(1'001, 100)).Accepted());
+    finish(1'001);
+    BOOST_REQUIRE(async.EnqueueVerify(request(2'008, 100, true)).Accepted());
+    finish(2'008);
+    BOOST_CHECK_EQUAL(async.GetStats().verify_completed, 66U);
+}
+
+BOOST_AUTO_TEST_CASE(async_verify_queue_reserves_outbound_slot_and_schedules_fairly)
+{
+    const uint256 genesis{NonNullHash(1)};
+    auto initiator_secret{DeterministicKey(0)};
+    auto responder_secret{DeterministicKey(64)};
+    const auto initiator_key{StoredKey(initiator_secret, 1, 100)};
+    const auto responder_key{StoredKey(responder_secret, 2, 101)};
+    std::mutex mutex;
+    std::condition_variable entered_cv;
+    std::condition_variable release_cv;
+    unsigned entered{0};
+    unsigned permitted{0};
+    bool release_all{false};
+    CMNAuth::AsyncConfig config;
+    config.verify_threads = 1;
+    config.max_verify_queue = 4;
+    CMNAuth::AsyncHooks hooks;
+    hooks.now_micros = [] { return int64_t{1'000'000}; };
+    hooks.verify = [&](MNAUTHVerificationTask&) {
+        std::unique_lock lock{mutex};
+        const unsigned call{++entered};
+        entered_cv.notify_all();
+        return release_cv.wait_for(lock, std::chrono::seconds{10}, [&] {
+            return release_all || permitted >= call;
+        });
+    };
+    CMNAuth::AsyncProcessor async{config, std::move(hooks)};
+    // This must outlive failed assertions but release before async joins.
+    struct ReleaseOnExit {
+        std::mutex& mutex;
+        std::condition_variable& cv;
+        bool& release;
+        ~ReleaseOnExit()
+        {
+            {
+                std::lock_guard lock{mutex};
+                release = true;
+            }
+            cv.notify_all();
+        }
+    } release_on_exit{mutex, release_cv, release_all};
+    const auto request = [&](int64_t peer_id, bool outbound = false) {
+        return AsyncVerifyRequest(
+            peer_id, 100 + peer_id, genesis, initiator_key, responder_key,
+            Transcript(initiator_key, responder_key, static_cast<uint32_t>(peer_id)),
+            outbound);
+    };
+    const auto wait_for_call = [&](unsigned count) {
+        std::unique_lock lock{mutex};
+        BOOST_REQUIRE(entered_cv.wait_for(lock, std::chrono::seconds{2}, [&] {
+            return entered >= count;
+        }));
+    };
+    const auto release_through = [&](unsigned count) {
+        {
+            std::lock_guard lock{mutex};
+            permitted = count;
+        }
+        release_cv.notify_all();
+        wait_for_call(count + 1);
+    };
+    for (int64_t peer_id{1}; peer_id <= 8; ++peer_id) {
+        BOOST_REQUIRE(async.RegisterPeer(peer_id));
+    }
+    BOOST_REQUIRE(async.EnqueueVerify(request(1)).Accepted());
+    wait_for_call(1);
+    for (int64_t peer_id : {2, 3, 4}) {
+        BOOST_REQUIRE(async.EnqueueVerify(request(peer_id)).Accepted());
+    }
+    BOOST_REQUIRE(async.EnqueueVerify(request(5)).error ==
+                  CMNAuth::AsyncError::VERIFY_QUEUE_FULL);
+    BOOST_REQUIRE(async.EnqueueVerify(request(6, true)).Accepted());
+    BOOST_CHECK_EQUAL(async.GetStats().verify_queue_depth, 4U);
+    BOOST_CHECK_EQUAL(async.GetStats().verify_inflight, 1U);
+    BOOST_CHECK(async.EnqueueVerify(request(7, true)).error ==
+                CMNAuth::AsyncError::VERIFY_QUEUE_FULL);
+
+    release_through(1);
+    BOOST_REQUIRE(async.EnqueueVerify(request(7, true)).Accepted());
+    release_through(2);
+    BOOST_REQUIRE(async.EnqueueVerify(request(8, true)).Accepted());
+    release_through(3);
+    {
+        std::lock_guard lock{mutex};
+        release_all = true;
+    }
+    release_cv.notify_all();
+
+    std::vector<int64_t> completed_peers;
+    while (completed_peers.size() < 7) {
+        const auto completions{async.WaitForCompletions(std::chrono::seconds{2})};
+        BOOST_REQUIRE(!completions.empty());
+        for (const auto& completion : completions) {
+            BOOST_CHECK(completion.Success());
+            completed_peers.push_back(completion.context.peer_id);
+        }
+    }
+    // Outbound work overtakes the queued inbound work, but after two outbound
+    // jobs the oldest inbound job runs even with another outbound waiting.
+    const std::vector<int64_t> expected{1, 6, 7, 2, 8, 3, 4};
+    BOOST_CHECK_EQUAL_COLLECTIONS(completed_peers.begin(), completed_peers.end(),
+                                  expected.begin(), expected.end());
+    BOOST_CHECK_EQUAL(async.GetStats().verify_saturation_drops, 2U);
+    BOOST_CHECK_EQUAL(async.GetStats().verify_queue_depth, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(async_verify_reserve_requires_endpoint_and_one_attempt_per_registration)
+{
+    const uint256 genesis{NonNullHash(1)};
+    auto initiator_secret{DeterministicKey(0)};
+    auto responder_secret{DeterministicKey(64)};
+    const auto initiator_key{StoredKey(initiator_secret, 1, 100)};
+    const auto responder_key{StoredKey(responder_secret, 2, 101)};
+    CMNAuth::AsyncConfig config;
+    config.verification_admission.global_attempts_per_window = 4;
+    config.verification_admission.source_attempts_per_window = 2;
+    config.outbound_verify_attempts_per_window = 2;
+    BOOST_REQUIRE(config.IsValid());
+    CMNAuth::AsyncHooks hooks;
+    hooks.now_micros = [] { return int64_t{1'000'000}; };
+    hooks.verify = [](MNAUTHVerificationTask&) { return true; };
+    CMNAuth::AsyncProcessor async{config, std::move(hooks)};
+    uint32_t discriminator{0};
+    const auto request = [&](bool outbound) {
+        ++discriminator;
+        return AsyncVerifyRequest(
+            7, 100 + discriminator, genesis, initiator_key, responder_key,
+            Transcript(initiator_key, responder_key, discriminator), outbound);
+    };
+    const auto finish = [&] {
+        const auto completions{async.WaitForCompletions(std::chrono::seconds{2})};
+        BOOST_REQUIRE_EQUAL(completions.size(), 1U);
+        BOOST_CHECK(completions.front().Success());
+    };
+    const auto rejected = [&](CMNAuth::VerifyRequest candidate, MNAUTHVerificationError error) {
+        const auto result{async.EnqueueVerify(std::move(candidate))};
+        BOOST_REQUIRE(result.error == CMNAuth::AsyncError::VERIFY_ADMISSION);
+        BOOST_CHECK(result.verification_error == error);
+    };
+
+    BOOST_REQUIRE(async.RegisterPeer(7));
+    auto mismatched{request(true)};
+    mismatched.context.connected_service = Service(99);
+    BOOST_CHECK(async.EnqueueVerify(std::move(mismatched)).error ==
+                CMNAuth::AsyncError::INVALID_REQUEST);
+    for (const bool outbound : {false, true, false}) {
+        BOOST_REQUIRE(async.EnqueueVerify(request(outbound)).Accepted());
+        finish();
+        rejected(request(!outbound), MNAUTHVerificationError::DUPLICATE_PEER);
+        async.CancelPeer(7);
+        BOOST_REQUIRE(async.RegisterPeer(7));
+    }
+
+    rejected(request(false), MNAUTHVerificationError::RATE_LIMIT);
+    // Even a responder role and an authenticated remote identity cannot move an
+    // inbound transport into the outbound reserve.
+    auto claimed_responder{request(false)};
+    claimed_responder.context.authenticated_remote_pro_tx_hash =
+        claimed_responder.context.connection.remote.pro_tx_hash;
+    claimed_responder.transcript.signer_role = MNAUTHSignerRole::RESPONDER;
+    claimed_responder.expected_signer_role = MNAUTHSignerRole::RESPONDER;
+    claimed_responder.message.signer_role = MNAUTHSignerRole::RESPONDER;
+    claimed_responder.message.signer_pro_tx_hash =
+        claimed_responder.transcript.responder_pro_tx_hash;
+    claimed_responder.message.signer_global_key_version =
+        claimed_responder.transcript.responder_global_key_version;
+    rejected(std::move(claimed_responder), MNAUTHVerificationError::RATE_LIMIT);
+    BOOST_REQUIRE(async.EnqueueVerify(request(true)).Accepted());
+    finish();
+    async.CancelPeer(7);
+    BOOST_REQUIRE(async.RegisterPeer(7));
+    rejected(request(true), MNAUTHVerificationError::RATE_LIMIT);
+    BOOST_CHECK_EQUAL(async.GetStats().verify_completed, 4U);
 }
 
 BOOST_AUTO_TEST_CASE(shared_netgroup_admits_small_quorum_verification_burst)
