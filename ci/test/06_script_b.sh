@@ -166,7 +166,22 @@ if [ -n "$USE_VALGRIND" ]; then
 fi
 
 if [ "$RUN_UNIT_TESTS" = "true" ]; then
-  bash -c "${TEST_RUNNER_ENV} DIR_UNIT_TEST_DATA=${DIR_UNIT_TEST_DATA} LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib make $MAKEJOBS check VERBOSE=1"
+  unit_test_shard_arg=""
+  if [ -n "${CI_UNIT_TESTS_SHARD}" ]; then
+    case "${CI_UNIT_TESTS_SHARD}" in
+      [1-4]) ;;
+      *) echo "CI_UNIT_TESTS_SHARD must be 1, 2, 3 or 4" >&2; exit 1 ;;
+    esac
+    # Round-robin the sorted configured source list across four jobs. This
+    # spreads the PQ suites without relying on incomplete timing samples.
+    unit_test_sources=$(make --no-print-directory -s -C src print-unit-test-sources)
+    unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | awk -v shard="${CI_UNIT_TESTS_SHARD}" '(NR - 1) % 4 + 1 == shard')
+    test -n "${unit_test_sources}"
+    echo "Running Boost source shard ${CI_UNIT_TESTS_SHARD}/4:"
+    printf '%s\n' "${unit_test_sources}"
+    printf -v unit_test_shard_arg 'SYSCOIN_TESTS_TO_RUN=%q' "${unit_test_sources//$'\n'/ }"
+  fi
+  bash -c "${TEST_RUNNER_ENV} DIR_UNIT_TEST_DATA=${DIR_UNIT_TEST_DATA} LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib make $MAKEJOBS check VERBOSE=1 ${unit_test_shard_arg}"
 fi
 
 if [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then

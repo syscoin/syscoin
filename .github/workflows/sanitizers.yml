@@ -39,12 +39,32 @@ jobs:
           # SYSCOIN: Build plus both test phases exceeded three hours while
           # tests were still progressing. Run the complete native and
           # functional coverage in separate jobs with the same instrumentation.
-          - name: ASan + LSan + UBSan (native)
+          # Instrumented PQ tests also exceed four hours in one native job.
+          # Keep all four source shards; each retains the other make check tests.
+          - name: ASan + LSan + UBSan (native 1/4)
             file_env: ./ci/test/00_setup_env_native_asan.sh
-            # Instrumenting SLH-DSA C sources pushes native PQ tests past three hours.
             timeout: 240
             run_unit_tests: 'true'
             run_functional_tests: 'false'
+            unit_tests_shard: '1'
+          - name: ASan + LSan + UBSan (native 2/4)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: '2'
+          - name: ASan + LSan + UBSan (native 3/4)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: '3'
+          - name: ASan + LSan + UBSan (native 4/4)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: '4'
           # SYSCOIN: The full functional batch exceeded four hours even after
           # separating native tests. Partition the same enabled scripts so
           # long histories start immediately and retain all existing coverage.
@@ -53,7 +73,13 @@ jobs:
             timeout: 240
             run_unit_tests: 'false'
             run_functional_tests: 'true'
-            test_filter: '^(feature_governance|feature_governance_dynamic|feature_governance_objects)\.py'
+            test_filter: '^(feature_governance|feature_governance_objects)\.py'
+          - name: ASan + LSan + UBSan (functional governance dynamic)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            test_filter: '^feature_governance_dynamic\.py'
           - name: ASan + LSan + UBSan (functional NEVM and PQ)
             file_env: ./ci/test/00_setup_env_native_asan.sh
             timeout: 240
@@ -88,6 +114,7 @@ jobs:
     env:
       FILE_ENV: ${{ matrix.file_env }}
       RUN_UNIT_TESTS: ${{ matrix.run_unit_tests }}
+      CI_UNIT_TESTS_SHARD: ${{ matrix.unit_tests_shard }}
       RUN_FUNCTIONAL_TESTS: ${{ matrix.run_functional_tests }}
       TEST_RUNNER_FILTER: ${{ matrix.test_filter }}
     steps:

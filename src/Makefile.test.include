@@ -462,7 +462,14 @@ syscoin_test_check: $(TEST_BINARY) FORCE
 syscoin_test_clean : FORCE
 	rm -f $(CLEAN_SYSCOIN_TEST) $(test_test_syscoin_OBJECTS) $(TEST_BINARY)
 
-check-local: $(SYSCOIN_TESTS:.cpp=.cpp.test)
+# Allow CI to shard only the Boost sources, retaining every other make check test.
+SYSCOIN_TESTS_TO_RUN = $(SYSCOIN_TESTS)
+
+.PHONY: print-unit-test-sources
+print-unit-test-sources:
+	@printf '%s\n' $(sort $(filter %.cpp,$(SYSCOIN_TESTS)))
+
+check-local: $(SYSCOIN_TESTS_TO_RUN:.cpp=.cpp.test)
 if BUILD_SYSCOIN_TX
 	@echo "Running test/util/test_runner.py..."
 	$(PYTHON) $(top_builddir)/test/util/test_runner.py
