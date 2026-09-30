@@ -41,7 +41,8 @@ jobs:
           # functional coverage in separate jobs with the same instrumentation.
           - name: ASan + LSan + UBSan (native)
             file_env: ./ci/test/00_setup_env_native_asan.sh
-            timeout: 180
+            # Instrumenting SLH-DSA C sources pushes native PQ tests past three hours.
+            timeout: 240
             run_unit_tests: 'true'
             run_functional_tests: 'false'
           # SYSCOIN: The full functional batch exceeded four hours even after
