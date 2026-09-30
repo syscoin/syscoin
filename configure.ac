@@ -450,6 +450,15 @@ if test "$use_sanitizers" != ""; then
     [SANITIZER_CXXFLAGS="-fsanitize=$use_sanitizers"],
     [AC_MSG_ERROR([compiler did not accept requested flags])])
 
+  dnl The vendored SLH-DSA sources are compiled as C, using CC rather than CXX.
+  dnl Check that compiler separately and keep C++-only flags out of CFLAGS.
+  AC_LANG_PUSH([C])
+  AX_CHECK_COMPILE_FLAG(
+    [-fsanitize=$use_sanitizers],
+    [SANITIZER_CFLAGS="-fsanitize=$use_sanitizers"],
+    [AC_MSG_ERROR([C compiler did not accept requested sanitizer flags])])
+  AC_LANG_POP([C])
+
   dnl Some compilers (e.g. GCC) require additional libraries like libasan,
   dnl libtsan, libubsan, etc. Make sure linking still works with the sanitize
   dnl flag. This is a separate check so we can give a better error message when
@@ -1955,6 +1964,7 @@ AC_SUBST(HARDENED_CPPFLAGS)
 AC_SUBST(HARDENED_LDFLAGS)
 AC_SUBST(PIC_FLAGS)
 AC_SUBST(PIE_FLAGS)
+AC_SUBST(SANITIZER_CFLAGS)
 AC_SUBST(SANITIZER_CXXFLAGS)
 AC_SUBST(SANITIZER_LDFLAGS)
 AC_SUBST(SSE42_CXXFLAGS)
@@ -2072,7 +2082,7 @@ echo "  target os           = $host_os"
 echo "  build os            = $build_os"
 echo
 echo "  CC                  = $CC"
-echo "  CFLAGS              = $DEBUG_CFLAGS $PTHREAD_CFLAGS $CFLAGS"
+echo "  CFLAGS              = $DEBUG_CFLAGS $PTHREAD_CFLAGS $SANITIZER_CFLAGS $CFLAGS"
 echo "  CPPFLAGS            = $DEBUG_CPPFLAGS $HARDENED_CPPFLAGS $CORE_CPPFLAGS $CPPFLAGS"
 echo "  CXX                 = $CXX"
 echo "  CXXFLAGS            = $DEBUG_CXXFLAGS $HARDENED_CXXFLAGS $WARN_CXXFLAGS $NOWARN_CXXFLAGS $ERROR_CXXFLAGS $GPROF_CXXFLAGS $CORE_CXXFLAGS $CXXFLAGS"
