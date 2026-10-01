@@ -515,7 +515,16 @@ endif
 	  grep -E "(BOOST_FIXTURE_TEST_SUITE\\(|BOOST_AUTO_TEST_SUITE\\()" | \
 	  cut -d '(' -f 2 | cut -d ',' -f 1 | cut -d ')' -f 1 | \
 	  paste -sd, -\
-	)" -- DEBUG_LOG_OUT > "$$TEST_LOGFILE" 2>&1 || (cat "$$TEST_LOGFILE" && false)
+	)" -- DEBUG_LOG_OUT > "$$TEST_LOGFILE" 2>&1 && { \
+	  if test "$$GITHUB_ACTIONS" = true; then \
+	    (printf 'Completed tests from %s\n' "src/$*.cpp") || true; \
+	  fi; \
+	} || ( \
+	  if test "$$GITHUB_ACTIONS" = true; then \
+	    $(PYTHON) "$(top_srcdir)/test/util/ci-test-log.py" "src/$*.cpp" "$$TEST_LOGFILE" || true; \
+	  fi; \
+	  cat "$$TEST_LOGFILE" && false \
+	)
 
 test/data/%.json.h: test/data/%.json
 	@$(MKDIR_P) $(@D)
