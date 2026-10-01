@@ -124,8 +124,14 @@ class TestRecipe(unittest.TestCase):
         fragment = (ROOT / 'src/Makefile.test.include').read_text()
         self.recipe = fragment[fragment.index('%.cpp.test: %.cpp'):fragment.index('\ntest/data/%.json.h:')]
         redirect = ' > "$$TEST_LOGFILE" 2>&1'
-        end = self.recipe.index(redirect) + len(redirect)
-        self.original = self.recipe[:end] + ' || (cat "$$TEST_LOGFILE" && false)\n'
+        baseline_recipe = self.recipe
+        progress_start = baseline_recipe.find('\tci_progress_pid=;')
+        if progress_start != -1:
+            command_start = baseline_recipe.index('\t$(TEST_BINARY)', progress_start)
+            group_start = baseline_recipe.rfind('\t{ ' + chr(92) + '\n', 0, progress_start)
+            baseline_recipe = baseline_recipe[:group_start] + baseline_recipe[command_start:]
+        end = baseline_recipe.index(redirect) + len(redirect)
+        self.original = baseline_recipe[:end] + ' || (cat "$$TEST_LOGFILE" && false)\n'
         self.env = {**os.environ, 'PAYLOAD': str(self.payload_file)}
         for name in ('MAKEFLAGS', 'MFLAGS', 'GITHUB_ACTIONS'):
             self.env.pop(name, None)

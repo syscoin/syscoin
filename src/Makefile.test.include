@@ -510,12 +510,33 @@ endif
 	$(AM_V_at)export TEST_LOGFILE=$(abs_builddir)/$$(\
 	  echo $< | grep -E -o "(wallet/test/.*\.cpp|test/.*\.cpp)" | $(SED) -e s/\.cpp/.log/ \
 	) && \
+	{ \
+	ci_progress_pid=; \
+	ci_stop_progress() { \
+	  test -n "$$ci_progress_pid" || return 0; \
+	  kill "$$ci_progress_pid" 2>/dev/null || true; \
+	  for ci_progress_attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+	    kill -0 "$$ci_progress_pid" 2>/dev/null || break; sleep 0.05; \
+	  done; \
+	  if kill -0 "$$ci_progress_pid" 2>/dev/null; then kill -KILL "$$ci_progress_pid" 2>/dev/null || true; fi; \
+	  for ci_progress_attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+	    kill -0 "$$ci_progress_pid" 2>/dev/null || break; sleep 0.05; \
+	  done; \
+	  if ! kill -0 "$$ci_progress_pid" 2>/dev/null; then wait "$$ci_progress_pid" 2>/dev/null || true; fi; \
+	}; \
+	if test "$$GITHUB_ACTIONS" = true && test -n "$$CI_UNIT_TESTS_SHARD" && test "$*" = test/pq_registry_tests; then \
+	  trap 'ci_progress_status=$$?; trap - 0; ci_stop_progress; exit "$$ci_progress_status"' 0; \
+	  if : > "$$TEST_LOGFILE"; then \
+	    $(PYTHON) "$(top_srcdir)/test/util/ci-test-progress.py" --mode native --path "$$TEST_LOGFILE" --parent-pid "$$$$" & ci_progress_pid=$$!; \
+	  fi; \
+	fi; \
 	$(TEST_BINARY) --catch_system_errors=no -l test_suite -t "$$(\
 	  cat $< | \
 	  grep -E "(BOOST_FIXTURE_TEST_SUITE\\(|BOOST_AUTO_TEST_SUITE\\()" | \
 	  cut -d '(' -f 2 | cut -d ',' -f 1 | cut -d ')' -f 1 | \
 	  paste -sd, -\
-	)" -- DEBUG_LOG_OUT > "$$TEST_LOGFILE" 2>&1 && { \
+	)" -- DEBUG_LOG_OUT > "$$TEST_LOGFILE" 2>&1; \
+	} && { \
 	  if test "$$GITHUB_ACTIONS" = true; then \
 	    (printf 'Completed tests from %s\n' "src/$*.cpp") || true; \
 	  fi; \

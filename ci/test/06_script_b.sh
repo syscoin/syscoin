@@ -189,7 +189,44 @@ if [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then
 fi
 
 if [ "$RUN_FUNCTIONAL_TESTS" = "true" ]; then
-  bash -c "LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib ${TEST_RUNNER_ENV} test/functional/test_runner.py --ci $MAKEJOBS --tmpdirprefix ${BASE_SCRATCH_DIR}/test_runner/ --ansi --combinedlogslen=99999999 --timeout-factor=${TEST_RUNNER_TIMEOUT_FACTOR} ${TEST_RUNNER_EXTRA} --failfast"
+  functional_progress_pid=""
+  functional_progress_dir=""
+  # This isolated, stateful test already logs its phases. Forward those logs
+  # independently so a job-level timeout does not hide the last phase reached.
+  if [[ "${GITHUB_ACTIONS}" == "true" && "${TEST_RUNNER_FILTER}" == '^feature_governance_dynamic\.py' ]]; then
+    if functional_progress_dir=$(mktemp -d); then
+      python3 "${BASE_ROOT_DIR}/test/util/ci-test-progress.py" \
+        --mode functional --path "${BASE_SCRATCH_DIR}/test_runner/" \
+        --parent-pid "$$" --ready-file "${functional_progress_dir}/ready" &
+      functional_progress_pid=$!
+      # Wait only for the old-log snapshot, never for diagnostic availability.
+      for ((attempt = 0; attempt < 20; ++attempt)); do
+        if [[ -e "${functional_progress_dir}/ready" ]] || ! kill -0 "${functional_progress_pid}" 2>/dev/null; then break; fi
+        sleep 0.1
+      done
+    fi
+  fi
+  functional_test_status=0
+  bash -c "LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib ${TEST_RUNNER_ENV} test/functional/test_runner.py --ci $MAKEJOBS --tmpdirprefix ${BASE_SCRATCH_DIR}/test_runner/ --ansi --combinedlogslen=99999999 --timeout-factor=${TEST_RUNNER_TIMEOUT_FACTOR} ${TEST_RUNNER_EXTRA} --failfast" || functional_test_status=$?
+  if [[ -n "${functional_progress_pid}" ]]; then
+    kill -TERM "${functional_progress_pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 20; ++attempt)); do
+      if ! kill -0 "${functional_progress_pid}" 2>/dev/null; then break; fi
+      sleep 0.1
+    done
+    if kill -0 "${functional_progress_pid}" 2>/dev/null; then
+      kill -KILL "${functional_progress_pid}" 2>/dev/null || true
+    fi
+    if ! kill -0 "${functional_progress_pid}" 2>/dev/null; then
+      wait "${functional_progress_pid}" 2>/dev/null || true
+    fi
+  fi
+  if [[ -n "${functional_progress_dir}" ]]; then
+    rm -f "${functional_progress_dir}/ready" || true
+    rmdir "${functional_progress_dir}" || true
+  fi
+  # Preserve the runner's status after diagnostic cleanup and the ERR trap.
+  (exit "${functional_test_status}")
 fi
 
 if [ "${RUN_TIDY}" = "true" ]; then
