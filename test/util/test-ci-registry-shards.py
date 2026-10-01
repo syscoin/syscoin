@@ -122,6 +122,25 @@ class TestRegistryRecipe(unittest.TestCase):
         self.assertEqual(self.arguments(), ['--catch_system_errors=no', '-l', 'test_suite',
             '-t', SUITE, '--', 'DEBUG_LOG_OUT'])
 
+    def test_case_selection_is_outside_command_substitution(self):
+        # Older macOS /bin/sh cannot parse this case form inside $(...).
+        recipe = self.recipe.recipe.replace('\\\n', '')
+        self.assertNotRegex(recipe, r'\$\$\(\s*case\b')
+        self.assertIn('-t "$$ci_test_filter" -- DEBUG_LOG_OUT', recipe)
+
+    def test_failed_logfile_export_does_not_run_binary(self):
+        logfile = self.recipe.src / 'test/pq_registry_tests.log'
+        logfile.write_bytes(self.recipe.payload)
+        shell = self.recipe.directory / 'shell-with-failed-export'
+        shell.write_text('#!/bin/bash\nexport() { return 7; }\n'
+                         'test "$1" = -c || exit 98\neval "$2"\n')
+        shell.chmod(0o755)
+        result = self.run_mode('population', status=0, shell=shell,
+                               extra_env={'TEST_LOGFILE': str(logfile)})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.capture.exists())
+        self.assertNotIn(b'Completed tests from', result.stdout)
+
     def test_exact_partition_filters_in_dash_and_bash(self):
         for shell in ('/bin/dash', '/bin/bash'):
             for mode, expected in (('population', CASE_FILTER), ('remaining', REMAINING_FILTER)):

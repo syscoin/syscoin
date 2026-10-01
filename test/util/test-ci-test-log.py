@@ -125,13 +125,15 @@ class TestRecipe(unittest.TestCase):
         self.recipe = fragment[fragment.index('%.cpp.test: %.cpp'):fragment.index('\ntest/data/%.json.h:')]
         redirect = ' > "$$TEST_LOGFILE" 2>&1'
         baseline_recipe = self.recipe
+        group_end = ''
         progress_start = baseline_recipe.find('\tci_progress_pid=;')
         if progress_start != -1:
-            command_start = baseline_recipe.index('\t$(TEST_BINARY)', progress_start)
+            command_start = baseline_recipe.index('\tcase "$(SYSCOIN_PQ_REGISTRY_CASES):$*" in', progress_start)
             group_start = baseline_recipe.rfind('\t{ ' + chr(92) + '\n', 0, progress_start)
-            baseline_recipe = baseline_recipe[:group_start] + baseline_recipe[command_start:]
+            baseline_recipe = baseline_recipe[:group_start] + '\t{ ' + chr(92) + '\n' + baseline_recipe[command_start:]
+            group_end = '; ' + chr(92) + '\n\t}'
         end = baseline_recipe.index(redirect) + len(redirect)
-        self.original = baseline_recipe[:end] + ' || (cat "$$TEST_LOGFILE" && false)\n'
+        self.original = baseline_recipe[:end] + group_end + ' || (cat "$$TEST_LOGFILE" && false)\n'
         self.env = {**os.environ, 'PAYLOAD': str(self.payload_file)}
         for name in ('MAKEFLAGS', 'MFLAGS', 'GITHUB_ACTIONS'):
             self.env.pop(name, None)

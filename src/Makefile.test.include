@@ -536,16 +536,17 @@ endif
 	    $(PYTHON) "$(top_srcdir)/test/util/ci-test-progress.py" --mode native --path "$$TEST_LOGFILE" --parent-pid "$$$$" & ci_progress_pid=$$!; \
 	  fi; \
 	fi; \
-	$(TEST_BINARY) --catch_system_errors=no -l test_suite -t "$$(\
-	  case "$(SYSCOIN_PQ_REGISTRY_CASES):$*" in \
-	    population:test/pq_registry_tests) printf '%s\n' 'pq_registry_tests/authenticated_new_population_replaces_only_refreshed_recovery_source' ;; \
-	    remaining:test/pq_registry_tests) printf '%s\n' 'pq_registry_tests:!pq_registry_tests/authenticated_new_population_replaces_only_refreshed_recovery_source' ;; \
-	    *) cat $< | \
+	case "$(SYSCOIN_PQ_REGISTRY_CASES):$*" in \
+	  population:test/pq_registry_tests) ci_test_filter='pq_registry_tests/authenticated_new_population_replaces_only_refreshed_recovery_source' ;; \
+	  remaining:test/pq_registry_tests) ci_test_filter='pq_registry_tests:!pq_registry_tests/authenticated_new_population_replaces_only_refreshed_recovery_source' ;; \
+	  *) ci_test_filter="$$(\
+	      cat $< | \
 	      grep -E "(BOOST_FIXTURE_TEST_SUITE\\(|BOOST_AUTO_TEST_SUITE\\()" | \
 	      cut -d '(' -f 2 | cut -d ',' -f 1 | cut -d ')' -f 1 | \
-	      paste -sd, - ;; \
-	  esac\
-	)" -- DEBUG_LOG_OUT > "$$TEST_LOGFILE" 2>&1; \
+	      paste -sd, -\
+	    )" ;; \
+	esac; \
+	$(TEST_BINARY) --catch_system_errors=no -l test_suite -t "$$ci_test_filter" -- DEBUG_LOG_OUT > "$$TEST_LOGFILE" 2>&1; \
 	} && { \
 	  if test "$$GITHUB_ACTIONS" = true; then \
 	    (printf 'Completed tests from %s\n' "src/$*.cpp") || true; \
