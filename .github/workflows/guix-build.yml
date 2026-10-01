@@ -5,6 +5,8 @@ permissions:
 
 on:
   push:
+    branches-ignore:
+      - 'codex/diagnostics/pq-signing-67ddd5e0'
   workflow_dispatch:
 
 jobs:

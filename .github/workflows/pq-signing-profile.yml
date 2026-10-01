@@ -1,0 +1,46 @@
+# Diagnostic branch only; this workflow is not a replacement for PR609 CI.
+name: Bounded PQ signing profile
+on:
+  push:
+    branches:
+      - 'codex/diagnostics/pq-signing-67ddd5e0'
+    tags-ignore:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout diagnostic
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify pinned production inputs
+        run: |
+          test "$(git rev-parse HEAD^)" = 67ddd5e05a8f63af0d8dd46ae0ab3ef317515145
+          git diff --exit-code HEAD^ HEAD -- src configure.ac ci/test test/sanitizer_suppressions
+      - name: Profile with the existing sanitizer container and runner class
+        run: |
+          mkdir -p "$RUNNER_TEMP/pq-signing-profile"
+          profile_container="pq-signing-profile-$GITHUB_RUN_ID"
+          trap 'docker rm --force "$profile_container" >/dev/null 2>&1 || true' EXIT
+          timeout --kill-after=10s 25m docker run --rm --name "$profile_container" --cap-add SYS_PTRACE \
+            -v "$GITHUB_WORKSPACE:/source:ro" \
+            -v "$RUNNER_TEMP/pq-signing-profile:/output" \
+            -w /source mirror.gcr.io/ubuntu:24.04 \
+            bash ci/profile/run-pq-signing.sh
+      - name: Upload bounded diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pq-signing-profile
+          path: |
+            ${{ runner.temp }}/pq-signing-profile/driver.log
+            ${{ runner.temp }}/pq-signing-profile/metrics.jsonl
+          if-no-files-found: warn
+          retention-days: 7

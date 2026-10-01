@@ -10,6 +10,7 @@ on:
   push:
     branches:
       - '**'
+      - '!codex/diagnostics/pq-signing-67ddd5e0'
     tags-ignore:
       - '**'
 
