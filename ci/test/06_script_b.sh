@@ -169,17 +169,32 @@ if [ "$RUN_UNIT_TESTS" = "true" ]; then
   unit_test_shard_arg=""
   if [ -n "${CI_UNIT_TESTS_SHARD}" ]; then
     case "${CI_UNIT_TESTS_SHARD}" in
-      [1-4]) ;;
-      *) echo "CI_UNIT_TESTS_SHARD must be 1, 2, 3 or 4" >&2; exit 1 ;;
+      [1-4]|registry-population|chainlock-integration) ;;
+      *) echo "CI_UNIT_TESTS_SHARD must be 1, 2, 3, 4, registry-population or chainlock-integration" >&2; exit 1 ;;
     esac
-    # Round-robin the sorted configured source list across four jobs. This
-    # spreads the PQ suites without relying on incomplete timing samples.
     unit_test_sources=$(make --no-print-directory -s -C src print-unit-test-sources)
-    unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | awk -v shard="${CI_UNIT_TESTS_SHARD}" '(NR - 1) % 4 + 1 == shard')
+    if [ "${CI_UNIT_TESTS_SHARD}" = registry-population ]; then
+      # Keep the full real-crypto population scenario on an otherwise separate
+      # runner. All other registry cases remain in the ordinary source shards.
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | grep -Fx 'test/pq_registry_tests.cpp')
+      registry_cases=population
+      echo "Running isolated Boost registry population case:"
+    elif [ "${CI_UNIT_TESTS_SHARD}" = chainlock-integration ]; then
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | grep -Fx 'test/pq_chainlock_integration_tests.cpp')
+      registry_cases=""
+      echo "Running isolated Boost ChainLock integration source:"
+    else
+      # Round-robin the same configured sources. Exclude only the dedicated
+      # population case wherever the registry source lands in this ordering.
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | awk -v shard="${CI_UNIT_TESTS_SHARD}" '(NR - 1) % 4 + 1 == shard')
+      # Filter after assignment so moving this source does not reshuffle others.
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | grep -Fvx 'test/pq_chainlock_integration_tests.cpp')
+      registry_cases=remaining
+      echo "Running Boost source shard ${CI_UNIT_TESTS_SHARD}/4:"
+    fi
     test -n "${unit_test_sources}"
-    echo "Running Boost source shard ${CI_UNIT_TESTS_SHARD}/4:"
     printf '%s\n' "${unit_test_sources}"
-    printf -v unit_test_shard_arg 'SYSCOIN_TESTS_TO_RUN=%q' "${unit_test_sources//$'\n'/ }"
+    printf -v unit_test_shard_arg 'SYSCOIN_TESTS_TO_RUN=%q SYSCOIN_PQ_REGISTRY_CASES=%q' "${unit_test_sources//$'\n'/ }" "${registry_cases}"
   fi
   bash -c "${TEST_RUNNER_ENV} DIR_UNIT_TEST_DATA=${DIR_UNIT_TEST_DATA} LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib make $MAKEJOBS check VERBOSE=1 ${unit_test_shard_arg}"
 fi

@@ -37,7 +37,8 @@ INFO = b'2026-10-01T00:00:00.000Z TestFramework (INFO): Create superblock\n'
 
 class TestRecords(unittest.TestCase):
     def test_native_markers_and_noise(self):
-        for raw in (ENTER, LEAVE, PHASE):
+        for raw in (ENTER, LEAVE, PHASE, b'PQ integration member key generation: through 2000 keys\n',
+                    b'PQ integration full-dimension scenario: complete\n'):
             result = PROGRESS.progress_record('native', 12.34, raw)
             self.assertTrue(result.startswith(b'CI progress native +12.3s | '))
         for raw in (b'', b'ordinary debug line', INFO, b'Entering test suite "pq_registry_tests"'):

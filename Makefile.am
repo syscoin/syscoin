@@ -331,6 +331,7 @@ EXTRA_DIST += \
     test/util/ci-test-log.py \
     test/util/ci-test-progress.py \
     test/util/test-ci-test-progress.py \
+    test/util/test-ci-registry-shards.py \
     test/util/test-ci-test-log.py \
     test/util/test_runner.py \
     test/util/data/syscoin-util-test.json \

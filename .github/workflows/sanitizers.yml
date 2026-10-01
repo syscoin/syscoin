@@ -65,6 +65,24 @@ jobs:
             run_unit_tests: 'true'
             run_functional_tests: 'false'
             unit_tests_shard: '4'
+          # Registry timings show substantial work before the population case.
+          # Give that unchanged case its own job; the four source shards retain
+          # every other case. Its complete instrumented runtime is still unknown.
+          - name: ASan + LSan + UBSan (native registry population)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            # Bounded standalone measurement; completion within this cap is not established.
+            timeout: 360
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: 'registry-population'
+          # Keep the stateful integration test intact, with no concurrent native
+          # sources competing for its workers. Runtime remains runner-dependent.
+          - name: ASan + LSan + UBSan (native chainlock integration)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: 'chainlock-integration'
           # SYSCOIN: The full functional batch exceeded four hours even after
           # separating native tests. Partition the same enabled scripts so
           # long histories start immediately and retain all existing coverage.
@@ -74,9 +92,11 @@ jobs:
             run_unit_tests: 'false'
             run_functional_tests: 'true'
             test_filter: '^(feature_governance|feature_governance_objects)\.py'
+          # Same-head phase timings project about 269 minutes on the slower
+          # runner; allow headroom without dropping the stateful transition checks.
           - name: ASan + LSan + UBSan (functional governance dynamic)
             file_env: ./ci/test/00_setup_env_native_asan.sh
-            timeout: 240
+            timeout: 300
             run_unit_tests: 'false'
             run_functional_tests: 'true'
             test_filter: '^feature_governance_dynamic\.py'

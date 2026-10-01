@@ -22,7 +22,7 @@ MAX_LINE_BYTES = 8192
 MAX_FILES = 16
 FUNCTIONAL_GLOB = 'test_runner_*/feature_governance_dynamic_*/test_framework.log'
 ANSI_ESCAPE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
-NATIVE = re.compile(r'(?:^|: )(?:(?:Entering|Leaving) test case "[A-Za-z0-9_]+"|PQ population )')
+NATIVE = re.compile(r'(?:^|: )(?:(?:Entering|Leaving) test case "[A-Za-z0-9_]+"|PQ (?:population|integration) )')
 FUNCTIONAL = re.compile(r'\((?:INFO|WARNING|ERROR)\):')
 
 

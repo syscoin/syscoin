@@ -318,6 +318,7 @@ bool GenerateMemberKeys(
     FullDimensionFixture& fixture,
     std::size_t key_epochs = ACTIVE_QUORUMS + 1)
 {
+    BOOST_TEST_MESSAGE("PQ integration member key generation: through " << key_epochs * QUORUM_MIN_VALID << " keys");
     if (key_epochs * QUORUM_MIN_VALID > CHILD_KEY_COUNT) return false;
     for (std::size_t member{0}; member < QUORUM_MIN_VALID; ++member) {
         fixture.member_indices.emplace(NonNullHash(10'000 + member), member);
@@ -490,6 +491,7 @@ bool BuildRostersAndStatement(FullDimensionFixture& fixture, bool initialize = f
 
 bool BuildAndSignShares(FullDimensionFixture& fixture)
 {
+    BOOST_TEST_MESSAGE("PQ integration ChainLock share signing: " << FINAL_SIGNATURE_COUNT << " shares");
     struct SignerPosition {
         std::size_t quorum_slot{0};
         uint16_t member_index{0};
@@ -611,6 +613,7 @@ bool BuildAndSignPaymentAuditShares(
     const PaymentAuditStatement& statement,
     std::vector<PaymentAuditShare>& shares)
 {
+    BOOST_TEST_MESSAGE("PQ integration payment audit share signing: " << PAYMENT_AUDIT_SIGNATURE_COUNT << " shares");
     if (!fixture.rosters || !statement.IsStructurallyValid()) return false;
     shares.clear();
     shares.resize(PAYMENT_AUDIT_SIGNATURE_COUNT);
@@ -704,6 +707,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
 {
     auto fixture{MakeFullDimensionFixture()};
     BOOST_REQUIRE(fixture);
+    BOOST_TEST_MESSAGE("PQ integration initial fixture: complete");
     BOOST_REQUIRE(fixture->rosters);
     BOOST_REQUIRE_EQUAL(fixture->shares.size(), FINAL_SIGNATURE_COUNT);
 
@@ -892,6 +896,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
     auto prepared_final{PrepareFinalChainLockVerification(
         decoded, *collector_context, &verification_error)};
     BOOST_REQUIRE(prepared_final);
+    BOOST_TEST_MESSAGE("PQ integration ChainLock verification: valid then corrupted certificate");
     BOOST_CHECK(verifier.VerifyChecks(std::move(prepared_final->checks)));
     BOOST_CHECK(verification_error == ChainLockVerificationError::NONE);
     auto corrupted{decoded};
@@ -1098,6 +1103,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         audit_collector_context->RosterSetPtr(), fixture->authorization,
         &audit_error)};
     BOOST_REQUIRE(prepared_audit);
+    BOOST_TEST_MESSAGE("PQ integration payment audit verification: valid then corrupted certificate");
     BOOST_CHECK(verifier.VerifyChecks(std::move(prepared_audit->checks)));
     BOOST_CHECK(audit_error == PaymentAuditVerificationError::NONE);
     auto corrupted_audit{decoded_audit};
@@ -1158,6 +1164,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
 
     // Independent receivers rebuild the frozen rosters and authorization;
     // neither gets the collector's verified capability or signature cache.
+    BOOST_TEST_MESSAGE("PQ integration initialization receiver verification: 2 receivers");
     for (unsigned receiver{0}; receiver < 2; ++receiver) {
         BOOST_REQUIRE(BuildRostersAndStatement(*fixture, /*initialize=*/true));
         BOOST_CHECK(fixture->statement == later_decoded.statement);
@@ -1174,6 +1181,7 @@ BOOST_AUTO_TEST_CASE(full_dimension_builder_collector_wire_and_verifier)
         ChainLockVerifier receiver_verifier{TestWorkerCount()};
         BOOST_CHECK(receiver_verifier.VerifyChecks(std::move(prepared_later->checks)));
     }
+    BOOST_TEST_MESSAGE("PQ integration full-dimension scenario: complete");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

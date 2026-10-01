@@ -464,6 +464,8 @@ syscoin_test_clean : FORCE
 
 # Allow CI to shard only the Boost sources, retaining every other make check test.
 SYSCOIN_TESTS_TO_RUN = $(SYSCOIN_TESTS)
+# Empty preserves the ordinary suite run; CI splits one registry case across jobs.
+SYSCOIN_PQ_REGISTRY_CASES =
 
 .PHONY: print-unit-test-sources
 print-unit-test-sources:
@@ -511,6 +513,10 @@ endif
 	  echo $< | grep -E -o "(wallet/test/.*\.cpp|test/.*\.cpp)" | $(SED) -e s/\.cpp/.log/ \
 	) && \
 	{ \
+	case "$(SYSCOIN_PQ_REGISTRY_CASES)" in \
+	  ''|population|remaining) ;; \
+	  *) echo "SYSCOIN_PQ_REGISTRY_CASES must be empty, population or remaining" >&2; exit 1 ;; \
+	esac; \
 	ci_progress_pid=; \
 	ci_stop_progress() { \
 	  test -n "$$ci_progress_pid" || return 0; \
@@ -524,17 +530,21 @@ endif
 	  done; \
 	  if ! kill -0 "$$ci_progress_pid" 2>/dev/null; then wait "$$ci_progress_pid" 2>/dev/null || true; fi; \
 	}; \
-	if test "$$GITHUB_ACTIONS" = true && test -n "$$CI_UNIT_TESTS_SHARD" && test "$*" = test/pq_registry_tests; then \
+	if test "$$GITHUB_ACTIONS" = true && test -n "$$CI_UNIT_TESTS_SHARD" && { test "$*" = test/pq_registry_tests || test "$*" = test/pq_chainlock_integration_tests; }; then \
 	  trap 'ci_progress_status=$$?; trap - 0; ci_stop_progress; exit "$$ci_progress_status"' 0; \
 	  if : > "$$TEST_LOGFILE"; then \
 	    $(PYTHON) "$(top_srcdir)/test/util/ci-test-progress.py" --mode native --path "$$TEST_LOGFILE" --parent-pid "$$$$" & ci_progress_pid=$$!; \
 	  fi; \
 	fi; \
 	$(TEST_BINARY) --catch_system_errors=no -l test_suite -t "$$(\
-	  cat $< | \
-	  grep -E "(BOOST_FIXTURE_TEST_SUITE\\(|BOOST_AUTO_TEST_SUITE\\()" | \
-	  cut -d '(' -f 2 | cut -d ',' -f 1 | cut -d ')' -f 1 | \
-	  paste -sd, -\
+	  case "$(SYSCOIN_PQ_REGISTRY_CASES):$*" in \
+	    population:test/pq_registry_tests) printf '%s\n' 'pq_registry_tests/authenticated_new_population_replaces_only_refreshed_recovery_source' ;; \
+	    remaining:test/pq_registry_tests) printf '%s\n' 'pq_registry_tests:!pq_registry_tests/authenticated_new_population_replaces_only_refreshed_recovery_source' ;; \
+	    *) cat $< | \
+	      grep -E "(BOOST_FIXTURE_TEST_SUITE\\(|BOOST_AUTO_TEST_SUITE\\()" | \
+	      cut -d '(' -f 2 | cut -d ',' -f 1 | cut -d ')' -f 1 | \
+	      paste -sd, - ;; \
+	  esac\
 	)" -- DEBUG_LOG_OUT > "$$TEST_LOGFILE" 2>&1; \
 	} && { \
 	  if test "$$GITHUB_ACTIONS" = true; then \
