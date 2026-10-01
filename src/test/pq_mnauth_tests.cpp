@@ -3568,15 +3568,40 @@ BOOST_AUTO_TEST_CASE(async_runnable_signing_has_priority_and_governance_uses_ack
     }
     hook_release_cv.notify_all();
 
+    // The injected clock isolates expiry, but the hook still signs with SLH.
+    // Use the live signer's wall-clock budget for the actual crypto waits.
+    const auto signing_timeout{std::chrono::duration_cast<std::chrono::milliseconds>(
+        CMNAuth::AsyncConfig{}.sign_timeout)};
+    const auto wait_for_sign_completion = [&](std::string_view phase) {
+        auto completions{async.WaitForCompletions(signing_timeout)};
+        const auto stats{async.GetStats()};
+        const auto signing_stats{GetActiveMasternodeGlobalSigningStats()};
+        // Report the state before failure cleanup cancels peers. Keep this
+        // nonfatal so the governance thread is joined before any fatal check.
+        BOOST_CHECK_MESSAGE(completions.size() == 1,
+            phase << " completed=" << stats.sign_completed
+            << " completions=" << completions.size()
+            << " queued=" << stats.sign_queue_depth
+            << " inflight=" << stats.sign_inflight
+            << " failed=" << stats.sign_failed
+            << " expired_before_execution=" << stats.sign_expired_before_execution
+            << " cancelled=" << stats.cancelled_jobs
+            << " max_latency_us=" << stats.sign_latency_max_micros
+            << " active_signers=" << signing_stats.active_operations
+            << " mnauth_waiters=" << signing_stats.mnauth_waiters
+            << " governance_waiters=" << signing_stats.governance_waiters
+            << " mnauth_demands=" << signing_stats.mnauth_demands);
+        return completions;
+    };
     auto first_completion{
-        async.WaitForCompletions(std::chrono::seconds{40})};
+        wait_for_sign_completion("first MNAUTH")};
     ActiveMasternodeGlobalSigningStats ack_gap_stats;
     bool governance_used_idle_slot{false};
     if (first_completion.size() == 1) {
         // The queued successor cannot run until the real result is consumed.
         // Governance must finish without acknowledging or cancelling it.
         governance_used_idle_slot = governance_ready.wait_for(
-            std::chrono::seconds{30}) == std::future_status::ready;
+            signing_timeout) == std::future_status::ready;
         ack_gap_stats = GetActiveMasternodeGlobalSigningStats();
         BOOST_CHECK_EQUAL(mnauth_calls.load(std::memory_order_acquire), 1);
         async.AcknowledgeSignCompletion(
@@ -3591,7 +3616,7 @@ BOOST_AUTO_TEST_CASE(async_runnable_signing_has_priority_and_governance_uses_ack
     std::vector<CMNAuth::Completion> second_completion;
     if (first_completion.size() == 1) {
         second_completion =
-            async.WaitForCompletions(std::chrono::seconds{40});
+            wait_for_sign_completion("second MNAUTH");
         if (second_completion.size() == 1) {
             async.AcknowledgeSignCompletion(
                 second_completion.front().context.peer_id,
@@ -4057,13 +4082,44 @@ BOOST_FIXTURE_TEST_CASE(live_validation_backpressure_progresses_before_mnauth_ac
     } cleanup{fixture.peerman, registered_nodes, broadcaster, original_sync_mode,
               message_handler, callback_mutex, callback_cv, release_callback};
     masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
-    const auto wait_until = [](const auto& predicate) {
-        const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{30}};
+    const auto wait_until = [](const auto& predicate,
+                               std::chrono::microseconds timeout = std::chrono::seconds{30}) {
+        const auto deadline{std::chrono::steady_clock::now() + timeout};
         while (!predicate()) {
             if (std::chrono::steady_clock::now() >= deadline) return false;
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
         return true;
+    };
+    // This test uses the live signer, not CompletionPublicationFixture::Hooks().
+    // Give real SLH operations the executor's signing budget, including under
+    // sanitizers. Keep the shorter waits for non-crypto synchronization below.
+    const auto signing_timeout{CMNAuth::AsyncConfig{}.sign_timeout};
+    const auto wait_for_sign_completion = [&](uint64_t expected_completed) {
+        CMNAuthAsyncStats stats;
+        const bool ready{wait_until([&] {
+            stats = fixture.peerman.GetMNAuthAsyncStats();
+            return stats.sign_completed == expected_completed &&
+                   stats.completion_queue_depth == 1;
+        }, signing_timeout)};
+        const auto signing_stats{GetActiveMasternodeGlobalSigningStats()};
+        BOOST_TEST_CONTEXT("expected=" << expected_completed
+            << " completed=" << stats.sign_completed
+            << " completions=" << stats.completion_queue_depth
+            << " queued=" << stats.sign_queue_depth
+            << " inflight=" << stats.sign_inflight
+            << " failed=" << stats.sign_failed
+            << " expired_before_execution=" << stats.sign_expired_before_execution
+            << " cancelled=" << stats.cancelled_jobs
+            << " max_latency_us=" << stats.sign_latency_max_micros
+            << " active_signers=" << signing_stats.active_operations
+            << " mnauth_waiters=" << signing_stats.mnauth_waiters
+            << " governance_waiters=" << signing_stats.governance_waiters
+            << " mnauth_demands=" << signing_stats.mnauth_demands) {
+            BOOST_REQUIRE(ready);
+            // Completion counters also include failed or expired operations.
+            BOOST_REQUIRE_EQUAL(stats.sign_failed, 0U);
+        }
     };
     const auto begin_handshake = [&](NodeId id) {
         auto* node = new CNode{
@@ -4094,10 +4150,7 @@ BOOST_FIXTURE_TEST_CASE(live_validation_backpressure_progresses_before_mnauth_ac
         BOOST_REQUIRE(node->GetMNAuthPending().phase == CMNAuthPendingPhase::SIGN_PENDING);
     };
     begin_handshake(100);
-    BOOST_REQUIRE(wait_until([&] {
-        const auto stats{fixture.peerman.GetMNAuthAsyncStats()};
-        return stats.sign_completed == 1 && stats.completion_queue_depth == 1;
-    }));
+    wait_for_sign_completion(1);
     begin_handshake(101);
     BOOST_REQUIRE_EQUAL(fixture.peerman.GetMNAuthAsyncStats().sign_queue_depth, 1U);
     BOOST_REQUIRE_EQUAL(GetActiveMasternodeGlobalSigningStats().mnauth_demands, 0U);
@@ -4187,7 +4240,8 @@ BOOST_FIXTURE_TEST_CASE(live_validation_backpressure_progresses_before_mnauth_ac
         release_callback = true;
     }
     callback_cv.notify_all();
-    BOOST_REQUIRE(message_result.wait_for(std::chrono::seconds{30}) == std::future_status::ready);
+    // This wait includes the validation callback's real governance signature.
+    BOOST_REQUIRE(message_result.wait_for(signing_timeout) == std::future_status::ready);
     message_result.get();
     message_handler.join();
     BOOST_CHECK(!callback_timed_out);
@@ -4203,10 +4257,7 @@ BOOST_FIXTURE_TEST_CASE(live_validation_backpressure_progresses_before_mnauth_ac
     // The first acknowledgement was supplied by the ordinary pump, after
     // live validation finished. Let its successor finish, then retain the
     // existing early-interruption control for the remaining completion.
-    BOOST_REQUIRE(wait_until([&] {
-        const auto stats{fixture.peerman.GetMNAuthAsyncStats()};
-        return stats.sign_completed == 2 && stats.completion_queue_depth == 1;
-    }));
+    wait_for_sign_completion(2);
     BOOST_CHECK(registered_nodes.back()->fDisconnect);
     BOOST_CHECK_EQUAL(fixture.peerman.GetMNAuthAsyncStats().cancelled_jobs, 0U);
     ::Interrupt(m_node);
