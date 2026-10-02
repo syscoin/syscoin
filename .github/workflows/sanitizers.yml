@@ -75,6 +75,7 @@ jobs:
             run_unit_tests: 'true'
             run_functional_tests: 'false'
             unit_tests_shard: 'registry-population'
+            pq_crypto_workers: '4'
           # Keep the stateful integration test intact, with no concurrent native
           # sources competing for its workers. Runtime remains runner-dependent.
           - name: ASan + LSan + UBSan (native chainlock integration)
@@ -135,6 +136,7 @@ jobs:
       FILE_ENV: ${{ matrix.file_env }}
       RUN_UNIT_TESTS: ${{ matrix.run_unit_tests }}
       CI_UNIT_TESTS_SHARD: ${{ matrix.unit_tests_shard }}
+      SYSCOIN_TEST_PQ_CRYPTO_PROCESSES: ${{ matrix.pq_crypto_workers }}
       RUN_FUNCTIONAL_TESTS: ${{ matrix.run_functional_tests }}
       TEST_RUNNER_FILTER: ${{ matrix.test_filter }}
     steps:

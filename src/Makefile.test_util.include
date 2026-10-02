@@ -19,6 +19,8 @@ TEST_UTIL_H = \
   test/util/net.h \
   test/util/nevm_mint.h \
   test/util/poolresourcetester.h \
+  test/util/pq_crypto_batch.h \
+  test/util/pq_crypto_worker.h \
   test/util/pq_registry_read_error.h \
   test/util/random.h \
   test/util/script.h \
@@ -43,6 +45,8 @@ libtest_util_a_SOURCES = \
   test/util/logging.cpp \
   test/util/mining.cpp \
   test/util/net.cpp \
+  test/util/pq_crypto_batch.cpp \
+  test/util/pq_crypto_worker.cpp \
   test/util/random.cpp \
   test/util/script.cpp \
   test/util/setup_common.cpp \

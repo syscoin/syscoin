@@ -15,7 +15,9 @@
 #include <llmq/pq_global_auth.h>
 #include <llmq/pq_quorum_builder.h>
 #include <messagesigner.h>
+#include <test/util/pq_crypto_batch.h>
 #include <test/util/setup_common.h>
+#include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -322,6 +324,18 @@ GlobalKeyRecord Candidate(const slhdsa::SecretKey& key,
     candidate.key_version = key_version;
     candidate.child_key_commitment = commitment;
     BOOST_REQUIRE(key.GetPublicKey(candidate.public_key));
+    BOOST_REQUIRE(IsGlobalKeyCandidateStructurallyValid(candidate));
+    return candidate;
+}
+
+GlobalKeyRecord Candidate(const slhdsa::PublicKey& public_key,
+                          uint32_t key_version,
+                          const ChildKeyTreeCommitment& commitment)
+{
+    GlobalKeyRecord candidate;
+    candidate.key_version = key_version;
+    candidate.child_key_commitment = commitment;
+    candidate.public_key = public_key;
     BOOST_REQUIRE(IsGlobalKeyCandidateStructurallyValid(candidate));
     return candidate;
 }
@@ -829,6 +843,7 @@ BOOST_AUTO_TEST_CASE(recovery_readiness_branch_window_atomic_snapshot_and_undo)
 
 BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recovery_source)
 {
+    const std::size_t subprocess_workers{pq_test_crypto::RequestedWorkerCount()};
     const std::size_t available_workers{
         std::max(1U, std::thread::hardware_concurrency())};
     // Some supported libc++ releases lack jthread. Joining before any main-
@@ -916,6 +931,7 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
     constexpr std::size_t FRESH_COUNT{QUORUM_SIZE};
     constexpr std::size_t LATE_INDEX{OLD_COUNT + FRESH_COUNT};
     constexpr std::size_t POPULATION{LATE_INDEX + 1};
+    static_assert(POPULATION <= pq_test_crypto::MAX_JOBS);
     constexpr int32_t NEW_REGISTRATION_HEIGHT{2300};
     const int32_t late_registration_height{refresh->snapshot_height + 2};
     const int32_t tip_height{later->readiness_reference_height + 1};
@@ -942,16 +958,77 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
     };
 
     std::vector<std::optional<slhdsa::SecretKey>> generated_keys(POPULATION);
-    parallel_crypto(POPULATION, "key generation", [&](std::size_t member) {
+    std::vector<slhdsa::PublicKey> public_keys(POPULATION);
+    const auto population_seed = [](std::size_t member) {
         const uint32_t tag{static_cast<uint32_t>(member)};
         slhdsa::KeyGenerationSeed seed{};
         seed[0] = 0x72;
         for (std::size_t byte{0}; byte < sizeof(tag); ++byte) {
             seed[1 + byte] = static_cast<uint8_t>(tag >> (8 * byte));
         }
-        generated_keys[member] = slhdsa::GenerateSecretKey(seed);
-        return generated_keys[member].has_value();
-    });
+        return seed;
+    };
+    const auto run_subprocesses = [&](const pq_test_crypto::Request& request, const char* phase) {
+        BOOST_TEST_MESSAGE("PQ population subprocess " << phase << ": " << request.jobs.size()
+                           << " jobs, " << subprocess_workers << " workers");
+        const auto& suite = boost::unit_test::framework::master_test_suite();
+        BOOST_REQUIRE(suite.argc > 0 && suite.argv[0] != nullptr);
+        auto results = pq_test_crypto::RunBatches(
+            std::filesystem::path{suite.argv[0]}, m_path_root / fs::PathFromString(std::string{"pq-crypto-"} + phase),
+            request, subprocess_workers);
+        BOOST_REQUIRE_EQUAL(results.size(), request.jobs.size());
+        BOOST_TEST_MESSAGE("PQ population subprocess " << phase << ": complete (all workers reaped)");
+        return results;
+    };
+    if (subprocess_workers != 0) {
+        pq_test_crypto::Request request;
+        for (std::size_t member{0}; member < POPULATION; ++member) {
+            request.jobs.push_back({static_cast<uint32_t>(member), population_seed(member), {}});
+        }
+        const auto results = run_subprocesses(request, "keygen");
+        for (std::size_t member{0}; member < POPULATION; ++member) public_keys[member] = results[member].public_key;
+    } else {
+        parallel_crypto(POPULATION, "key generation", [&](std::size_t member) {
+            generated_keys[member] = slhdsa::GenerateSecretKey(population_seed(member));
+            return generated_keys[member].has_value();
+        });
+    }
+    // Only three individual readiness transactions need parent-side secret keys
+    // in subprocess mode. Importing every key would recompute every root here.
+    std::map<std::size_t, slhdsa::SecretKey> individual_keys;
+    const auto individual_key = [&](std::size_t member) -> const slhdsa::SecretKey& {
+        if (subprocess_workers == 0) return keys.at(member);
+        auto found = individual_keys.find(member);
+        if (found == individual_keys.end()) {
+            auto key = slhdsa::GenerateSecretKey(population_seed(member));
+            BOOST_REQUIRE(key);
+            slhdsa::PublicKey public_key{};
+            BOOST_REQUIRE(key->GetPublicKey(public_key));
+            BOOST_REQUIRE(public_key == public_keys.at(member));
+            found = individual_keys.emplace(member, std::move(*key)).first;
+        }
+        return found->second;
+    };
+    const auto sign_subprocesses = [&](std::size_t first_member, const std::vector<uint256>& digests,
+                                       std::span<const uint8_t> context, const char* phase) {
+        pq_test_crypto::Request request{pq_test_crypto::Operation::Sign,
+            std::vector<uint8_t>{context.begin(), context.end()}, {}};
+        for (std::size_t index{0}; index < digests.size(); ++index) {
+            const std::size_t member{first_member + index};
+            pq_test_crypto::Job job{static_cast<uint32_t>(member), population_seed(member), {}};
+            std::copy(digests[index].begin(), digests[index].end(), job.digest.begin());
+            request.jobs.push_back(job);
+        }
+        const auto results = run_subprocesses(request, phase);
+        std::vector<GlobalSignature> signatures(results.size());
+        for (std::size_t index{0}; index < results.size(); ++index) {
+            BOOST_REQUIRE(results[index].public_key == public_keys.at(first_member + index));
+            BOOST_REQUIRE(slhdsa::Verify(results[index].public_key, request.jobs[index].digest,
+                                         context, results[index].signature));
+            signatures[index] = results[index].signature;
+        }
+        return signatures;
+    };
     std::vector<CMutableTransaction> registration_transactions;
     registration_transactions.reserve(POPULATION);
     std::vector<GlobalKeyTxPayload> registration_payloads(POPULATION);
@@ -964,21 +1041,25 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
         const uint256 pro_tx_hash{NonNullHash(981'000 + tag)};
         pro_tx_hashes.push_back(pro_tx_hash);
         population_index.emplace(pro_tx_hash, member);
-        BOOST_REQUIRE(generated_keys[member]);
-        keys.push_back(std::move(*generated_keys[member]));
+        if (subprocess_workers == 0) {
+            BOOST_REQUIRE(generated_keys[member]);
+            keys.push_back(std::move(*generated_keys[member]));
+        }
         CKey owner;
         owner.MakeNewKey(/*fCompressed=*/true);
         owner_keys.push_back(owner);
         const int32_t key_height{dmn_height(member) + 1};
         const auto commitment{CommitmentAt(config, genesis, pro_tx_hash, key_height, 1, 981'000 + tag)};
-        auto current{Candidate(keys.back(), 1, commitment)};
+        auto current{subprocess_workers != 0 ? Candidate(public_keys[member], 1, commitment)
+                                            : Candidate(keys.back(), 1, commitment)};
         current.activated_height = static_cast<uint32_t>(key_height);
         registered_keys.push_back(current);
         registration_transactions.push_back(BaseTransaction(981'000 + tag, PQ_GLOBAL_KEY_TX_VERSION));
         auto& payload{registration_payloads[member]};
         payload.operation = GlobalKeyOperation::INITIAL;
         payload.pro_tx_hash = pro_tx_hash;
-        payload.candidate = Candidate(keys.back(), 1, commitment);
+        payload.candidate = subprocess_workers != 0 ? Candidate(public_keys[member], 1, commitment)
+                                                   : Candidate(keys.back(), 1, commitment);
         payload.transaction_inputs_hash = CalcTxInputsHash(CTransaction(registration_transactions.back()));
         const auto owner_digest{GetGlobalOwnerRegistrationAuthorizationHash(genesis, payload)};
         BOOST_REQUIRE(owner_digest);
@@ -1002,12 +1083,16 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
         members.push_back(std::move(dmn));
     }
     const auto registration_context{GetGlobalAuthContext(GlobalAuthPurpose::GLOBAL_REGISTRATION)};
-    parallel_crypto(POPULATION, "registration signing", [&](std::size_t member) {
-        const auto& digest{registration_digests[member]};
-        return slhdsa::SignDeterministic(keys[member],
-            std::span<const uint8_t>{digest.begin(), digest.size()},
-            registration_context, registration_signatures[member]);
-    });
+    if (subprocess_workers != 0) {
+        registration_signatures = sign_subprocesses(0, registration_digests, registration_context, "registration");
+    } else {
+        parallel_crypto(POPULATION, "registration signing", [&](std::size_t member) {
+            const auto& digest{registration_digests[member]};
+            return slhdsa::SignDeterministic(keys[member],
+                std::span<const uint8_t>{digest.begin(), digest.size()},
+                registration_context, registration_signatures[member]);
+        });
+    }
     for (std::size_t member{0}; member < POPULATION; ++member) {
         registration_payloads[member].authorization = registration_signatures[member];
         SetTxPayload(registration_transactions[member], registration_payloads[member]);
@@ -1057,7 +1142,7 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
         else if (height == late_registration_height) transactions = {late_registration};
         else if (height == grace->readiness_reference_height + 1) {
             transactions.push_back(RecoveryReadinessTransaction(genesis, pro_tx_hashes[0],
-                registered_keys[0], keys[0], *grace, hashes[grace->readiness_reference_height], 984'000));
+                registered_keys[0], individual_key(0), *grace, hashes[grace->readiness_reference_height], 984'000));
         } else if (height == refresh->readiness_reference_height + 1) {
             BOOST_TEST_MESSAGE("PQ population readiness preparation: " << FRESH_COUNT
                                << " payloads at height " << height << " on the main thread");
@@ -1083,12 +1168,16 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
                 digests[index] = *digest;
             }
             const auto readiness_context{GetGlobalAuthContext(GlobalAuthPurpose::RECOVERY_READINESS)};
-            parallel_crypto(FRESH_COUNT, "readiness signing", [&](std::size_t index) {
-                const auto& digest{digests[index]};
-                return slhdsa::SignDeterministic(keys[OLD_COUNT + index],
-                    std::span<const uint8_t>{digest.begin(), digest.size()},
-                    readiness_context, signatures[index]);
-            });
+            if (subprocess_workers != 0) {
+                signatures = sign_subprocesses(OLD_COUNT, digests, readiness_context, "readiness");
+            } else {
+                parallel_crypto(FRESH_COUNT, "readiness signing", [&](std::size_t index) {
+                    const auto& digest{digests[index]};
+                    return slhdsa::SignDeterministic(keys[OLD_COUNT + index],
+                        std::span<const uint8_t>{digest.begin(), digest.size()},
+                        readiness_context, signatures[index]);
+                });
+            }
             for (std::size_t index{0}; index < FRESH_COUNT; ++index) {
                 payloads[index].signature = signatures[index];
                 SetTxPayload(readiness_transactions[index], payloads[index]);
@@ -1098,7 +1187,7 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
                                << " on the main thread (crypto workers joined)");
         } else if (height == tip_height) {
             transactions.push_back(RecoveryReadinessTransaction(genesis, pro_tx_hashes[OLD_COUNT],
-                registered_keys[OLD_COUNT], keys[OLD_COUNT], *later,
+                registered_keys[OLD_COUNT], individual_key(OLD_COUNT), *later,
                 hashes[later->readiness_reference_height], 986'000));
         }
         if (transactions.empty()) transactions.push_back(OrdinaryTransaction(987'000 + height));
@@ -1208,7 +1297,7 @@ BOOST_AUTO_TEST_CASE(authenticated_new_population_replaces_only_refreshed_recove
     BOOST_CHECK_EQUAL(frozen.FindOperator(pro_tx_hashes[OLD_COUNT])->recovery_readiness->group, refresh->group);
     BOOST_CHECK(live.FindOperator(pro_tx_hashes[LATE_INDEX])->HasActiveGlobalKey());
     const auto late_ready{RecoveryReadinessTransaction(genesis, pro_tx_hashes[LATE_INDEX],
-        registered_keys[LATE_INDEX], keys[LATE_INDEX], *refresh,
+        registered_keys[LATE_INDEX], individual_key(LATE_INDEX), *refresh,
         hashes[refresh->readiness_reference_height], 989'004)};
     BOOST_CHECK(!manager.ValidateTransaction(*late_ready, hashes[late_registration_height],
         late_registration_height + 1, callbacks_at(late_registration_height + 1), true, registry_error));

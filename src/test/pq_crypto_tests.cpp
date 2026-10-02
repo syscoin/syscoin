@@ -6,6 +6,8 @@
 #include <crypto/sha256.h>
 #include <crypto/slhdsa/selftest.h>
 #include <support/cleanse.h>
+#include <test/util/pq_crypto_worker.h>
+#include <test/util/setup_common.h>
 #include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
@@ -14,8 +16,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -207,6 +211,61 @@ BOOST_AUTO_TEST_CASE(scheduled_wots_shake_kat_and_all_leaves)
     memory_cleanse(encoded.data(), encoded.size());
     memory_cleanse(oversized.data(), oversized.size());
     memory_cleanse(seed.data(), seed.size());
+}
+
+BOOST_FIXTURE_TEST_CASE(pq_worker_protocol_binds_complete_requests, BasicTestingSetup)
+{
+    using namespace pq_test_crypto;
+    const auto input = m_path_root / "crypto-request";
+    const auto output = m_path_root / "crypto-response";
+    Request request{Operation::Sign, {'r', 'e', 'g'}, {Job{800, {}, {}}}};
+    request.jobs[0].seed[0] = 0x72;
+    request.jobs[0].digest[0] = 0x42;
+    WriteRequest(input, request);
+    const auto decoded = ReadRequest(input);
+    BOOST_REQUIRE_EQUAL(decoded.jobs.size(), 1U);
+    BOOST_CHECK(decoded.context == request.context);
+    BOOST_CHECK(decoded.jobs[0].seed == request.jobs[0].seed);
+    BOOST_CHECK(decoded.jobs[0].digest == request.jobs[0].digest);
+    // Framing-only bytes: real execution and registry verification are separate.
+    Result result;
+    result.member = 800;
+    result.public_key.fill(0x21);
+    result.signature.fill(0x32);
+    WriteResponse(output, request, {result});
+    const auto results = ReadResponse(output, request);
+    BOOST_REQUIRE_EQUAL(results.size(), 1U);
+    BOOST_CHECK(results[0].signature == result.signature);
+    for (unsigned change{0}; change < 4; ++change) {
+        auto different = request;
+        if (change == 0) different.jobs[0].member = 799;
+        if (change == 1) different.jobs[0].seed[0] = 0x73;
+        if (change == 2) different.jobs[0].digest[0] = 0x43;
+        if (change == 3) different.context[0] = 'x';
+        BOOST_CHECK_THROW(ReadResponse(output, different), std::runtime_error);
+    }
+    { std::ofstream append(output, std::ios::binary | std::ios::app); append.put('x'); }
+    BOOST_CHECK_THROW(ReadResponse(output, request), std::runtime_error);
+    WriteResponse(output, request, {result});
+    std::filesystem::resize_file(output, std::filesystem::file_size(output) - 1);
+    BOOST_CHECK_THROW(ReadResponse(output, request), std::runtime_error);
+    auto duplicate = request;
+    duplicate.jobs.push_back(duplicate.jobs.front());
+    BOOST_CHECK_THROW(WriteRequest(input, duplicate), std::runtime_error);
+    auto excessive = request;
+    excessive.jobs.resize(MAX_JOBS + 1);
+    BOOST_CHECK_THROW(WriteRequest(input, excessive), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(pq_worker_mode_is_explicit_and_rejects_missing_paths)
+{
+    char program[]{"test_syscoin"};
+    char mode[]{"--pq-test-crypto-worker"};
+    char* argv[]{program, mode};
+    BOOST_CHECK(!pq_test_crypto::TryWorkerMain(1, argv));
+    const auto result = pq_test_crypto::TryWorkerMain(2, argv);
+    BOOST_REQUIRE(result);
+    BOOST_CHECK_NE(*result, 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
