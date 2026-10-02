@@ -7,8 +7,6 @@
 #include <key.h>
 #include <random.h>
 #include <util/time.h>
-// SYSCOIN
-#include <bls/bls.h>
 #include <util/translation.h>
 
 #include <memory>
@@ -19,11 +17,6 @@ util::Result<void> SanityChecks(const Context&)
 {
     if (!ECC_InitSanityCheck()) {
         return util::Error{Untranslated("Elliptic curve cryptography sanity check failure. Aborting.")};
-    }
-
-    // SYSCOIN
-    if (!BLSInit()) {
-        return util::Error{Untranslated("BLS Init failed. Aborting.")};
     }
 
     if (!Random_SanityCheck()) {

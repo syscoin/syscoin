@@ -6,14 +6,18 @@
 // See accompanying file LICENSE or copy at http://boost.org/LICENSE_1_0.txt
 //
 
+#define IMMER_IS_GC_TEST 1
+
 #include "input.hpp"
+
+#include "test/util.hpp"
 
 #include <immer/flex_vector.hpp>
 #include <immer/flex_vector_transient.hpp>
 #include <immer/heap/gc_heap.hpp>
 #include <immer/refcount/no_refcount_policy.hpp>
 
-#include <catch2/catch.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #define IMMER_FUZZED_TRACE_ENABLE 0
 
@@ -34,6 +38,8 @@ namespace {
 
 int run_input(const std::uint8_t* data, std::size_t size)
 {
+    auto guard = immer::gc_disable_guard{};
+
     constexpr std::size_t var_count = 4;
     constexpr unsigned bits         = 2;
 
@@ -380,6 +386,8 @@ TEST_CASE("https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=24412")
 {
     SECTION("trace, hand minimized")
     {
+        IMMER_GC_TEST_GUARD;
+
         /// new test run
         using vector_t    = immer::flex_vector<int, gc_memory, 2, 2>;
         using transient_t = immer::flex_vector_transient<int, gc_memory, 2, 2>;

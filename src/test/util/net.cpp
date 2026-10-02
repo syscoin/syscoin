@@ -27,20 +27,43 @@ void ConnmanTestMsg::Handshake(CNode& node,
     peerman.InitializeNode(node, local_services);
     FlushSendBuffer(node); // Drop the version message added by InitializeNode.
 
-    CSerializedNetMsg msg_version{
-        mm.Make(NetMsgType::VERSION,
-                version,                                        //
-                Using<CustomUintFormatter<8>>(remote_services), //
-                int64_t{},                                      // dummy time
-                int64_t{},                                      // ignored service bits
-                CNetAddr::V1(CService{}),                       // dummy
-                int64_t{},                                      // ignored service bits
-                CNetAddr::V1(CService{}),                       // ignored
-                uint64_t{1},                                    // dummy nonce
-                std::string{},                                  // dummy subver
-                int32_t{},                                      // dummy starting_height
-                relay_txs),
+    const auto make_version = [&] {
+        if (version >= PQ_MNAUTH_PROTO_VERSION) {
+            // SYSCOIN: current peers append a connection-unique PQ MNAUTH
+            // claim to VERSION. Test handshakes must exercise the same parser
+            // contract instead of being disconnected before their test body.
+            CMNAuthVersionData mnauth_version;
+            mnauth_version.cookie = uint256::ONEV;
+            return mm.Make(NetMsgType::VERSION,
+                           version,
+                           Using<CustomUintFormatter<8>>(remote_services),
+                           int64_t{},
+                           int64_t{},
+                           CNetAddr::V1(CService{}),
+                           int64_t{},
+                           CNetAddr::V1(CService{}),
+                           uint64_t{1},
+                           std::string{},
+                           int32_t{},
+                           relay_txs,
+                           uint256::TWOV,
+                           /*legacy_masternode_claim=*/false,
+                           mnauth_version);
+        }
+        return mm.Make(NetMsgType::VERSION,
+                       version,
+                       Using<CustomUintFormatter<8>>(remote_services),
+                       int64_t{},
+                       int64_t{},
+                       CNetAddr::V1(CService{}),
+                       int64_t{},
+                       CNetAddr::V1(CService{}),
+                       uint64_t{1},
+                       std::string{},
+                       int32_t{},
+                       relay_txs);
     };
+    CSerializedNetMsg msg_version{make_version()};
 
     (void)connman.ReceiveMsgFrom(node, std::move(msg_version));
     node.fPauseSend = false;

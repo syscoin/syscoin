@@ -13,6 +13,11 @@
 #include <interfaces/init.h>
 #include <interfaces/ipc.h>
 #include <kernel/cs_main.h>
+#include <hash.h> // SYSCOIN: PQ MNAUTH test identity hash.
+#include <evo/deterministicmns.h> // SYSCOIN: PQ registry memory accounting.
+#include <llmq/pq_chainlock_types.h> // SYSCOIN: PQ MNAUTH key types.
+#include <llmq/pq_chainlock_verify.h> // SYSCOIN: PQ verifier memory accounting.
+#include <llmq/quorums_chainlocks.h> // SYSCOIN: PQ audit runtime accounting.
 #include <logging.h>
 #include <node/context.h>
 #include <rpc/server.h>
@@ -22,7 +27,9 @@
 #include <univalue.h>
 #include <util/any.h>
 #include <util/check.h>
+#include <util/strencodings.h> // SYSCOIN: PQ MNAUTH test key parsing.
 
+#include <algorithm> // SYSCOIN: PQ MNAUTH test key validation.
 #include <stdint.h>
 #ifdef HAVE_MALLOC_INFO
 #include <malloc.h>
@@ -31,8 +38,6 @@
 // SYSCOIN
 #include <masternode/masternodesync.h>
 #include <spork.h>
-#include <bls/bls.h>
-#include <llmq/quorums_utils.h>
 #include <validation.h>
 using node::NodeContext;
 static RPCHelpMan mnsync()
@@ -151,6 +156,7 @@ static RPCHelpMan spork()
 
 
 
+// SYSCOIN BEGIN: regtest-only masternode authentication override.
 static RPCHelpMan mnauth()
 {
     return RPCHelpMan{"mnauth",
@@ -158,14 +164,15 @@ static RPCHelpMan mnauth()
             {
                 {"nodeId", RPCArg::Type::NUM, RPCArg::Optional::NO, "Internal peer id of the node the mock data gets added to"},
                 {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The authenticated proTxHash as hex string"},
-                {"publicKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The authenticated public key as hex string"},
+                {"globalPublicKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The authenticated 32-byte SLH-DSA public key as hex"},
+                {"globalKeyVersion", RPCArg::Type::NUM, RPCArg::Optional::NO, "The authenticated nonzero global key version"},
             },
             RPCResult{
                 RPCResult::Type::BOOL, "", "If MNAUTH was overridden or not."
             },
             RPCExamples{
                 "Override MNAUTH processing\n" +
-                HelpExampleCli("mnauth", "\"nodeId \"proTxHash\" \"publicKey\"\"")
+                HelpExampleCli("mnauth", "0 \"proTxHash\" \"globalPublicKey\" 1")
             },
         [&](const RPCHelpMan& self, const node::JSONRPCRequest& request) -> UniValue
 {
@@ -174,23 +181,31 @@ static RPCHelpMan mnauth()
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
     if (!Params().MineBlocksOnDemand())
         throw std::runtime_error("mnauth for regression testing (-regtest mode) only");
-    auto& chainman = EnsureAnyChainman(request.context);
     int nodeId = request.params[0].getInt<int>();
     uint256 proTxHash = ParseHashV(request.params[1], "proTxHash");
     if (proTxHash.IsNull()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "proTxHash invalid");
     }
-    CBLSPublicKey publicKey;
-    int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight());
-    bool bls_legacy_scheme = !llmq::CLLMQUtils::IsV19Active(nHeight);
-    publicKey.SetHexStr(request.params[2].get_str(), bls_legacy_scheme);
-    if (!publicKey.IsValid()) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "publicKey invalid");
+    const auto public_key_bytes =
+        TryParseHex<uint8_t>(request.params[2].get_str());
+    if (!public_key_bytes ||
+        public_key_bytes->size() != llmq::pq::GLOBAL_PUBLIC_KEY_SIZE ||
+        std::all_of(public_key_bytes->begin(), public_key_bytes->end(),
+                    [](uint8_t byte) { return byte == 0; })) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "globalPublicKey must be a nonzero 32-byte key");
+    }
+    llmq::pq::GlobalPublicKey public_key{};
+    std::copy(public_key_bytes->begin(), public_key_bytes->end(),
+              public_key.begin());
+    const uint32_t key_version = request.params[3].getInt<uint32_t>();
+    if (key_version == 0) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "globalKeyVersion must be nonzero");
     }
 
     bool fSuccess = node.connman->ForNode(nodeId, AllNodes, [&](CNode* pNode){
-        pNode->SetVerifiedProRegTxHash(proTxHash);
-        pNode->SetVerifiedPubKeyHash(publicKey.GetHash());
+        pNode->SetVerifiedMasternode(proTxHash, ::Hash(public_key), key_version);
         return true;
     });
 
@@ -198,6 +213,7 @@ static RPCHelpMan mnauth()
 },
     };
 }
+// SYSCOIN END: regtest-only masternode authentication override.
 
 static RPCHelpMan setmocktime()
 {
@@ -279,6 +295,36 @@ static UniValue RPCLockedMemoryInfo()
     return obj;
 }
 
+// SYSCOIN BEGIN: expose bounded PQ shared-state ownership.
+static UniValue RPCPQMemoryInfo()
+{
+    llmq::pq::PQRegistryMemoryStats registry;
+    if (deterministicMNManager) {
+        (void)deterministicMNManager->GetPQRegistryMemoryStats(registry);
+    }
+    const auto verification{llmq::pq::GetPQVerificationMemoryStats()};
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("cache_owned_bytes",
+                  uint64_t{registry.cache_owned_bytes});
+    result.pushKV("externally_pinned_state_bytes",
+                  uint64_t{registry.externally_pinned_state_bytes});
+    result.pushKV("live_registry_views",
+                  uint64_t{registry.live_registry_views});
+    result.pushKV("live_roster_contexts",
+                  uint64_t{verification.live_roster_contexts});
+    result.pushKV("verification_worker_pinned_bytes",
+                  uint64_t{verification.verification_worker_pinned_bytes});
+    result.pushKV(
+        "audit_runtime_pinned_bytes",
+        uint64_t{llmq::chainLocksHandler
+                     ? llmq::chainLocksHandler
+                           ->GetPaymentAuditRuntimePinnedBytes()
+                     : 0});
+    return result;
+}
+// SYSCOIN END: expose bounded PQ shared-state ownership.
+
 #ifdef HAVE_MALLOC_INFO
 static std::string RPCMallocInfo()
 {
@@ -323,6 +369,17 @@ static RPCHelpMan getmemoryinfo()
                                 {RPCResult::Type::NUM, "chunks_used", "Number allocated chunks"},
                                 {RPCResult::Type::NUM, "chunks_free", "Number unused chunks"},
                             }},
+                            // SYSCOIN BEGIN: PQ shared-state memory accounting.
+                            {RPCResult::Type::OBJ, "pq", "Post-quantum immutable-state and bounded-runtime payload accounting",
+                            {
+                                {RPCResult::Type::NUM, "cache_owned_bytes", "Registry allocation payload reachable from its snapshot cache"},
+                                {RPCResult::Type::NUM, "externally_pinned_state_bytes", "Registry allocation payload alive outside the snapshot cache"},
+                                {RPCResult::Type::NUM, "live_registry_views", "Number of live immutable registry snapshot-view objects"},
+                                {RPCResult::Type::NUM, "live_roster_contexts", "Number of live verified immutable roster capabilities"},
+                                {RPCResult::Type::NUM, "verification_worker_pinned_bytes", "Scheduled-WOTS check-vector payload currently retained by verifiers"},
+                                {RPCResult::Type::NUM, "audit_runtime_pinned_bytes", "Estimated allocation payload retained by live payment-audit runtime state"},
+                            }},
+                            // SYSCOIN END: PQ shared-state memory accounting.
                         }
                     },
                     RPCResult{"mode \"mallocinfo\"",
@@ -339,6 +396,7 @@ static RPCHelpMan getmemoryinfo()
     if (mode == "stats") {
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("locked", RPCLockedMemoryInfo());
+        obj.pushKV("pq", RPCPQMemoryInfo()); // SYSCOIN
         return obj;
     } else if (mode == "mallocinfo") {
 #ifdef HAVE_MALLOC_INFO

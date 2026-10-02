@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name != 'pull_request' && github.run_id || github.ref }}-sanitizers
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -36,12 +36,95 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: ASan + LSan + UBSan
+          # SYSCOIN: Build plus both test phases exceeded three hours while
+          # tests were still progressing. Run the complete native and
+          # functional coverage in separate jobs with the same instrumentation.
+          # Instrumented PQ tests also exceed four hours in one native job.
+          # Keep all four source shards; each retains the other make check tests.
+          - name: ASan + LSan + UBSan (native 1/4)
             file_env: ./ci/test/00_setup_env_native_asan.sh
-            timeout: 180
-          - name: TSan
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: '1'
+          - name: ASan + LSan + UBSan (native 2/4)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: '2'
+          - name: ASan + LSan + UBSan (native 3/4)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: '3'
+          - name: ASan + LSan + UBSan (native 4/4)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: '4'
+          # Registry timings show substantial work before the population case.
+          # Give that unchanged case its own job; the four source shards retain
+          # every other case. Its complete instrumented runtime is still unknown.
+          - name: ASan + LSan + UBSan (native registry population)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            # Bounded standalone measurement; completion within this cap is not established.
+            timeout: 360
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: 'registry-population'
+            pq_crypto_workers: '4'
+          # Keep the stateful integration test intact, with no concurrent native
+          # sources competing for its workers. Runtime remains runner-dependent.
+          - name: ASan + LSan + UBSan (native chainlock integration)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+            unit_tests_shard: 'chainlock-integration'
+          # SYSCOIN: The full functional batch exceeded four hours even after
+          # separating native tests. Partition the same enabled scripts so
+          # long histories start immediately and retain all existing coverage.
+          - name: ASan + LSan + UBSan (functional governance)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            test_filter: '^(feature_governance|feature_governance_objects)\.py'
+          # Same-head phase timings project about 269 minutes on the slower
+          # runner; allow headroom without dropping the stateful transition checks.
+          - name: ASan + LSan + UBSan (functional governance dynamic)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 300
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            test_filter: '^feature_governance_dynamic\.py'
+          - name: ASan + LSan + UBSan (functional NEVM and PQ)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            # Keep this group to one wave of four long fixtures. Voting,
+            # header policy and MN RPC tests run in the shorter remaining job.
+            test_filter: '^(feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key)\.py'
+          - name: ASan + LSan + UBSan (functional remaining)
+            file_env: ./ci/test/00_setup_env_native_asan.sh
+            timeout: 240
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
+            test_filter: '^(?!(feature_governance|feature_governance_dynamic|feature_governance_objects|feature_nevm_data|feature_deterministicmns|feature_pq_operator_lifecycle|feature_pq_owner_key)\.py)'
+          - name: TSan (native)
             file_env: ./ci/test/00_setup_env_native_tsan.sh
             timeout: 180
+            run_unit_tests: 'true'
+            run_functional_tests: 'false'
+          - name: TSan (functional)
+            file_env: ./ci/test/00_setup_env_native_tsan.sh
+            timeout: 180
+            run_unit_tests: 'false'
+            run_functional_tests: 'true'
           - name: MSan
             file_env: ./ci/test/00_setup_env_native_msan.sh
             timeout: 300
@@ -51,6 +134,11 @@ jobs:
             timeout: 180
     env:
       FILE_ENV: ${{ matrix.file_env }}
+      RUN_UNIT_TESTS: ${{ matrix.run_unit_tests }}
+      CI_UNIT_TESTS_SHARD: ${{ matrix.unit_tests_shard }}
+      SYSCOIN_TEST_PQ_CRYPTO_PROCESSES: ${{ matrix.pq_crypto_workers }}
+      RUN_FUNCTIONAL_TESTS: ${{ matrix.run_functional_tests }}
+      TEST_RUNNER_FILTER: ${{ matrix.test_filter }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

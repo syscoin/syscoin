@@ -8,14 +8,12 @@
 
 #include "input.hpp"
 
-#include "extra/fuzzer/fuzzer_gc_guard.hpp"
-
 #include <immer/array.hpp>
 #include <immer/array_transient.hpp>
 #include <immer/heap/gc_heap.hpp>
 #include <immer/refcount/no_refcount_policy.hpp>
 
-#include <catch2/catch.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 using gc_memory = immer::memory_policy<immer::heap_policy<immer::gc_heap>,
                                        immer::no_refcount_policy,
@@ -27,7 +25,7 @@ namespace {
 
 int run_input(const std::uint8_t* data, std::size_t size)
 {
-    auto guard = fuzzer_gc_guard{};
+    auto guard = immer::gc_disable_guard{};
 
     constexpr auto var_count = 4;
 

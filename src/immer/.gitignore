@@ -27,3 +27,6 @@ tools/clojure/.lein*
 
 .build
 .swiftpm
+.vscode
+.pre-commit-config.yaml
+.direnv

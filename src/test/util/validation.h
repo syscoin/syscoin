@@ -12,6 +12,8 @@ class CValidationInterface;
 struct TestChainstateManager : public ChainstateManager {
     /** Reset the ibd cache to its initial state */
     void ResetIbd();
+    /** SYSCOIN: Reset public IBD, PQ-history auth, and NEVM start together. */
+    void ResetIbd(PQHistoryAuthState state);
     /** Toggle IsInitialBlockDownload from true to false */
     void JumpOutOfIbd();
 };

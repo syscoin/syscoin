@@ -70,6 +70,7 @@ namespace {
 // don't add private key handling cmd's to the history
 const QStringList historyFilter = QStringList()
     << "importprivkey"
+    << "importpqkey" // SYSCOIN: portable PQ records contain private keys.
     << "importmulti"
     << "sethdseed"
     << "signmessagewithprivkey"
@@ -1232,6 +1233,7 @@ void RPCConsole::updateDetailWidget()
         ui->peerPermissions->setText(permissions.join(" & "));
     }
     ui->peerMappedAS->setText(stats->nodeStats.m_mapped_as != 0 ? QString::number(stats->nodeStats.m_mapped_as) : ts.na);
+    // SYSCOIN BEGIN: Show deterministic masternode verification and PoSe details.
     auto dmn = clientModel->getMasternodeList().GetMNByService(stats->nodeStats.addr);
     if (dmn == nullptr) {
         ui->peerNodeType->setText(tr("Regular"));
@@ -1244,6 +1246,7 @@ void RPCConsole::updateDetailWidget()
         }
         ui->peerPoSeScore->setText(QString::number(dmn->pdmnState->nPoSePenalty));
     }
+    // SYSCOIN END: Show deterministic masternode verification and PoSe details.
     // This check fails for example if the lock was busy and
     // nodeStateStats couldn't be fetched.
     if (stats->fNodeStateStatsAvailable) {

@@ -11,7 +11,6 @@
 #include <random.h>
 
 #include <string>
-#include <bls/bls.h>
 
 namespace kernel {
 Context* g_context;
@@ -24,8 +23,6 @@ Context::Context()
     LogPrintf("Using the '%s' SHA256 implementation\n", sha256_algo);
     RandomInit();
     ECC_Start();
-    // SYSCOIN
-    BLSInit();
 }
 
 Context::~Context()

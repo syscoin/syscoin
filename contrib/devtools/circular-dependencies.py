@@ -5,8 +5,15 @@
 
 import sys
 import re
-from multiprocess import Pool
 from typing import Dict, List, Set
+
+try:
+    from multiprocess import Pool
+except ModuleNotFoundError:
+    # SYSCOIN: The lint container does not install the optional multiprocess
+    # package. A thread pool preserves deterministic map ordering and supports
+    # the local closure without making every lint invocation depend on PyPI.
+    from multiprocessing.dummy import Pool
 
 MAPPING = {
     'core_read.cpp': 'core_io.cpp',

@@ -16,6 +16,16 @@
 #include <cassert>
 #include <cstddef>
 
+// Disable some warnings for this file as it seems to be causing various
+// false positives when compiling with various versions of GCC.
+#if !defined(_MSC_VER)
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
+#endif
+
 namespace immer {
 namespace detail {
 namespace hamts {
@@ -23,7 +33,11 @@ namespace hamts {
 // For C++14 support.
 // Calling the destructor inline breaks MSVC in some obscure
 // corner cases.
-template <typename T> constexpr void destroy_at(T* p) { p->~T(); }
+template <typename T>
+constexpr void destroy_at(T* p)
+{
+    p->~T();
+}
 
 template <typename T,
           typename Hash,
@@ -43,6 +57,7 @@ struct node
     using edit_t      = typename transience::edit;
     using value_t     = T;
     using bitmap_t    = typename get_bitmap_type<B>::type;
+    using hash_t      = decltype(Hash{}(std::declval<const T&>()));
 
     enum class kind_t
     {
@@ -50,25 +65,21 @@ struct node
         inner
     };
 
-    struct collision_t
+    struct collision_t : public with_trailing_storage<collision_t, T>
     {
         count_t count;
-        aligned_storage_for<T> buffer;
     };
 
-    struct values_data_t
-    {
-        aligned_storage_for<T> buffer;
-    };
+    struct values_data_t : public with_trailing_storage<values_data_t, T, true>
+    {};
 
     using values_t = combine_standard_layout_t<values_data_t, refs_t, ownee_t>;
 
-    struct inner_t
+    struct inner_t : public with_trailing_storage<inner_t, node_t*>
     {
         bitmap_t nodemap;
         bitmap_t datamap;
         values_t* values;
-        aligned_storage_for<node_t*> buffer;
     };
 
     union data_t
@@ -92,20 +103,24 @@ struct node
     constexpr static std::size_t sizeof_values_n(count_t count)
     {
         return std::max(sizeof(values_t),
-                        immer_offsetof(values_t, d.buffer) +
-                            sizeof(values_data_t::buffer) * count);
+                        immer_offsetof(values_t, d) +
+                            values_data_t::get_storage_offset() +
+                            sizeof(typename values_data_t::storage_type) *
+                                count);
     }
 
     constexpr static std::size_t sizeof_collision_n(count_t count)
     {
-        return immer_offsetof(impl_t, d.data.collision.buffer) +
-               sizeof(collision_t::buffer) * count;
+        return immer_offsetof(impl_t, d.data.collision) +
+               collision_t::get_storage_offset() +
+               sizeof(typename collision_t::storage_type) * count;
     }
 
     constexpr static std::size_t sizeof_inner_n(count_t count)
     {
-        return immer_offsetof(impl_t, d.data.inner.buffer) +
-               sizeof(inner_t::buffer) * count;
+        return immer_offsetof(impl_t, d.data.inner) +
+               inner_t::get_storage_offset() +
+               sizeof(typename inner_t::storage_type) * count;
     }
 
 #if IMMER_TAGGED_NODE
@@ -116,26 +131,26 @@ struct node
     {
         IMMER_ASSERT_TAGGED(kind() == kind_t::inner);
         assert(impl.d.data.inner.values);
-        return (T*) &impl.d.data.inner.values->d.buffer;
+        return impl.d.data.inner.values->d.get_storage_ptr();
     }
 
     auto values() const
     {
         IMMER_ASSERT_TAGGED(kind() == kind_t::inner);
         assert(impl.d.data.inner.values);
-        return (const T*) &impl.d.data.inner.values->d.buffer;
+        return (const T*) impl.d.data.inner.values->d.get_storage_ptr();
     }
 
     auto children()
     {
         IMMER_ASSERT_TAGGED(kind() == kind_t::inner);
-        return (node_t**) &impl.d.data.inner.buffer;
+        return impl.d.data.inner.get_storage_ptr();
     }
 
     auto children() const
     {
         IMMER_ASSERT_TAGGED(kind() == kind_t::inner);
-        return (const node_t* const*) &impl.d.data.inner.buffer;
+        return (const node_t* const*) impl.d.data.inner.get_storage_ptr();
     }
 
     auto datamap() const
@@ -183,13 +198,13 @@ struct node
     T* collisions()
     {
         IMMER_ASSERT_TAGGED(kind() == kind_t::collision);
-        return (T*) &impl.d.data.collision.buffer;
+        return impl.d.data.collision.get_storage_ptr();
     }
 
     const T* collisions() const
     {
         IMMER_ASSERT_TAGGED(kind() == kind_t::collision);
-        return (const T*) &impl.d.data.collision.buffer;
+        return impl.d.data.collision.get_storage_ptr();
     }
 
     static refs_t& refs(const values_t* x)
@@ -222,12 +237,11 @@ struct node
         return can_mutate(impl.d.data.inner.values, e);
     }
 
-    static node_t* make_inner_n(count_t n)
+    static node_t* make_inner_n_into(void* buffer, std::size_t size, count_t n)
     {
         assert(n <= branches<B>);
-        auto m = heap::allocate(sizeof_inner_n(n));
-        auto p = new (m) node_t;
-        assert(p == (node_t*) m);
+        assert(size >= sizeof_inner_n(n));
+        auto p = new (buffer) node_t;
 #if IMMER_TAGGED_NODE
         p->impl.d.kind = node_t::kind_t::inner;
 #endif
@@ -235,6 +249,13 @@ struct node
         p->impl.d.data.inner.datamap = 0;
         p->impl.d.data.inner.values  = nullptr;
         return p;
+    }
+
+    static node_t* make_inner_n(count_t n)
+    {
+        assert(n <= branches<B>);
+        auto m = heap::allocate(sizeof_inner_n(n));
+        return make_inner_n_into(m, sizeof_inner_n(n), n);
     }
 
     static node_t* make_inner_n(count_t n, values_t* values)
@@ -336,6 +357,7 @@ struct node
 #if IMMER_TAGGED_NODE
         p->impl.d.kind = node_t::kind_t::collision;
 #endif
+        // false positive warning
         p->impl.d.data.collision.count = 2;
         auto cols                      = p->collisions();
         IMMER_TRY {
@@ -364,7 +386,7 @@ struct node
         else {
             auto nv    = data_count();
             auto nxt   = new (heap::allocate(sizeof_values_n(nv))) values_t{};
-            auto dst   = (T*) &nxt->d.buffer;
+            auto dst   = nxt->d.get_storage_ptr();
             auto src   = values();
             ownee(nxt) = e;
             IMMER_TRY {
@@ -695,7 +717,7 @@ struct node
                 detail::uninitialized_copy(
                     src->values(), src->values() + voffset, dst->values());
             IMMER_TRY {
-                new (dst->values() + voffset) T{std::move(value)};
+                new (dst->values() + voffset) T(std::move(value));
                 IMMER_TRY {
                     if (nv)
                         detail::uninitialized_copy(src->values() + voffset,
@@ -750,7 +772,7 @@ struct node
                         src->values(), src->values() + voffset, dst->values());
             }
             IMMER_TRY {
-                new (dst->values() + voffset) T{std::move(value)};
+                new (dst->values() + voffset) T(std::move(value));
                 IMMER_TRY {
                     if (nv) {
                         if (mutate_values)
@@ -981,9 +1003,9 @@ struct node
     static node_t*
     make_merged(shift_t shift, T v1, hash_t hash1, T v2, hash_t hash2)
     {
-        if (shift < max_shift<B>) {
-            auto idx1 = hash1 & (mask<B> << shift);
-            auto idx2 = hash2 & (mask<B> << shift);
+        if (shift < max_shift<hash_t, B>) {
+            auto idx1 = hash1 & (mask<hash_t, B> << shift);
+            auto idx2 = hash2 & (mask<hash_t, B> << shift);
             if (idx1 == idx2) {
                 auto merged = make_merged(
                     shift + B, std::move(v1), hash1, std::move(v2), hash2);
@@ -1010,9 +1032,9 @@ struct node
     static node_t* make_merged_e(
         edit_t e, shift_t shift, T v1, hash_t hash1, T v2, hash_t hash2)
     {
-        if (shift < max_shift<B>) {
-            auto idx1 = hash1 & (mask<B> << shift);
-            auto idx2 = hash2 & (mask<B> << shift);
+        if (shift < max_shift<hash_t, B>) {
+            auto idx1 = hash1 & (mask<hash_t, B> << shift);
+            auto idx2 = hash2 & (mask<hash_t, B> << shift);
             if (idx1 == idx2) {
                 auto merged = make_merged_e(
                     e, shift + B, std::move(v1), hash1, std::move(v2), hash2);
@@ -1062,7 +1084,7 @@ struct node
     static void delete_values(values_t* p, count_t n)
     {
         assert(p);
-        detail::destroy_n((T*) &p->d.buffer, n);
+        detail::destroy_n(p->d.get_storage_ptr(), n);
         deallocate_values(p, n);
     }
 
@@ -1087,7 +1109,7 @@ struct node
 
     static void delete_deep(node_t* p, shift_t s)
     {
-        if (s == max_depth<B>)
+        if (s == max_depth<hash_t, B>)
             delete_collision(p);
         else {
             auto fst = p->children();
@@ -1101,7 +1123,7 @@ struct node
 
     static void delete_deep_shift(node_t* p, shift_t s)
     {
-        if (s == max_shift<B>)
+        if (s == max_shift<hash_t, B>)
             delete_collision(p);
         else {
             auto fst = p->children();
@@ -1140,3 +1162,9 @@ struct node
 } // namespace hamts
 } // namespace detail
 } // namespace immer
+
+#if !defined(_MSC_VER)
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+#endif

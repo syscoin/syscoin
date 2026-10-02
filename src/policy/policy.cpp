@@ -11,6 +11,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <policy/feerate.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
@@ -91,6 +92,31 @@ bool IsStandard(const CScript& scriptPubKey, const std::optional<unsigned>& max_
 
     return true;
 }
+
+// SYSCOIN: an owner-authorized PQ registrar or operator bootstrap can carry
+// two 7,856-byte SLH signatures. Permit that bounded, unspendable payload only
+// for the corresponding PQ wire versions; consensus still validates its full
+// encoding and signatures. Ordinary scripts and other special transactions
+// retain their existing limits.
+static bool IsPQOwnerDataOutput(const CTransaction& tx, const CTxOut& output)
+{
+    const unsigned payload_version{tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR ? 3U :
+        tx.nVersion == SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY ? 2U : 0U};
+    constexpr size_t MAX_PQ_OWNER_DATA_SIZE{2 * slhdsa::SIGNATURE_SIZE + 1024};
+    if (payload_version == 0 || output.nValue != 0 ||
+        output.scriptPubKey.size() > MAX_PQ_OWNER_DATA_SIZE) return false;
+    auto cursor{output.scriptPubKey.begin()};
+    opcodetype opcode;
+    std::vector<unsigned char> payload;
+    if (!output.scriptPubKey.GetOp(cursor, opcode) || opcode != OP_RETURN ||
+        !output.scriptPubKey.GetOp(cursor, opcode, payload) ||
+        cursor != output.scriptPubKey.end() || payload.size() < 2 ||
+        payload[0] != payload_version || payload[1] != 0) return false;
+    CScript canonical;
+    canonical << OP_RETURN << payload;
+    return canonical == output.scriptPubKey;
+}
+
 bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_datacarrier_bytes, bool permit_bare_multisig, const CFeeRate& dust_relay_fee, std::string& reason)
 {
     // SYSCOIN
@@ -142,7 +168,14 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
     TxoutType whichType;
     for (const CTxOut& txout : tx.vout) {
         // SYSCOIN
-        if (!::IsStandard(txout.scriptPubKey, max_datacarrier_bytes, whichType, isSysTx || IsMnTx)) {
+        // Original Syscoin call: IsStandard(txout.scriptPubKey,
+        //     max_datacarrier_bytes, whichType, isSysTx || IsMnTx).
+        const bool pq_owner_data{max_datacarrier_bytes && IsPQOwnerDataOutput(tx, txout)};
+        const std::optional<unsigned> data_limit{pq_owner_data
+            ? std::optional<unsigned>{2 * slhdsa::SIGNATURE_SIZE + 1024}
+            : max_datacarrier_bytes};
+        if (!::IsStandard(txout.scriptPubKey, data_limit, whichType,
+                          (isSysTx || IsMnTx) && !pq_owner_data)) {
             reason = "scriptpubkey";
             return false;
         }

@@ -21,6 +21,8 @@ class CChainParams;
 
 static constexpr bool DEFAULT_CHECKPOINTS_ENABLED{true};
 static constexpr auto DEFAULT_MAX_TIP_AGE{24h};
+// SYSCOIN: Shared by initial Geth attach and the post-prefix status wait.
+static constexpr int64_t DEFAULT_GETH_STARTUP_TIMEOUT{300};
 
 namespace kernel {
 
@@ -47,6 +49,8 @@ struct ChainstateManagerOpts {
     Notifications& notifications;
     // SYSCOIN
     std::vector<std::string> geth_commandline{std::vector<std::string>()};
+    //! Bounds Geth status recovery after Core reaches its saved prefix; zero is unlimited.
+    std::chrono::seconds geth_startup_timeout{DEFAULT_GETH_STARTUP_TIMEOUT};
     fs::path datadir_base{};
     bool reindex{false};
 };

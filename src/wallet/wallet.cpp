@@ -19,6 +19,7 @@
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <external_signer.h>
+#include <hash.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
 #include <interfaces/wallet.h>
@@ -27,6 +28,7 @@
 #include <key.h>
 #include <key_io.h>
 #include <logging.h>
+#include <llmq/pq_global_auth.h>
 #include <outputtype.h>
 #include <policy/feerate.h>
 #include <primitives/block.h>
@@ -72,6 +74,7 @@
 #include <wallet/walletutil.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <condition_variable>
 #include <exception>
@@ -89,6 +92,463 @@ struct KeyOriginInfo;
 using interfaces::FoundBlock;
 
 namespace wallet {
+
+namespace {
+
+constexpr std::array PQ_KEY_ROLES{PQKeyRole::VOTING, PQKeyRole::OWNER};
+constexpr uint8_t PQ_ALL_KEY_ROLES{static_cast<uint8_t>(PQKeyRole::VOTING) | static_cast<uint8_t>(PQKeyRole::OWNER)};
+
+uint256 PQKeyEncryptionIV(PQKeyRole role, const slhdsa::PublicKey& public_key)
+{
+    assert(role == PQKeyRole::VOTING || role == PQKeyRole::OWNER);
+    return (CHashWriter{SER_GETHASH, 0}
+            << std::string{role == PQKeyRole::OWNER ? "SYS_WALLET_PQ_OWNER_KEY_V1" : "SYS_WALLET_PQ_VOTING_KEY_V1"}
+            << public_key).GetHash();
+}
+
+uint64_t PQKeyWalletFlag(PQKeyRole role)
+{
+    assert(role == PQKeyRole::VOTING || role == PQKeyRole::OWNER);
+    return role == PQKeyRole::OWNER ? WALLET_FLAG_PQ_OWNER_KEYS : WALLET_FLAG_PQ_VOTING_KEYS;
+}
+
+bool PQKeyMatchesPublic(const CKeyingMaterial& secret, const slhdsa::PublicKey& public_key)
+{
+    const auto key{slhdsa::ImportSecretKey(std::span{secret.data(), secret.size()})};
+    slhdsa::PublicKey derived;
+    return key && key->GetPublicKey(derived) && derived == public_key;
+}
+
+} // namespace
+
+CWallet::PQPlainKeyMap& CWallet::PQPlainKeys(PQKeyRole role)
+{
+    AssertLockHeld(cs_wallet);
+    assert(role == PQKeyRole::VOTING || role == PQKeyRole::OWNER);
+    return role == PQKeyRole::OWNER ? m_owner_keys : m_voting_keys;
+}
+
+const CWallet::PQPlainKeyMap& CWallet::PQPlainKeys(PQKeyRole role) const
+{
+    AssertLockHeld(cs_wallet);
+    assert(role == PQKeyRole::VOTING || role == PQKeyRole::OWNER);
+    return role == PQKeyRole::OWNER ? m_owner_keys : m_voting_keys;
+}
+
+CWallet::PQCryptedKeyMap& CWallet::PQCryptedKeys(PQKeyRole role)
+{
+    AssertLockHeld(cs_wallet);
+    assert(role == PQKeyRole::VOTING || role == PQKeyRole::OWNER);
+    return role == PQKeyRole::OWNER ? m_crypted_owner_keys : m_crypted_voting_keys;
+}
+
+const CWallet::PQCryptedKeyMap& CWallet::PQCryptedKeys(PQKeyRole role) const
+{
+    AssertLockHeld(cs_wallet);
+    assert(role == PQKeyRole::VOTING || role == PQKeyRole::OWNER);
+    return role == PQKeyRole::OWNER ? m_crypted_owner_keys : m_crypted_voting_keys;
+}
+
+bool CWallet::HasPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key) const
+{
+    LOCK(cs_wallet);
+    return PQPlainKeys(role).contains(public_key) || PQCryptedKeys(role).contains(public_key);
+}
+
+bool CWallet::HasVotingKey(const slhdsa::PublicKey& public_key) const { return HasPQKey(PQKeyRole::VOTING, public_key); }
+bool CWallet::HasOwnerKey(const slhdsa::PublicKey& public_key) const { return HasPQKey(PQKeyRole::OWNER, public_key); }
+
+bool CWallet::ReadPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key,
+                        CKeyingMaterial& secret, std::string& error) const
+{
+    AssertLockHeld(cs_wallet);
+    secret.clear();
+    if (IsLocked()) {
+        error = "Wallet is locked";
+        return false;
+    }
+    if (const auto plain{PQPlainKeys(role).find(public_key)}; plain != PQPlainKeys(role).end()) {
+        secret = plain->second;
+    } else if (const auto encrypted{PQCryptedKeys(role).find(public_key)}; encrypted != PQCryptedKeys(role).end()) {
+        if (!DecryptSecret(vMasterKey, encrypted->second, PQKeyEncryptionIV(role, public_key), secret)) {
+            secret.clear();
+            error = "Unable to decrypt PQ key";
+            return false;
+        }
+    } else {
+        error = role == PQKeyRole::OWNER ? "Private owner key is not in this wallet" : "Private voting key is not in this wallet";
+        return false;
+    }
+    return true;
+}
+
+bool CWallet::LoadPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret)
+{
+    AssertLockHeld(cs_wallet);
+    if (!IsWalletFlagSet(PQKeyWalletFlag(role)) || IsCrypted() ||
+        IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_EXTERNAL_SIGNER) ||
+        HasPQKey(role, public_key) || !PQKeyMatchesPublic(secret, public_key)) return false;
+    return PQPlainKeys(role).emplace(public_key, secret).second;
+}
+
+bool CWallet::LoadCryptedPQKey(PQKeyRole role, const slhdsa::PublicKey& public_key,
+                               const std::vector<unsigned char>& secret)
+{
+    AssertLockHeld(cs_wallet);
+    if (!IsWalletFlagSet(PQKeyWalletFlag(role)) || !IsCrypted() ||
+        IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_EXTERNAL_SIGNER) ||
+        HasPQKey(role, public_key) || secret.size() != slhdsa::SECRET_KEY_SIZE + WALLET_CRYPTO_IV_SIZE ||
+        std::all_of(public_key.begin(), public_key.end(), [](uint8_t byte) { return byte == 0; })) return false;
+    return PQCryptedKeys(role).emplace(public_key, secret).second;
+}
+
+bool CWallet::LoadVotingKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret)
+{
+    return LoadPQKey(PQKeyRole::VOTING, public_key, secret);
+}
+
+bool CWallet::LoadOwnerKey(const slhdsa::PublicKey& public_key, const CKeyingMaterial& secret)
+{
+    return LoadPQKey(PQKeyRole::OWNER, public_key, secret);
+}
+
+bool CWallet::LoadCryptedVotingKey(const slhdsa::PublicKey& public_key, const std::vector<unsigned char>& secret)
+{
+    return LoadCryptedPQKey(PQKeyRole::VOTING, public_key, secret);
+}
+
+bool CWallet::LoadCryptedOwnerKey(const slhdsa::PublicKey& public_key, const std::vector<unsigned char>& secret)
+{
+    return LoadCryptedPQKey(PQKeyRole::OWNER, public_key, secret);
+}
+
+bool CWallet::CheckPQDecryptionKey(const CKeyingMaterial& master_key) const
+{
+    AssertLockHeld(cs_wallet);
+    for (const auto role : PQ_KEY_ROLES) {
+        for (const auto& [public_key, encrypted] : PQCryptedKeys(role)) {
+            CKeyingMaterial secret;
+            if (!DecryptSecret(master_key, encrypted, PQKeyEncryptionIV(role, public_key), secret) ||
+                !PQKeyMatchesPublic(secret, public_key)) return false;
+        }
+    }
+    return true;
+}
+
+bool CWallet::GeneratePQKey(PQKeyRole role, slhdsa::PublicKey& public_key, std::string& error)
+{
+    AssertLockNotHeld(cs_main);
+    public_key = {};
+    {
+        LOCK(cs_wallet);
+        if (IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_EXTERNAL_SIGNER)) {
+            error = "This wallet cannot store private PQ keys";
+            return false;
+        }
+        if (IsLocked()) {
+            error = "Wallet is locked";
+            return false;
+        }
+    }
+    // Independent randomness preserves separation from ordinary spending keys.
+    CKeyingMaterial seed(slhdsa::KEY_GENERATION_SEED_SIZE);
+    GetStrongRandBytesChunked(seed);
+    auto key{slhdsa::GenerateSecretKey(std::span{seed.data(), seed.size()})};
+    memory_cleanse(seed.data(), seed.size());
+    PQKeyExport generated;
+    generated.roles = static_cast<uint8_t>(role);
+    generated.secret.resize(slhdsa::SECRET_KEY_SIZE);
+    if (!key || !key->Export(std::span{generated.secret.data(), generated.secret.size()}) ||
+        !key->GetPublicKey(generated.public_key)) {
+        error = "Unable to generate PQ key";
+        return false;
+    }
+    key.reset();
+    LOCK(cs_wallet);
+    if (HasVotingKey(generated.public_key) || HasOwnerKey(generated.public_key)) {
+        error = "PQ key already exists";
+        return false;
+    }
+    // Import repeats the availability check after potentially expensive keygen.
+    if (!ImportPQKey(generated, error)) return false;
+    public_key = generated.public_key;
+    return true;
+}
+
+bool CWallet::GenerateVotingKey(slhdsa::PublicKey& public_key, std::string& error)
+{
+    return GeneratePQKey(PQKeyRole::VOTING, public_key, error);
+}
+
+bool CWallet::GenerateOwnerKey(slhdsa::PublicKey& public_key, std::string& error)
+{
+    return GeneratePQKey(PQKeyRole::OWNER, public_key, error);
+}
+
+std::vector<PQKeyInfo> CWallet::ListPQKeys() const
+{
+    LOCK(cs_wallet);
+    std::map<slhdsa::PublicKey, uint8_t> roles;
+    for (const auto role : PQ_KEY_ROLES) {
+        for (const auto& [public_key, secret] : PQPlainKeys(role)) roles[public_key] |= static_cast<uint8_t>(role);
+        for (const auto& [public_key, encrypted] : PQCryptedKeys(role)) roles[public_key] |= static_cast<uint8_t>(role);
+    }
+    std::vector<PQKeyInfo> result;
+    result.reserve(roles.size());
+    for (const auto& [public_key, mask] : roles) result.push_back({public_key, mask});
+    return result;
+}
+
+bool CWallet::ExportPQKey(const slhdsa::PublicKey& public_key, PQKeyExport& key, std::string& error) const
+{
+    LOCK(cs_wallet);
+    const auto requested_key{public_key}; // The caller may pass key.public_key.
+    key = {};
+    if (IsLocked()) {
+        error = "Wallet is locked";
+        return false;
+    }
+    PQKeyExport exported;
+    exported.public_key = requested_key;
+    for (const auto role : PQ_KEY_ROLES) {
+        if (!HasPQKey(role, requested_key)) continue;
+        CKeyingMaterial secret;
+        if (!ReadPQKey(role, requested_key, secret, error)) return false;
+        if (!PQKeyMatchesPublic(secret, requested_key)) {
+            error = "Invalid PQ key record";
+            return false;
+        }
+        if (exported.roles != 0 && exported.secret != secret) {
+            error = "Conflicting PQ key material for the same public key";
+            return false;
+        }
+        exported.secret = std::move(secret);
+        exported.roles |= static_cast<uint8_t>(role);
+    }
+    if (exported.roles == 0) {
+        error = "PQ key is not in this wallet";
+        return false;
+    }
+    key = std::move(exported);
+    error.clear();
+    return true;
+}
+
+bool CWallet::ExportPQKeys(PQPlainKeyMap& voting_keys, PQPlainKeyMap& owner_keys, std::string& error) const
+{
+    LOCK(cs_wallet);
+    voting_keys.clear();
+    owner_keys.clear();
+    if (&voting_keys == &owner_keys) {
+        error = "PQ export requires separate output maps for each role";
+        return false;
+    }
+    if (IsLocked()) {
+        error = "Wallet is locked";
+        return false;
+    }
+    // Preserve legacy role records independently, including valid SLH
+    // secrets whose private PRF seed differs under the same public key.
+    PQPlainKeyMap voters, owners;
+    for (const auto role : PQ_KEY_ROLES) {
+        auto& output{role == PQKeyRole::OWNER ? owners : voters};
+        const auto add = [&](const slhdsa::PublicKey& public_key) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
+            CKeyingMaterial secret;
+            if (!ReadPQKey(role, public_key, secret, error)) return false;
+            if (!PQKeyMatchesPublic(secret, public_key)) {
+                error = "Invalid PQ key record";
+                return false;
+            }
+            output.emplace(public_key, std::move(secret));
+            return true;
+        };
+        for (const auto& [public_key, secret] : PQPlainKeys(role)) if (!add(public_key)) return false;
+        for (const auto& [public_key, encrypted] : PQCryptedKeys(role)) if (!add(public_key)) return false;
+    }
+    voting_keys.swap(voters);
+    owner_keys.swap(owners);
+    error.clear();
+    return true;
+}
+
+bool CWallet::ExportVotingKeys(PQPlainKeyMap& keys, std::string& error) const
+{
+    PQPlainKeyMap owners;
+    return ExportPQKeys(keys, owners, error);
+}
+
+bool CWallet::ExportOwnerKeys(PQPlainKeyMap& keys, std::string& error) const
+{
+    PQPlainKeyMap voters;
+    return ExportPQKeys(voters, keys, error);
+}
+
+bool CWallet::ImportPQKey(const PQKeyExport& key, std::string& error)
+{
+    if (key.roles == 0 || (key.roles & ~PQ_ALL_KEY_ROLES) != 0) {
+        error = "Invalid PQ key roles";
+        return false;
+    }
+    LOCK(cs_wallet);
+    for (const auto role : PQ_KEY_ROLES) {
+        if (!HasPQKey(role, key.public_key)) continue;
+        CKeyingMaterial existing;
+        if (!ReadPQKey(role, key.public_key, existing, error)) return false;
+        if (existing != key.secret) {
+            error = "Conflicting PQ key material for the same public key";
+            return false;
+        }
+    }
+    PQPlainKeyMap voters, owners;
+    if (key.roles & static_cast<uint8_t>(PQKeyRole::VOTING)) voters.emplace(key.public_key, key.secret);
+    if (key.roles & static_cast<uint8_t>(PQKeyRole::OWNER)) owners.emplace(key.public_key, key.secret);
+    return ImportPQKeys(voters, owners, error);
+}
+
+bool CWallet::ImportVotingKeys(const PQPlainKeyMap& keys, std::string& error)
+{
+    return ImportPQKeys(keys, {}, error);
+}
+
+bool CWallet::ImportOwnerKeys(const PQPlainKeyMap& keys, std::string& error)
+{
+    return ImportPQKeys({}, keys, error);
+}
+
+bool CWallet::ImportPQKeys(const PQPlainKeyMap& voting_keys, const PQPlainKeyMap& owner_keys, std::string& error)
+{
+    LOCK(cs_wallet);
+    if (voting_keys.empty() && owner_keys.empty()) {
+        error.clear();
+        return true;
+    }
+    if (IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_EXTERNAL_SIGNER)) {
+        error = "This wallet cannot store private PQ keys";
+        return false;
+    }
+    if (IsLocked()) {
+        error = "Wallet is locked";
+        return false;
+    }
+    // Validate each role before mutation. Keep historical backup semantics:
+    // independently stored roles may have different private PRF seeds for the
+    // same public key, but an existing role must never be silently overwritten.
+    std::array<PQPlainKeyMap, 2> plain_keys;
+    std::array<PQCryptedKeyMap, 2> encrypted_keys;
+    for (size_t i = 0; i < PQ_KEY_ROLES.size(); ++i) {
+        const auto role{PQ_KEY_ROLES[i]};
+        for (const auto& [public_key, secret] : role == PQKeyRole::OWNER ? owner_keys : voting_keys) {
+            if (!PQKeyMatchesPublic(secret, public_key)) {
+                error = "Invalid PQ key record";
+                return false;
+            }
+            if (HasPQKey(role, public_key)) {
+                CKeyingMaterial existing;
+                if (!ReadPQKey(role, public_key, existing, error)) return false;
+                if (existing != secret) {
+                    error = "Conflicting PQ key material for the existing role";
+                    return false;
+                }
+            }
+            if (HasPQKey(role, public_key)) continue;
+            if (IsCrypted()) {
+                std::vector<unsigned char> encrypted;
+                if (!EncryptSecret(vMasterKey, secret, PQKeyEncryptionIV(role, public_key), encrypted)) {
+                    error = "Unable to encrypt PQ key";
+                    return false;
+                }
+                encrypted_keys[i].emplace(public_key, std::move(encrypted));
+            } else {
+                plain_keys[i].emplace(public_key, secret);
+            }
+        }
+    }
+    if (plain_keys[0].empty() && plain_keys[1].empty() && encrypted_keys[0].empty() && encrypted_keys[1].empty()) {
+        error.clear();
+        return true;
+    }
+    WalletBatch batch(GetDatabase());
+    if (!batch.TxnBegin()) {
+        error = "Unable to begin PQ key persistence";
+        return false;
+    }
+    const auto abort = [&]() {
+        batch.TxnAbort();
+        error = "Unable to persist PQ keys";
+        return false;
+    };
+    const uint64_t flags{m_wallet_flags.load() |
+        (voting_keys.empty() ? 0 : WALLET_FLAG_PQ_VOTING_KEYS) |
+        (owner_keys.empty() ? 0 : WALLET_FLAG_PQ_OWNER_KEYS)};
+    if (!batch.WriteWalletFlags(flags)) return abort();
+    for (size_t i = 0; i < PQ_KEY_ROLES.size(); ++i) {
+        const bool owner{PQ_KEY_ROLES[i] == PQKeyRole::OWNER};
+        for (const auto& [public_key, secret] : plain_keys[i]) {
+            if (!(owner ? batch.WriteOwnerKey(public_key, secret) : batch.WriteVotingKey(public_key, secret))) return abort();
+        }
+        for (const auto& [public_key, encrypted] : encrypted_keys[i]) {
+            if (!(owner ? batch.WriteCryptedOwnerKey(public_key, encrypted) : batch.WriteCryptedVotingKey(public_key, encrypted))) return abort();
+        }
+    }
+    if (!batch.TxnCommit()) return abort();
+    m_wallet_flags = flags;
+    for (size_t i = 0; i < PQ_KEY_ROLES.size(); ++i) {
+        PQPlainKeys(PQ_KEY_ROLES[i]).merge(plain_keys[i]);
+        PQCryptedKeys(PQ_KEY_ROLES[i]).merge(encrypted_keys[i]);
+    }
+    error.clear();
+    return true;
+}
+
+bool CWallet::SignPQAuthorization(PQKeyRole role, const slhdsa::PublicKey& public_key,
+                                  const uint256& authorization_hash, std::span<const uint8_t> context,
+                                  slhdsa::Signature& signature, std::string& error) const
+{
+    AssertLockNotHeld(cs_main);
+    signature = {};
+    CKeyingMaterial secret;
+    {
+        LOCK(cs_wallet);
+        if (!ReadPQKey(role, public_key, secret, error)) return false;
+    }
+    auto key{slhdsa::ImportSecretKey(std::span{secret.data(), secret.size()})};
+    slhdsa::PublicKey derived;
+    if (!key || !key->GetPublicKey(derived) || derived != public_key || context.empty() ||
+        !slhdsa::SignDeterministic(*key, std::span{authorization_hash.begin(), authorization_hash.size()}, context, signature) ||
+        !slhdsa::Verify(public_key, std::span{authorization_hash.begin(), authorization_hash.size()}, context, signature)) {
+        signature = {};
+        error = "Unable to sign PQ authorization";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool CWallet::SignVotingAuthorization(const slhdsa::PublicKey& public_key, const uint256& authorization_hash,
+                                      slhdsa::Signature& signature, std::string& error) const
+{
+    signature = {};
+    if (authorization_hash.IsNull()) {
+        error = "Invalid voting authorization hash";
+        return false;
+    }
+    return SignPQAuthorization(PQKeyRole::VOTING, public_key, authorization_hash,
+        llmq::pq::GetGlobalAuthContext(llmq::pq::GlobalAuthPurpose::GOVERNANCE_PROPOSAL_FUNDING_VOTE), signature, error);
+}
+
+bool CWallet::SignOwnerAuthorization(const slhdsa::PublicKey& public_key, const uint256& authorization_hash,
+                                     std::string_view context, slhdsa::Signature& signature, std::string& error) const
+{
+    signature = {};
+    if (authorization_hash.IsNull() ||
+        (context != "SYS_PQ_OWNER_UPDATE_V1" && context != "SYS_PQ_OWNER_PROOF_V1" &&
+         context != "SYS_PQ_GLOBAL_OWNER_REGISTER_V2")) {
+        error = "Invalid owner authorization hash or context";
+        return false;
+    }
+    return SignPQAuthorization(PQKeyRole::OWNER, public_key, authorization_hash,
+        std::span{reinterpret_cast<const uint8_t*>(context.data()), context.size()}, signature, error);
+}
 
 bool AddWalletSetting(interfaces::Chain& chain, const std::string& wallet_name)
 {
@@ -832,9 +1292,35 @@ bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
         if (!encrypted_batch->TxnBegin()) {
             delete encrypted_batch;
             encrypted_batch = nullptr;
+            mapMasterKeys.erase(nMasterKeyMaxID--);
             return false;
         }
-        encrypted_batch->WriteMasterKey(nMasterKeyMaxID, kMasterKey);
+        if (!encrypted_batch->WriteMasterKey(nMasterKeyMaxID, kMasterKey)) {
+            encrypted_batch->TxnAbort();
+            delete encrypted_batch;
+            mapMasterKeys.erase(nMasterKeyMaxID--);
+            return false;
+        }
+
+        // SYSCOIN: Encrypt both PQ roles atomically, retaining their existing
+        // database records and distinct encryption domains.
+        std::array<PQCryptedKeyMap, 2> encrypted_pq_keys;
+        for (size_t i = 0; i < PQ_KEY_ROLES.size(); ++i) {
+            const auto role{PQ_KEY_ROLES[i]};
+            for (const auto& [public_key, secret] : PQPlainKeys(role)) {
+                std::vector<unsigned char> encrypted;
+                if (!EncryptSecret(_vMasterKey, secret, PQKeyEncryptionIV(role, public_key), encrypted) ||
+                    !(role == PQKeyRole::OWNER
+                        ? encrypted_batch->WriteCryptedOwnerKey(public_key, encrypted, /*erase_plaintext=*/true)
+                        : encrypted_batch->WriteCryptedVotingKey(public_key, encrypted, /*erase_plaintext=*/true))) {
+                    encrypted_batch->TxnAbort();
+                    delete encrypted_batch;
+                    mapMasterKeys.erase(nMasterKeyMaxID--);
+                    return false;
+                }
+                encrypted_pq_keys[i].emplace(public_key, std::move(encrypted));
+            }
+        }
 
         for (const auto& spk_man_pair : m_spk_managers) {
             auto spk_man = spk_man_pair.second.get();
@@ -861,6 +1347,12 @@ bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
 
         delete encrypted_batch;
         encrypted_batch = nullptr;
+
+        // SYSCOIN: Publish both encrypted role stores only after the commit.
+        for (size_t i = 0; i < PQ_KEY_ROLES.size(); ++i) {
+            PQCryptedKeys(PQ_KEY_ROLES[i]) = std::move(encrypted_pq_keys[i]);
+            PQPlainKeys(PQ_KEY_ROLES[i]).clear();
+        }
 
         Lock();
         Unlock(strWalletPassphrase);
@@ -3467,6 +3959,7 @@ bool CWallet::Unlock(const CKeyingMaterial& vMasterKeyIn, bool accept_no_keys)
 {
     {
         LOCK(cs_wallet);
+        if (!CheckPQDecryptionKey(vMasterKeyIn)) return false;
         for (const auto& spk_man_pair : m_spk_managers) {
             if (!spk_man_pair.second->CheckDecryptionKey(vMasterKeyIn, accept_no_keys)) {
                 return false;

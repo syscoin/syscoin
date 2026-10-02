@@ -18,6 +18,15 @@ Contents
    memory
 
 .. toctree::
+   :caption: Persistence
+   :maxdepth: 3
+
+   persist-introduction
+   persist-serialization
+   persist-transformation
+   persist-reference
+
+.. toctree::
    :caption: Experimental
    :maxdepth: 3
 

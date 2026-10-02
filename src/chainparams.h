@@ -27,9 +27,4 @@ const CChainParams &Params();
  * Sets the params returned by Params() to those for the given chain type.
  */
 void SelectParams(const ChainType chain);
-// SYSCOIN
-/**
- * Allows modifying parameters of the test LLMQ
- */
-void UpdateLLMQTestParams(int size, int threshold);
 #endif // SYSCOIN_CHAINPARAMS_H

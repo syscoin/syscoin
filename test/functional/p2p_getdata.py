@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from test_framework.messages import (
     CInv,
+    MSG_CLSIG,  # SYSCOIN: final PQ ChainLock inventory.
     msg_getdata,
 )
 from test_framework.p2p import P2PInterface
@@ -43,6 +44,18 @@ class GetdataTest(SyscoinTestFramework):
         good_getdata.inv.append(CInv(t=2, h=best_block))
         p2p_block_store.send_and_ping(good_getdata)
         p2p_block_store.wait_until(lambda: p2p_block_store.blocks[best_block] == 1)
+
+        # SYSCOIN: Duplicate large-certificate requests are rejected before
+        # they can consume a bounded upload slot.
+        self.log.info("test that duplicate PQ ChainLock requests are disconnected before queuing")
+        duplicate_peer = self.nodes[0].add_p2p_connection(P2PInterface())
+        duplicate_getdata = msg_getdata(inv=[
+            CInv(MSG_CLSIG, 1),
+            CInv(MSG_CLSIG, 1),
+        ])
+        with self.nodes[0].assert_debug_log(["duplicate-pq-certificate-getdata"]):
+            duplicate_peer.send_message(duplicate_getdata)
+            duplicate_peer.wait_for_disconnect(timeout=10)
 
 
 if __name__ == '__main__':

@@ -3,7 +3,6 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <spork.h>
-#include <validation.h>
 #include <chainparams.h>
 #include <consensus/params.h>
 #include <flatdatabase.h>

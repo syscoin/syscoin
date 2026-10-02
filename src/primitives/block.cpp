@@ -8,6 +8,13 @@
 #include <hash.h>
 #include <tinyformat.h>
 
+// SYSCOIN BEGIN: Move Bitcoin's committed-header hash to CPureBlockHeader and
+// provide the inherited AuxPoW wrapper setter in CBlockHeader.
+// Bitcoin original, now implemented on CPureBlockHeader:
+// uint256 CBlockHeader::GetHash() const
+// {
+//     return (CHashWriter{PROTOCOL_VERSION} << *this).GetHash();
+// }
 void CBlockHeader::SetAuxpow (std::unique_ptr<CAuxPow> apow)
 {
     if (apow != nullptr)
@@ -20,6 +27,7 @@ void CBlockHeader::SetAuxpow (std::unique_ptr<CAuxPow> apow)
         SetAuxpowVersion(false);
     }
 }
+// SYSCOIN END: Separate committed-header hashing from the AuxPoW wrapper.
 
 std::string CBlock::ToString() const
 {

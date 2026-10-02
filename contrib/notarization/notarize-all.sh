@@ -1,5 +1,7 @@
 #!/bin/bash
 # Helper script to run all notarization steps
+# SYSCOIN: Keep release transcript output deterministic across maintainer locales.
+export LC_ALL=C
 set -e
 
 if [ -z "$1" ]; then
@@ -51,4 +53,4 @@ echo "Step 3: Stapling notarization tickets..."
 
 echo ""
 echo "=== All done! ==="
-echo "Your notarized binaries are ready for distribution." 
+echo "Your notarized binaries are ready for distribution."

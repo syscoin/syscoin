@@ -21,16 +21,32 @@
  * in the block is a special one that creates a new coin owned by the creator
  * of the block.
  */
+// SYSCOIN BEGIN: Extend Bitcoin's header through the inherited AuxPoW design.
+// Bitcoin original: class CBlockHeader
 class CBlockHeader : public CPureBlockHeader
+// SYSCOIN END: Extend the header through CPureBlockHeader.
 {
 public:
+    // SYSCOIN BEGIN: Move Bitcoin's committed header fields to CPureBlockHeader
+    // and retain the optional merged-mining proof in this wrapper.
+    // Bitcoin fields now inherited:
+    // int32_t nVersion;
+    // uint256 hashPrevBlock;
+    // uint256 hashMerkleRoot;
+    // uint32_t nTime;
+    // uint32_t nBits;
+    // uint32_t nNonce;
     // auxpow (if this is a merge-minded block)
     std::shared_ptr<CAuxPow> auxpow;
+    // SYSCOIN END: Separate committed header fields from the AuxPoW wrapper.
     CBlockHeader()
     {
         SetNull();
     }
 
+    // SYSCOIN BEGIN: Modify Bitcoin's header serialization for optional AuxPoW.
+    // The original committed-field serialization moved to CPureBlockHeader:
+    // SERIALIZE_METHODS(CBlockHeader, obj) { READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce); }
     template<typename Stream>
     void Serialize(Stream& s) const
     {
@@ -54,23 +70,50 @@ public:
             auxpow.reset();
         }
     }
+    // SYSCOIN END: Serialize the committed header and optional AuxPoW.
 
 
     void SetNull()
     {
+        // SYSCOIN BEGIN: Delegate Bitcoin's field reset and clear the AuxPoW wrapper.
+        // Bitcoin original field reset, now in CPureBlockHeader::SetNull():
+        // nVersion = 0;
+        // hashPrevBlock.SetNull();
+        // hashMerkleRoot.SetNull();
+        // nTime = 0;
+        // nBits = 0;
+        // nNonce = 0;
         CPureBlockHeader::SetNull();
         auxpow.reset();
+        // SYSCOIN END: Reset committed fields and the AuxPoW wrapper.
     }
+
+    // SYSCOIN BEGIN: Inherit these original Bitcoin declarations from CPureBlockHeader.
+    // bool IsNull() const
+    // {
+    //     return (nBits == 0);
+    // }
+    // uint256 GetHash() const;
+    // SYSCOIN END: Inherit null testing and committed-header hashing.
 
     NodeSeconds Time() const
     {
         return NodeSeconds{std::chrono::seconds{nTime}};
     }
+    // SYSCOIN BEGIN: Inherit Bitcoin's block-time accessor from CPureBlockHeader.
+    // int64_t GetBlockTime() const
+    // {
+    //     return (int64_t)nTime;
+    // }
+    // SYSCOIN END: Inherit the block-time accessor.
+
+    // SYSCOIN BEGIN: Set the inherited AuxPoW wrapper and its version flag together.
     /**
      * Set the block's auxpow (or unset it).  This takes care of updating
      * the version accordingly.
      */
     void SetAuxpow (std::unique_ptr<CAuxPow> apow);
+    // SYSCOIN END: Set the AuxPoW wrapper and version flag together.
 };
 
 
@@ -120,7 +163,9 @@ public:
         block.nTime          = nTime;
         block.nBits          = nBits;
         block.nNonce         = nNonce;
+        // SYSCOIN BEGIN: Extend Bitcoin's header copy with the AuxPoW wrapper.
         block.auxpow         = auxpow;
+        // SYSCOIN END: Copy the AuxPoW wrapper.
         return block;
     }
 

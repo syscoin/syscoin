@@ -8,8 +8,41 @@
 #include <primitives/transaction.h>
 #include <uint256.h>
 
+#include <cstddef>
+#include <ios>
 #include <string>
 #include <vector>
+
+inline constexpr std::size_t MAX_GOVERNANCE_SIGNATURE_SIZE{8 * 1024};
+
+// SYSCOIN: Expose the lock-order assertion without making signature code
+// depend on the full governance manager definition.
+void AssertGovernanceLockNotHeld();
+
+template <std::size_t MaximumSize>
+struct LimitedByteVectorFormatter
+{
+    template <typename Stream>
+    void Ser(Stream& stream, const std::vector<unsigned char>& bytes)
+    {
+        if (bytes.size() > MaximumSize) {
+            throw std::ios_base::failure("governance signature too large");
+        }
+        WriteCompactSize(stream, bytes.size());
+        if (!bytes.empty()) stream.write(MakeByteSpan(bytes));
+    }
+
+    template <typename Stream>
+    void Unser(Stream& stream, std::vector<unsigned char>& bytes)
+    {
+        const std::size_t size{ReadCompactSize(stream)};
+        if (size > MaximumSize) {
+            throw std::ios_base::failure("governance signature too large");
+        }
+        bytes.resize(size);
+        if (!bytes.empty()) stream.read(MakeWritableByteSpan(bytes));
+    }
+};
 
 /**
  * This module is a public interface of governance module that can be used
@@ -85,7 +118,8 @@ public:
                 obj.masternodeOutpoint
                 );
         if (!(s.GetType() & SER_GETHASH)) {
-            READWRITE(obj.vchSig);
+            READWRITE(Using<LimitedByteVectorFormatter<
+                          MAX_GOVERNANCE_SIGNATURE_SIZE>>(obj.vchSig));
         }
     }
 };

@@ -6,6 +6,9 @@
 #include <evo/evodb.h>
 #include <dbwrapper.h>
 #include <saltedhasher.h>
+#include <test/util/setup_common.h>
+
+#include <set>
 
 BOOST_AUTO_TEST_SUITE(evodb_tests)
 int one = 100;
@@ -102,6 +105,212 @@ BOOST_AUTO_TEST_CASE(TestFlushCacheToDisk) {
 
     BOOST_CHECK_EQUAL(mapCache.size(), 0);
     BOOST_CHECK_EQUAL(fifoList.size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(flush_batch_failure_preserves_dirty_and_erase_retries)
+{
+    auto db_params = DBParams{
+        .path = "testdb_flush_retry",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 8);
+
+    for (int key{1}; key <= 4; ++key) {
+        evo_db.WriteCache(key, key * 100);
+    }
+
+    // SYSCOIN: A failed write batch must retain every staged dirty value. The
+    // retry then commits the same values instead of silently dropping them.
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_CHECK_THROW(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/2, /*fSync=*/true),
+        dbwrapper_error);
+    BOOST_CHECK_EQUAL(evo_db.GetReadWriteCacheSize(), 4U);
+    BOOST_CHECK_EQUAL(evo_db.GetFifoList().size(), 4U);
+    for (int key{1}; key <= 4; ++key) {
+        int value{0};
+        BOOST_REQUIRE(evo_db.ReadCache(key, value));
+        BOOST_CHECK_EQUAL(value, key * 100);
+        BOOST_CHECK(!evo_db.Read(key, value));
+    }
+
+    BOOST_REQUIRE(evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/2, /*fSync=*/true));
+    BOOST_CHECK_EQUAL(evo_db.GetReadWriteCacheSize(), 0U);
+    for (int key{1}; key <= 4; ++key) {
+        int value{0};
+        BOOST_REQUIRE(evo_db.Read(key, value));
+        BOOST_CHECK_EQUAL(value, key * 100);
+    }
+
+    evo_db.EraseCache(1);
+    evo_db.EraseCache(2);
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_CHECK_THROW(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/2, /*fSync=*/true),
+        dbwrapper_error);
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 2U);
+    int value{0};
+    BOOST_CHECK(evo_db.Read(1, value));
+    BOOST_CHECK(evo_db.Read(2, value));
+
+    // SYSCOIN: The failed flush must leave the read-triggered tombstone
+    // barrier armed. Retrying the read commits both erases before lookup.
+    BOOST_CHECK(!evo_db.ReadCache(1, value));
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 0U);
+    BOOST_CHECK(!evo_db.Read(1, value));
+    BOOST_CHECK(!evo_db.Read(2, value));
+
+    BOOST_REQUIRE(evo_db.WriteThrough(3, 300));
+    evo_db.EraseCache(3);
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_CHECK_THROW(evo_db.ExistsCache(3), dbwrapper_error);
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 1U);
+    BOOST_CHECK(evo_db.Read(3, value));
+    BOOST_CHECK(!evo_db.ExistsCache(3));
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 0U);
+    BOOST_CHECK(!evo_db.Read(3, value));
+}
+
+BOOST_AUTO_TEST_CASE(empty_sync_flush_is_a_retryable_write_through_barrier)
+{
+    auto db_params = DBParams{
+        .path = "testdb_empty_sync_barrier",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 8);
+
+    BOOST_REQUIRE(evo_db.WriteThrough(1, 100, /*fSync=*/false));
+    BOOST_CHECK_EQUAL(evo_db.GetReadWriteCacheSize(), 0U);
+    BOOST_CHECK_EQUAL(evo_db.GetEraseCacheSize(), 0U);
+
+    evo_db.FailNextFlushBatchForTesting();
+    BOOST_REQUIRE(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/false));
+    BOOST_CHECK_THROW(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true),
+        dbwrapper_error);
+    BOOST_REQUIRE(
+        evo_db.FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true));
+
+    int persisted{0};
+    BOOST_REQUIRE(evo_db.Read(1, persisted));
+    BOOST_CHECK_EQUAL(persisted, 100);
+}
+
+// SYSCOIN: A barrier over a full memtable must sync its current WAL directly,
+// without using an empty write that first rotates it into background work.
+BOOST_FIXTURE_TEST_CASE(empty_sync_flush_does_not_rotate_full_wal, BasicTestingSetup)
+{
+    for (const bool obfuscate : {false, true}) {
+        const auto db_path{m_args.GetDataDirBase() /
+            (obfuscate ? "evodb_barrier_obfuscated" : "evodb_barrier_plain")};
+        const DBParams params{
+            .path = db_path,
+            .cache_bytes = 1 << 20,
+            .obfuscate = obfuscate,
+        };
+        const std::string value(1 << 20, 'v');
+        const auto wal_files = [&] {
+            std::set<fs::path> files;
+            for (const auto& entry : fs::directory_iterator(db_path)) {
+                if (entry.path().extension() == ".log") {
+                    files.insert(entry.path().filename());
+                }
+            }
+            return files;
+        };
+        {
+            CEvoDB<int, std::string> db(params, 8);
+            // CDBWrapper budgets one quarter of cache_bytes for the memtable.
+            // This single ordinary value fills it without a subsequent write.
+            BOOST_REQUIRE(db.WriteThrough(1, value, /*fSync=*/false));
+            BOOST_CHECK_EQUAL(db.GetReadWriteCacheSize(), 0U);
+            const auto before{wal_files()};
+            BOOST_REQUIRE_EQUAL(before.size(), 1U);
+
+            BOOST_REQUIRE(db.FlushCacheToDisk(256, /*fSync=*/false));
+            BOOST_CHECK(wal_files() == before);
+            BOOST_REQUIRE(db.FlushCacheToDisk(256, /*fSync=*/true));
+            BOOST_CHECK(wal_files() == before);
+            BOOST_REQUIRE(db.FlushCacheToDisk(256, /*fSync=*/true));
+            BOOST_CHECK(wal_files() == before);
+        }
+        CEvoDB<int, std::string> reopened(params, 8);
+        std::string persisted;
+        BOOST_REQUIRE(reopened.Read(1, persisted));
+        BOOST_CHECK(persisted == value);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(flush_barrier_failure_preserves_retry_bookkeeping)
+{
+    const DBParams params{
+        .path = "evodb_flush_barrier_retry",
+        .cache_bytes = 1 << 20,
+        .memory_only = true,
+    };
+    CEvoDB<int, int> db(params, 8, 8);
+    BOOST_REQUIRE(db.WriteThrough(1, 100, /*fSync=*/false));
+    db.WriteCache(2, 200);
+    db.WriteCache(3, 300);
+
+    // SYSCOIN: A non-empty batch may reach disk before the final barrier
+    // fails. Keep the entire staged chunk until both operations succeed.
+    db.FailNextFlushBarrierForTesting();
+    BOOST_CHECK_THROW(db.FlushCacheToDisk(2, /*fSync=*/true), dbwrapper_error);
+    BOOST_CHECK_EQUAL(db.GetReadWriteCacheSize(), 2U);
+    int value{0};
+    BOOST_REQUIRE(db.Read(2, value));
+    BOOST_CHECK_EQUAL(value, 200);
+    BOOST_REQUIRE(db.Read(3, value));
+    BOOST_CHECK_EQUAL(value, 300);
+    BOOST_REQUIRE(db.FlushCacheToDisk(2, /*fSync=*/true));
+    BOOST_CHECK_EQUAL(db.GetReadWriteCacheSize(), 0U);
+    BOOST_REQUIRE(db.Read(1, value));
+    BOOST_CHECK_EQUAL(value, 100);
+
+    db.EraseCache(1);
+    db.FailNextFlushBarrierForTesting();
+    BOOST_CHECK_THROW(db.FlushCacheToDisk(2, /*fSync=*/true), dbwrapper_error);
+    BOOST_CHECK_EQUAL(db.GetEraseCacheSize(), 1U);
+    BOOST_CHECK(!db.Read(1, value));
+    // The read-triggered flush must remain armed after the barrier failure.
+    BOOST_CHECK(!db.ExistsCache(1));
+    BOOST_CHECK_EQUAL(db.GetEraseCacheSize(), 0U);
+
+    // An asynchronous flush must not consume a pending barrier failure.
+    db.WriteCache(4, 400);
+    db.FailNextFlushBarrierForTesting();
+    BOOST_REQUIRE(db.FlushCacheToDisk(2, /*fSync=*/false));
+    BOOST_CHECK_EQUAL(db.GetReadWriteCacheSize(), 0U);
+    BOOST_CHECK_THROW(db.FlushCacheToDisk(2, /*fSync=*/true), dbwrapper_error);
+    BOOST_REQUIRE(db.FlushCacheToDisk(2, /*fSync=*/true));
+    BOOST_REQUIRE(db.Read(4, value));
+    BOOST_CHECK_EQUAL(value, 400);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gc_barrier_failure_preserves_read_cache_until_retry)
+{
+    const DBParams params{
+        .path = "evodb_gc_barrier_retry",
+        .cache_bytes = 1 << 20,
+        .memory_only = true,
+    };
+    CEvoDB<int, int> db(params, 8, 8);
+    BOOST_REQUIRE(db.WriteThrough(1, 100, /*fSync=*/false));
+    BOOST_REQUIRE(db.WriteThrough(2, 200, /*fSync=*/false));
+    BOOST_CHECK_EQUAL(db.GetReadCacheSize(), 2U);
+    const std::vector<int> keys{1};
+
+    db.FailNextFlushBarrierForTesting();
+    BOOST_CHECK_THROW(db.EraseExactDiskKeysForGC(keys), dbwrapper_error);
+    BOOST_CHECK_EQUAL(db.GetReadCacheSize(), 2U);
+    BOOST_REQUIRE(db.EraseExactDiskKeysForGC(keys));
+    BOOST_CHECK_EQUAL(db.GetReadCacheSize(), 1U);
+    int value{0};
+    BOOST_CHECK(!db.ReadCache(1, value));
+    BOOST_REQUIRE(db.ReadCache(2, value));
+    BOOST_CHECK_EQUAL(value, 200);
 }
 
 BOOST_AUTO_TEST_CASE(TestMaxCacheSize) {
@@ -379,6 +588,54 @@ BOOST_AUTO_TEST_CASE(TestStressTest) {
         BOOST_CHECK_EQUAL(value, i);
     }
 }
+
+BOOST_AUTO_TEST_CASE(write_through_survives_dirty_fifo_eviction)
+{
+    auto db_params = DBParams{
+        .path = "testdb_write_through",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 2);
+
+    BOOST_REQUIRE(evo_db.WriteThrough(42, 4242));
+    for (int key = 0; key < 16; ++key) {
+        evo_db.WriteCache(key, key);
+    }
+
+    int persisted{0};
+    BOOST_CHECK(evo_db.Read(42, persisted));
+    BOOST_CHECK_EQUAL(persisted, 4242);
+    BOOST_CHECK(evo_db.ReadCache(42, persisted));
+    BOOST_CHECK_EQUAL(persisted, 4242);
+}
+
+BOOST_AUTO_TEST_CASE(exact_disk_read_enforces_predecode_size_limit)
+{
+    auto db_params = DBParams{
+        .path = "testdb_exact_size_limit",
+        .cache_bytes = static_cast<size_t>(1 << 20),
+        .memory_only = true};
+    CEvoDB<int, int> evo_db(db_params, 2);
+    using ReadResult = CEvoDB<int, int>::ExactDiskReadResult;
+    constexpr int key{42};
+    constexpr int expected{4242};
+    BOOST_REQUIRE(evo_db.WriteThrough(key, expected));
+
+    const std::size_t encoded_size{GetSerializeSize(expected, 0)};
+    BOOST_REQUIRE_GT(encoded_size, 0U);
+    int actual{0};
+    // SYSCOIN: The physical size gate must reject before deserialization and
+    // admit the same canonical record at its exact encoded size.
+    BOOST_CHECK(evo_db.ReadExactDiskForGC(
+                    key, actual, encoded_size - 1) ==
+                ReadResult::BLOCKED);
+    BOOST_CHECK_EQUAL(actual, 0);
+    BOOST_CHECK(evo_db.ReadExactDiskForGC(
+                    key, actual, encoded_size) ==
+                ReadResult::FOUND);
+    BOOST_CHECK_EQUAL(actual, expected);
+}
+
 BOOST_AUTO_TEST_CASE(TestUint256KeyUniqueness)
 {
     auto dbParams = DBParams{
@@ -419,4 +676,3 @@ BOOST_AUTO_TEST_CASE(TestUint256KeyUniqueness)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
-

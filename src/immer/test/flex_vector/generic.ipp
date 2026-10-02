@@ -14,7 +14,7 @@
 
 #include <boost/range/adaptors.hpp>
 #include <boost/range/irange.hpp>
-#include <catch2/catch.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <array>
@@ -240,6 +240,7 @@ TEST_CASE("erase")
 
 TEST_CASE("accumulate relaxed")
 {
+    IMMER_GC_TEST_GUARD;
     auto expected_n = [](auto n) { return n * (n - 1) / 2; };
     auto expected_i = [&](auto i, auto n) {
         return expected_n(n) - expected_n(i);
@@ -302,6 +303,7 @@ TEST_CASE("accumulate relaxed")
 
 TEST_CASE("equals")
 {
+    IMMER_GC_TEST_GUARD;
     const auto n = 666u;
     auto v       = make_test_flex_vector_front(0, n);
 
@@ -321,6 +323,7 @@ TEST_CASE("equals")
 
 TEST_CASE("equals bugs")
 {
+    IMMER_GC_TEST_GUARD;
     {
         const auto n = 666u;
         auto v       = make_test_flex_vector(0, n);
@@ -365,6 +368,7 @@ TEST_CASE("equals bugs")
 
 TEST_CASE("take relaxed")
 {
+    IMMER_GC_TEST_GUARD;
     const auto n = 666u;
     auto v       = make_test_flex_vector_front(0, n);
 
@@ -376,6 +380,7 @@ TEST_CASE("take relaxed")
 
 TEST_CASE("drop")
 {
+    IMMER_GC_TEST_GUARD;
     const auto n = 666u;
 
     SECTION("regular")
@@ -443,6 +448,7 @@ TEST_CASE("reconcat take")
 
 TEST_CASE("reconcat take drop")
 {
+    IMMER_GC_TEST_GUARD;
     const auto n = 666u;
     auto v       = make_test_flex_vector_front(0, n);
 
@@ -455,6 +461,7 @@ TEST_CASE("reconcat take drop")
 
 TEST_CASE("reconcat take drop feedback")
 {
+    IMMER_GC_TEST_GUARD;
     const auto n = 666u;
     auto v       = make_test_flex_vector_front(0, n);
     auto vv      = v;
@@ -467,6 +474,7 @@ TEST_CASE("reconcat take drop feedback")
 
 TEST_CASE("iterator relaxed")
 {
+    IMMER_GC_TEST_GUARD;
     const auto n = 666u;
     auto v       = make_test_flex_vector_front(0, n);
 
@@ -482,7 +490,8 @@ TEST_CASE("iterator relaxed")
     {
         auto s = std::vector<unsigned>(n);
         std::iota(s.begin(), s.end(), 0u);
-        std::equal(v.begin(), v.end(), s.begin(), s.end());
+        const auto unused = std::equal(v.begin(), v.end(), s.begin(), s.end());
+        (void) unused;
     }
 
     SECTION("can go back from end")
@@ -527,6 +536,7 @@ TEST_CASE("iterator relaxed")
 
 TEST_CASE("adopt regular vector contents")
 {
+    IMMER_GC_TEST_GUARD;
     const auto n = 666u;
     auto v       = VECTOR_T<unsigned>{};
     for (auto i = 0u; i < n; ++i) {
@@ -538,6 +548,7 @@ TEST_CASE("adopt regular vector contents")
 
 TEST_CASE("exception safety relaxed")
 {
+    IMMER_GC_TEST_GUARD;
     using dadaist_vector_t =
         typename dadaist_wrapper<FLEX_VECTOR_T<unsigned>>::type;
     constexpr auto n = 666u;
@@ -552,7 +563,8 @@ TEST_CASE("exception safety relaxed")
             try {
                 v = v.push_back({i});
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             CHECK_VECTOR_EQUALS(v, boost::irange(0u, i));
         }
         CHECK(d.happenings > 0);
@@ -568,7 +580,8 @@ TEST_CASE("exception safety relaxed")
             try {
                 v = v.update(i, [](auto x) { return dada(), x + 1; });
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             CHECK_VECTOR_EQUALS(
                 v, boost::join(boost::irange(1u, 1u + i), boost::irange(i, n)));
         }
@@ -605,7 +618,8 @@ TEST_CASE("exception safety relaxed")
             try {
                 v = lhs + rhs;
                 ++i;
-            } catch (dada_error) {}
+            } catch (dada_error) {
+            }
             CHECK_VECTOR_EQUALS(v, boost::irange(0u, n));
         }
         CHECK(d.happenings > 0);

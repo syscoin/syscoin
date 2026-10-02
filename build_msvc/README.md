@@ -34,16 +34,6 @@ Add-Content -Path "vcpkg\triplets\x64-windows-static.cmake" -Value "set(VCPKG_BU
 vcpkg integrate install
 ```
 
-Dash BLS
----------------------
-The native build uses the embedded Dash BLS library. On Windows it is built
-without GMP, using Relic's `easy` arithmetic backend and the static MSVC
-runtime. From an "x64 Native Tools Command Prompt for VS 2022", run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File build_msvc\build-dashbls.ps1 -Configuration Release -RunTests
-```
-
 Qt
 ---------------------
 To build Syscoin Core with the GUI, a static build of Qt is required.
@@ -67,20 +57,19 @@ To build Syscoin Core without Qt, unload or disable the `syscoin-qt`, `libsyscoi
 
 Building
 ---------------------
-1. Build Dash BLS as described above.
-
-2. Use Python to generate `*.vcxproj` for the Visual Studio 2022 toolchain from Makefile:
+1. Use Python to generate `*.vcxproj` for the Visual Studio 2022 toolchain from Makefile:
 
 ```cmd
 python build_msvc\msvc-autogen.py
 ```
 
-3. An optional step is to adjust the settings in the `build_msvc` directory and the `common.init.vcxproj` file. This project file contains settings that are common to all projects such as the runtime library version and target Windows SDK version. The Qt directories can also be set. To specify a non-default path to a static Qt package directory, use the `QTBASEDIR` environment variable.
+2. An optional step is to adjust the settings in the `build_msvc` directory and the `common.init.vcxproj` file. This project file contains settings that are common to all projects such as the runtime library version and target Windows SDK version. The Qt directories can also be set. To specify a non-default path to a static Qt package directory, use the `QTBASEDIR` environment variable.
 
-4. To build the command-line applications and tests without Qt, use:
+3. To build the command-line applications and tests without Qt, use:
 
+<!-- SYSCOIN: The full-dimension PQ fixture is a fork-specific release gate. -->
 ```cmd
-msbuild build_msvc\syscoin.sln "-target:syscoind;syscoin-cli;syscoin-tx;syscoin-util;syscoin-wallet;test_syscoin;bench_syscoin" -property:Configuration=Release -maxCpuCount -verbosity:minimal
+msbuild build_msvc\syscoin.sln "-target:syscoind;syscoin-cli;syscoin-tx;syscoin-util;syscoin-wallet;test_syscoin;bench_syscoin;pq_chainlock_fixture" -property:Configuration=Release -maxCpuCount -verbosity:minimal
 ```
 
 After installing static Qt, omit `-target` to build the complete solution.

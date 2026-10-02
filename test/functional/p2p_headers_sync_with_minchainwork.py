@@ -23,6 +23,8 @@ from test_framework.util import assert_equal, force_finish_mnsync
 
 NODE1_BLOCKS_REQUIRED = 15
 NODE2_BLOCKS_REQUIRED = 2047
+# SYSCOIN: This inherited Bitcoin test intentionally has no DMN fixture.
+DIP3_DEFERRED_HEIGHT = 10_000
 
 
 class RejectLowDifficultyHeadersTest(SyscoinTestFramework):
@@ -32,8 +34,22 @@ class RejectLowDifficultyHeadersTest(SyscoinTestFramework):
         # SYSCOIN
         self.rpc_timeout = 480
         self.num_nodes = 4
+        # SYSCOIN: Each synthetic chain must sign its local superblock-off spork
+        # without depending on relay timing. Keep deterministic-masternode state
+        # beyond this Bitcoin header test's maximum height (6,159).
+        spork_key = "-sporkkey=cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"
+        dip3_deferred = f"-dip3params={DIP3_DEFERRED_HEIGHT}:{DIP3_DEFERRED_HEIGHT}"
         # Node0 has no required chainwork; node1 requires 15 blocks on top of the genesis block; node2 requires 2047
-        self.extra_args = [["-minimumchainwork=0x0", "-checkblockindex=0"], ["-minimumchainwork=0x1f", "-checkblockindex=0"], ["-minimumchainwork=0x1000", "-checkblockindex=0"], ["-minimumchainwork=0x1000", "-checkblockindex=0", "-whitelist=noban@127.0.0.1"]]
+        self.extra_args = [
+            ["-minimumchainwork=0x0", "-checkblockindex=0",
+             spork_key, dip3_deferred],
+            ["-minimumchainwork=0x1f", "-checkblockindex=0",
+             spork_key, dip3_deferred],
+            ["-minimumchainwork=0x1000", "-checkblockindex=0",
+             spork_key, dip3_deferred],
+            ["-minimumchainwork=0x1000", "-checkblockindex=0",
+             "-whitelist=noban@127.0.0.1", spork_key, dip3_deferred],
+        ]
 
     def setup_network(self):
         self.setup_nodes()
@@ -43,6 +59,13 @@ class RejectLowDifficultyHeadersTest(SyscoinTestFramework):
         force_finish_mnsync(self.nodes[1])
         force_finish_mnsync(self.nodes[2])
         force_finish_mnsync(self.nodes[3])
+        # SYSCOIN: This Bitcoin header-sync test has no PQ registry or governance
+        # state, so keep superblock validation out of its synthetic chains.
+        for node in self.nodes:
+            assert_equal(
+                node.spork("SPORK_9_SUPERBLOCKS_ENABLED", 4070908800),
+                "success",
+            )
 
     def disconnect_all(self):
         self.disconnect_nodes(0, 1)

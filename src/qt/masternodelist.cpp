@@ -2,6 +2,7 @@
 #include <qt/forms/ui_masternodelist.h>
 
 #include <evo/deterministicmns.h>
+#include <evo/pq_payment_probation.h>
 #include <masternode/activemasternode.h>
 #include <qt/clientmodel.h>
 #include <clientversion.h>
@@ -21,6 +22,67 @@
 #include <QtGui/QClipboard>
 #include <interfaces/node.h>
 #include <node/context.h>
+
+#include <limits>
+#include <optional>
+#include <vector>
+
+namespace {
+
+constexpr int COLUMN_NEVM_ADDRESS{11};
+constexpr int COLUMN_PAYMENT_AUDIT_MISSES{12};
+constexpr int COLUMN_PROTX_HASH{13};
+
+std::optional<llmq::pq::PQPaymentProbationStateView>
+GetPaymentAuditState(const ClientModel& client_model,
+                     const CDeterministicMNList& mn_list)
+{
+    const auto* context{client_model.node().context()};
+    if (context == nullptr || context->chainman == nullptr ||
+        deterministicMNManager == nullptr) {
+        return std::nullopt;
+    }
+
+    LOCK(cs_main);
+    const CBlockIndex* index{
+        context->chainman->m_blockman.LookupBlockIndex(
+            mn_list.GetBlockHash())};
+    llmq::pq::PQPaymentProbationStateView state;
+    if (index == nullptr ||
+        !deterministicMNManager->GetPaymentProbationStateView(index,
+                                                              state)) {
+        return std::nullopt;
+    }
+    return state;
+}
+
+std::optional<std::vector<CDeterministicMNCPtr>>
+GetKnownProjectedPayees(const ClientModel& client_model,
+                        const CDeterministicMNList& mn_list)
+{
+    // SYSCOIN: Keep displayed payees on the manager's exact root-eligibility
+    // view and stop before the next frozen-set boundary.
+    const auto* context{client_model.node().context()};
+    if (context == nullptr || context->chainman == nullptr ||
+        deterministicMNManager == nullptr) {
+        return std::nullopt;
+    }
+
+    LOCK(cs_main);
+    const CBlockIndex* index{
+        context->chainman->m_blockman.LookupBlockIndex(
+            mn_list.GetBlockHash())};
+    std::vector<CDeterministicMNCPtr> payees;
+    if (index == nullptr ||
+        !deterministicMNManager->GetProjectedMNPayeesForBlock(
+            index, std::numeric_limits<int>::max(), payees)) {
+        return std::nullopt;
+    }
+    return payees;
+}
+
+} // namespace
+
 int GetOffsetFromUtc()
 {
 #if QT_VERSION < 0x050200
@@ -64,12 +126,25 @@ MasternodeList::MasternodeList(QWidget* parent) :
 
     int columnNEVMAddressWidth = 130;
 
-    ui->tableWidgetMasternodesDIP3->insertColumn(11);
-    ui->tableWidgetMasternodesDIP3->setHorizontalHeaderItem(11, new QTableWidgetItem(tr("NEVM Address")));
-    ui->tableWidgetMasternodesDIP3->setColumnWidth(11, columnNEVMAddressWidth);
-    
-    ui->tableWidgetMasternodesDIP3->insertColumn(12);
-    ui->tableWidgetMasternodesDIP3->setColumnHidden(12, true);
+    ui->tableWidgetMasternodesDIP3->insertColumn(COLUMN_NEVM_ADDRESS);
+    ui->tableWidgetMasternodesDIP3->setHorizontalHeaderItem(
+        COLUMN_NEVM_ADDRESS, new QTableWidgetItem(tr("NEVM Address")));
+    ui->tableWidgetMasternodesDIP3->setColumnWidth(
+        COLUMN_NEVM_ADDRESS, columnNEVMAddressWidth);
+
+    ui->tableWidgetMasternodesDIP3->insertColumn(
+        COLUMN_PAYMENT_AUDIT_MISSES);
+    auto* paymentAuditHeader = new QTableWidgetItem(tr("Audit Misses"));
+    paymentAuditHeader->setToolTip(tr(
+        "Consecutive payment-audit misses. Payments are withheld at 2/2."));
+    ui->tableWidgetMasternodesDIP3->setHorizontalHeaderItem(
+        COLUMN_PAYMENT_AUDIT_MISSES, paymentAuditHeader);
+    ui->tableWidgetMasternodesDIP3->setColumnWidth(
+        COLUMN_PAYMENT_AUDIT_MISSES, 90);
+
+    ui->tableWidgetMasternodesDIP3->insertColumn(COLUMN_PROTX_HASH);
+    ui->tableWidgetMasternodesDIP3->setColumnHidden(
+        COLUMN_PROTX_HASH, true);
     
 
     ui->tableWidgetMasternodesDIP3->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -145,32 +220,39 @@ void MasternodeList::handleMasternodeListChanged()
 
 void MasternodeList::updateDIP3ListScheduled()
 {
-    TRY_LOCK(cs_dip3list, fLockAcquired);
-    if (!fLockAcquired) return;
+    bool should_update{false};
+    {
+        TRY_LOCK(cs_dip3list, fLockAcquired);
+        if (!fLockAcquired) return;
 
-    if (!clientModel || clientModel->node().shutdownRequested()) {
-        return;
+        if (!clientModel || clientModel->node().shutdownRequested()) {
+            return;
+        }
+
+        // To prevent high cpu usage update only once in MASTERNODELIST_FILTER_COOLDOWN_SECONDS seconds
+        // after filter was last changed unless we want to force the update.
+        if (fFilterUpdatedDIP3) {
+            int64_t nSecondsToWait = nTimeFilterUpdatedDIP3 - GetTime() + MASTERNODELIST_FILTER_COOLDOWN_SECONDS;
+            ui->countLabelDIP3->setText(QString::fromStdString(strprintf("Please wait... %d", nSecondsToWait)));
+
+            if (nSecondsToWait <= 0) {
+                fFilterUpdatedDIP3 = false;
+                should_update = true;
+            }
+        } else if (mnListChanged) {
+            int64_t nMnListUpdateSecods = clientModel->masternodeSync().isBlockchainSynced() ? MASTERNODELIST_UPDATE_SECONDS : MASTERNODELIST_UPDATE_SECONDS*10;
+            int64_t nSecondsToWait = nTimeUpdatedDIP3 - GetTime() + nMnListUpdateSecods;
+
+            if (nSecondsToWait <= 0) {
+                mnListChanged = false;
+                should_update = true;
+            }
+        }
     }
 
-    // To prevent high cpu usage update only once in MASTERNODELIST_FILTER_COOLDOWN_SECONDS seconds
-    // after filter was last changed unless we want to force the update.
-    if (fFilterUpdatedDIP3) {
-        int64_t nSecondsToWait = nTimeFilterUpdatedDIP3 - GetTime() + MASTERNODELIST_FILTER_COOLDOWN_SECONDS;
-        ui->countLabelDIP3->setText(QString::fromStdString(strprintf("Please wait... %d", nSecondsToWait)));
-
-        if (nSecondsToWait <= 0) {
-            updateDIP3List();
-            fFilterUpdatedDIP3 = false;
-        }
-    } else if (mnListChanged) {
-        int64_t nMnListUpdateSecods = clientModel->masternodeSync().isBlockchainSynced() ? MASTERNODELIST_UPDATE_SECONDS : MASTERNODELIST_UPDATE_SECONDS*10;
-        int64_t nSecondsToWait = nTimeUpdatedDIP3 - GetTime() + nMnListUpdateSecods;
-
-        if (nSecondsToWait <= 0) {
-            updateDIP3List();
-            mnListChanged = false;
-        }
-    }
+    // SYSCOIN: Projection lookup takes cs_main, so never call it while the UI
+    // list mutex is held. A concurrent change simply schedules another pass.
+    if (should_update) updateDIP3List();
 }
 
 void MasternodeList::updateDIP3List()
@@ -180,6 +262,9 @@ void MasternodeList::updateDIP3List()
     }
 
     auto mnList = clientModel->getMasternodeList();
+    const auto paymentAuditState{GetPaymentAuditState(*clientModel, mnList)};
+    const auto knownProjectedPayees{
+        GetKnownProjectedPayees(*clientModel, mnList)};
     std::map<uint256, CTxDestination> mapCollateralDests;
 
     {
@@ -204,11 +289,13 @@ void MasternodeList::updateDIP3List()
 
     nTimeUpdatedDIP3 = GetTime();
 
-    auto projectedPayees = mnList.GetProjectedMNPayees();
     std::map<uint256, int> nextPayments;
-    for (size_t i = 0; i < projectedPayees.size(); i++) {
-        const auto& dmn = projectedPayees[i];
-        nextPayments.emplace(dmn->proTxHash, mnList.GetHeight() + (int)i + 1);
+    if (!mnList.IsNull() && knownProjectedPayees) {
+        for (size_t i = 0; i < knownProjectedPayees->size(); i++) {
+            const auto& dmn = (*knownProjectedPayees)[i];
+            nextPayments.emplace(
+                dmn->proTxHash, mnList.GetHeight() + (int)i + 1);
+        }
     }
 
     std::set<COutPoint> setOutpts;
@@ -232,12 +319,40 @@ void MasternodeList::updateDIP3List()
         // populate list
         // Address, Protocol, Status, Active Seconds, Last Seen, Pub Key
         QTableWidgetItem* addressItem = new QTableWidgetItem(QString::fromStdString(dmn.pdmnState->addr.ToStringAddrPort()));
-        QTableWidgetItem* statusItem = new QTableWidgetItem(mnList.IsMNValid(dmn) ? tr("ENABLED") : (mnList.IsMNPoSeBanned(dmn) ? tr("POSE_BANNED") : tr("UNKNOWN")));
+        const uint8_t paymentAuditMisses{
+            paymentAuditState
+                ? paymentAuditState->MissCount(dmn.proTxHash)
+                : uint8_t{0}};
+        const bool paymentWithheld{
+            paymentAuditState &&
+            paymentAuditState->IsPaymentWithheld(dmn.proTxHash)};
+        const QString status{
+            mnList.IsMNPoSeBanned(dmn)
+                ? tr("POSE_BANNED")
+                : paymentWithheld
+                    ? tr("PAYMENT_WITHHELD")
+                    : mnList.IsMNValid(dmn) ? tr("ENABLED") : tr("UNKNOWN")};
+        QTableWidgetItem* statusItem = new QTableWidgetItem(status);
         QTableWidgetItem* PoSeScoreItem = new QTableWidgetItem(QString::number(dmn.pdmnState->nPoSePenalty));
+        QTableWidgetItem* paymentAuditMissesItem = new QTableWidgetItem(
+            paymentAuditState
+                ? tr("%1/%2")
+                      .arg(paymentAuditMisses)
+                      .arg(llmq::pq::PQ_PAYMENT_PROBATION_MAX_MISSES)
+                : tr("N/A"));
+        paymentAuditMissesItem->setToolTip(
+            paymentWithheld
+                ? tr("Payments are withheld until a later audit includes and observes this operator.")
+                : tr("A later positive payment-audit observation clears consecutive misses."));
         QTableWidgetItem* registeredItem = new QTableWidgetItem(QString::number(dmn.pdmnState->nRegisteredHeight));
         QTableWidgetItem* lastPaidItem = new QTableWidgetItem(QString::number(dmn.pdmnState->nLastPaidHeight));
         
-        QTableWidgetItem* nextPaymentItem = new QTableWidgetItem(nextPayments.count(dmn.proTxHash) ? QString::number(nextPayments[dmn.proTxHash]) : tr("UNKNOWN"));
+        QTableWidgetItem* nextPaymentItem = new QTableWidgetItem(
+            paymentWithheld
+                ? tr("WITHHELD")
+                : nextPayments.count(dmn.proTxHash)
+                    ? QString::number(nextPayments[dmn.proTxHash])
+                    : tr("UNKNOWN"));
         // Add NEVM Address
         QString nevmAddressStr = QString::fromStdString(HexStr(dmn.pdmnState->vchNEVMAddress));
         QTableWidgetItem* nevmAddressItem = new QTableWidgetItem(nevmAddressStr);
@@ -294,6 +409,7 @@ void MasternodeList::updateDIP3List()
                         ownerItem->text() + " " +
                         votingItem->text() + " " +
                         nevmAddressItem->text() + " " +
+                        paymentAuditMissesItem->text() + " " +
                         proTxHashItem->text();
             if (!strToFilter.contains(strCurrentFilterDIP3)) return;
         }
@@ -310,8 +426,12 @@ void MasternodeList::updateDIP3List()
         ui->tableWidgetMasternodesDIP3->setItem(0, 8, collateralItem);
         ui->tableWidgetMasternodesDIP3->setItem(0, 9, ownerItem);
         ui->tableWidgetMasternodesDIP3->setItem(0, 10, votingItem);
-        ui->tableWidgetMasternodesDIP3->setItem(0, 11, nevmAddressItem);
-        ui->tableWidgetMasternodesDIP3->setItem(0, 12, proTxHashItem);
+        ui->tableWidgetMasternodesDIP3->setItem(
+            0, COLUMN_NEVM_ADDRESS, nevmAddressItem);
+        ui->tableWidgetMasternodesDIP3->setItem(
+            0, COLUMN_PAYMENT_AUDIT_MISSES, paymentAuditMissesItem);
+        ui->tableWidgetMasternodesDIP3->setItem(
+            0, COLUMN_PROTX_HASH, proTxHashItem);
         
     });
 
@@ -351,7 +471,10 @@ CDeterministicMNCPtr MasternodeList::GetSelectedDIP3MN()
 
         QModelIndex index = selected.at(0);
         int nSelectedRow = index.row();
-        strProTxHash = ui->tableWidgetMasternodesDIP3->item(nSelectedRow, 12)->text().toStdString();
+        strProTxHash = ui->tableWidgetMasternodesDIP3
+                           ->item(nSelectedRow, COLUMN_PROTX_HASH)
+                           ->text()
+                           .toStdString();
     }
 
     uint256 proTxHash;
@@ -370,6 +493,21 @@ void MasternodeList::extraInfoDIP3_clicked()
 
     UniValue json(UniValue::VOBJ);
     dmn->ToJson(*clientModel->node().context()->chain, json);
+    const auto mnList{clientModel->getMasternodeList()};
+    const auto paymentAuditState{GetPaymentAuditState(*clientModel, mnList)};
+    if (paymentAuditState) {
+        UniValue paymentAudit{UniValue::VOBJ};
+        paymentAudit.pushKV(
+            "consecutiveMisses",
+            static_cast<int>(paymentAuditState->MissCount(dmn->proTxHash)));
+        paymentAudit.pushKV(
+            "paymentWithheld",
+            paymentAuditState->IsPaymentWithheld(dmn->proTxHash));
+        paymentAudit.pushKV(
+            "paymentEligibleSinceHeight",
+            paymentAuditState->PaymentEligibleSinceHeight(dmn->proTxHash));
+        json.pushKV("paymentAudit", std::move(paymentAudit));
+    }
 
     // Title of popup window
     QString strWindowtitle = tr("Additional information for DIP3 Masternode %1").arg(QString::fromStdString(dmn->proTxHash.ToString()));

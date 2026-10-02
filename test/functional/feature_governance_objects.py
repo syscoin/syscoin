@@ -75,6 +75,20 @@ class SyscoinGovernanceTest (DashTestFramework):
         for i in range(len(expected_order)):
             validate_object(expected_order[i], rpc_list_prepared[i])
 
+        # Confirm and submit a prepared proposal through the RPC rate check.
+        # DEBUG_LOCKORDER builds must accept it without reversing the chain
+        # and governance locks; preparing an object alone does not reach this.
+        self.log.info("Submitting a proposal with confirmed collateral")
+        self.generate(self.nodes[0], 6)
+        proposal_hash = self.nodes[0].gobject_submit(
+            p5["parentHash"], p5["revision"], p5["createdAt"],
+            p5["hex"], p5["collateralHash"])
+        submitted = self.nodes[0].gobject_get(proposal_hash)
+        assert_equal(submitted["Hash"], proposal_hash)
+        assert_equal(submitted["DataHex"], p5["hex"])
+        assert_equal(submitted["CollateralHash"], p5["collateralHash"])
+        assert_equal(submitted["ObjectType"], object_type)
+
         # Create two more with the same time
         self.prepare_object(object_type, "%064x" % 0, time_start + 60, 1, "SameTime1", 2)
         self.prepare_object(object_type, "%064x" % 0, time_start + 60, 2, "SameTime2", 2)
