@@ -207,7 +207,13 @@ bool InspectLegacyBlock(const ChainstateManager& chainman,
     }
 }
 
-bool InspectLegacyHistory(ChainstateManager& chainman,
+ChainstateLoadStatus PreparationFailure(bilingual_str& error, const std::string& message)
+{
+    Fail(error, message);
+    return ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB;
+}
+
+ChainstateLoadStatus InspectLegacyHistory(ChainstateManager& chainman,
                           const ChainstateLoadOptions& options,
                           BlockTreeDB& db, const uint256& best,
                           const CDiskBlockIndex& tip,
@@ -220,17 +226,17 @@ bool InspectLegacyHistory(ChainstateManager& chainman,
     const auto pruned{ReadExact<std::pair<uint8_t, std::string>, uint8_t>(
         db, {DB_FLAG, "prunedblockfiles"}, sizeof(uint8_t))};
     if (pruned && *pruned != uint8_t{'0'} && *pruned != uint8_t{'1'}) {
-        return Fail(error, "Invalid legacy pruning flag; the datadir was not changed.");
+        return PreparationFailure(error, "Invalid legacy pruning flag; the datadir was not changed.");
     }
     if (pruned && *pruned == uint8_t{'1'}) {
-        return Fail(error,
+        return PreparationFailure(error,
             "Automatic PQ upgrade requires the complete local block history. "
             "This legacy datadir was pruned; restore an unpruned legacy datadir "
             "before upgrading. No chainstate was erased.");
     }
     if (require_legacy_validity &&
         (!tip.IsValid(BLOCK_VALID_SCRIPTS) || tip.IsAssumedValid())) {
-        return Fail(error,
+        return PreparationFailure(error,
             "The legacy coins tip is not fully validated. Finish validation "
             "with the legacy Syscoin release before the PQ upgrade.");
     }
@@ -249,19 +255,20 @@ bool InspectLegacyHistory(ChainstateManager& chainman,
               record.activation_height);
     for (int32_t height{tip.nHeight}; height >= 0; --height) {
         if (options.check_interrupt && options.check_interrupt()) {
-            return Fail(error, "PQ upgrade preflight interrupted; no chainstate was erased.");
+            error = Untranslated("PQ upgrade preflight interrupted; no chainstate was erased.");
+            return ChainstateLoadStatus::INTERRUPTED;
         }
         if (cursor.nHeight != height ||
             (require_legacy_validity &&
              ((cursor.nStatus & (BLOCK_FAILED_MASK | BLOCK_CONFLICT_CHAINLOCK)) != 0 ||
               cursor.IsAssumedValid() ||
               (height > 0 && !cursor.IsValid(BLOCK_VALID_SCRIPTS))))) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "Legacy history is inconsistent or not fully validated. "
                 "Finish validation with the legacy Syscoin release before upgrading.");
         }
         if ((cursor.nStatus & BLOCK_HAVE_DATA) == 0 || cursor.nFile < 0) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "Automatic PQ upgrade requires every local block body. "
                 "Legacy history is pruned or incomplete; no chainstate was erased.");
         }
@@ -270,28 +277,28 @@ bool InspectLegacyHistory(ChainstateManager& chainman,
             const fs::path file{chainman.m_blockman.GetBlockPosFilename(
                 FlatFilePos{cursor.nFile, 0})};
             if (!fs::is_regular_file(file)) {
-                return Fail(error,
+                return PreparationFailure(error,
                     "A legacy block file is missing. Restore the complete "
                     "local block history before upgrading; no chainstate was erased.");
             }
             found = block_file_sizes.emplace(cursor.nFile, fs::file_size(file)).first;
         }
-        if (!InspectLegacyBlock(chainman, cursor, hash, found->second, error)) return false;
+        if (!InspectLegacyBlock(chainman, cursor, hash, found->second, error)) return ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB;
         if (height == predecessor_height) record.predecessor_hash = hash;
         if (height == 0) {
             if (hash != consensus.hashGenesisBlock || !cursor.hashPrev.IsNull()) {
-                return Fail(error,
+                return PreparationFailure(error,
                     "Legacy history has the wrong genesis; the datadir was not changed.");
             }
             break;
         }
         hash = cursor.hashPrev;
-        if (!ReadSourceIndex(db, hash, cursor, error)) return false;
+        if (!ReadSourceIndex(db, hash, cursor, error)) return ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB;
     }
     if (!record.IsValid()) {
-        return Fail(error, "Cannot authenticate the legacy activation predecessor.");
+        return PreparationFailure(error, "Cannot authenticate the legacy activation predecessor.");
     }
-    return true;
+    return ChainstateLoadStatus::SUCCESS;
 }
 
 void RequestPairedReplay(ChainstateManager& chainman,
@@ -306,14 +313,14 @@ void RequestPairedReplay(ChainstateManager& chainman,
 }
 } // namespace
 
-bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
+ChainstateLoadStatus PreparePQLegacyUpgrade(ChainstateManager& chainman,
                             ChainstateLoadOptions& options,
                             const CacheSizes& cache_sizes,
                             bilingual_str& error)
 {
     AssertLockHeld(cs_main);
     error = {};
-    if (options.block_tree_db_in_memory || options.coins_db_in_memory) return true;
+    if (options.block_tree_db_in_memory || options.coins_db_in_memory) return ChainstateLoadStatus::SUCCESS;
     (void)cache_sizes; // Inspection is bounded independently of the live caches.
     try {
         const auto& consensus{chainman.GetConsensus()};
@@ -322,7 +329,7 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
         if (!consensus.hashPQLegacyBootstrapBlock.IsNull()) {
             if (Consensus::CheckPQActivationConfiguration(consensus) !=
                     Consensus::PQActivationResult::VALID) {
-                return Fail(error, "The PQ legacy bootstrap checkpoint requires a valid activation height.");
+                return PreparationFailure(error, "The PQ legacy bootstrap checkpoint requires a valid activation height.");
             }
             // Inspect before a requested reindex can erase the block index.
             // A later release may authenticate fresh history, never replace
@@ -337,7 +344,7 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
                         handoff.state == PQActivationHandoffState::FAILED ||
                         (handoff.state == PQActivationHandoffState::PINNED &&
                          handoff.predecessor_hash != consensus.hashPQLegacyBootstrapBlock)) {
-                        return Fail(error, "The saved PQ handoff conflicts with the release bootstrap "
+                        return PreparationFailure(error, "The saved PQ handoff conflicts with the release bootstrap "
                                            "checkpoint; no chainstate was erased.");
                     }
                 }
@@ -350,14 +357,14 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
                 record->activation_height != consensus.nPQActivationHeight ||
                 (!consensus.hashPQLegacyBootstrapBlock.IsNull() &&
                  record->predecessor_hash != consensus.hashPQLegacyBootstrapBlock)) {
-                return Fail(error,
+                return PreparationFailure(error,
                     "The saved PQ upgrade disagrees with the network, activation "
                     "height, or legacy bootstrap checkpoint; the datadir was not changed.");
             }
             if (record->phase == PQLegacyUpgradePhase::REBUILD_REQUIRED &&
                 !options.reindex && !options.reindex_chainstate) {
                 uint256 best;
-                if (!ReadLegacyCoinsTip(chainman, best, error)) return false;
+                if (!ReadLegacyCoinsTip(chainman, best, error)) return ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB;
                 if (best == record->legacy_tip_hash) {
                     // An interrupted preparation may still be about to erase
                     // the original coins. Recheck its replay inputs, including
@@ -366,17 +373,18 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
                     // may already have been lowered before the coins reset.
                     const fs::path index_path{datadir / "blocks" / "index"};
                     if (!fs::exists(index_path)) {
-                        return Fail(error, "The saved PQ upgrade has no retained block index; "
+                        return PreparationFailure(error, "The saved PQ upgrade has no retained block index; "
                                            "no chainstate was erased.");
                     }
                     BlockTreeDB block_db{InspectionParams(chainman, index_path)};
                     CDiskBlockIndex tip;
-                    if (!ReadSourceIndex(block_db, best, tip, error)) return false;
+                    if (!ReadSourceIndex(block_db, best, tip, error)) return ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB;
                     PQLegacyUpgradeRecord inspected;
-                    if (!InspectLegacyHistory(chainman, options, block_db, best, tip,
-                            inspected, error, /*require_legacy_validity=*/false)) return false;
+                    const auto status{InspectLegacyHistory(chainman, options, block_db, best, tip,
+                        inspected, error, /*require_legacy_validity=*/false)};
+                    if (status != ChainstateLoadStatus::SUCCESS) return status;
                     if (inspected != *record) {
-                        return Fail(error, "Retained legacy history disagrees with the saved PQ "
+                        return PreparationFailure(error, "Retained legacy history disagrees with the saved PQ "
                                            "upgrade; no chainstate was erased.");
                     }
                 }
@@ -384,16 +392,16 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
             if (record->phase == PQLegacyUpgradePhase::REBUILD_REQUIRED ||
                 options.reindex || options.reindex_chainstate) {
                 if (!journal.RequireReplayRebuild()) {
-                    return Fail(error, "Cannot persist the paired PQ rebuild request.");
+                    return PreparationFailure(error, "Cannot persist the paired PQ rebuild request.");
                 }
                 record->phase = PQLegacyUpgradePhase::REBUILD_REQUIRED;
                 RequestPairedReplay(chainman, options, *record);
             } else {
                 chainman.SetPQLegacyUpgrade(*record, /*rebuilding=*/false);
             }
-            return true;
+            return ChainstateLoadStatus::SUCCESS;
         }
-        if (journal.HasBLSFreeHistory()) return true;
+        if (journal.HasBLSFreeHistory()) return ChainstateLoadStatus::SUCCESS;
 
         NEVMRootSchema roots{NEVMRootSchema::EMPTY};
         const fs::path root_path{datadir / "nevmtxroots"};
@@ -402,49 +410,49 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
             roots = InspectNEVMRootSchema(root_db);
         }
         if (roots == NEVMRootSchema::CORRUPT) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "Cannot identify the NEVM roots database for PQ upgrade. "
                 "Restore a valid datadir before upgrading; no chainstate was erased.");
         }
         const bool has_inverse{fs::exists(datadir / "evodb_dmn_inverse")};
         if (has_inverse && roots == NEVMRootSchema::LEGACY) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "Legacy NEVM roots coexist with new inverse-journal state. "
                 "The datadir's validation origin is ambiguous; automatic PQ "
                 "upgrade cannot capture it and no chainstate was erased.");
         }
         if (roots == NEVMRootSchema::CURRENT || has_inverse) {
-            return journal.MarkBLSFreeHistory() ||
-                   Fail(error, "Cannot persist the BLS-free history origin marker.");
+            return journal.MarkBLSFreeHistory() ? ChainstateLoadStatus::SUCCESS :
+                   PreparationFailure(error, "Cannot persist the BLS-free history origin marker.");
         }
 
         uint256 best;
-        if (!ReadLegacyCoinsTip(chainman, best, error)) return false;
+        if (!ReadLegacyCoinsTip(chainman, best, error)) return ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB;
         if (best.IsNull()) {
             if (roots == NEVMRootSchema::LEGACY) {
-                return Fail(error,
+                return PreparationFailure(error,
                     "Legacy NEVM roots have no clean coins endpoint. Restore "
                     "a complete legacy datadir before the PQ upgrade.");
             }
-            return journal.MarkBLSFreeHistory() ||
-                   Fail(error, "Cannot persist the BLS-free history origin marker.");
+            return journal.MarkBLSFreeHistory() ? ChainstateLoadStatus::SUCCESS :
+                   PreparationFailure(error, "Cannot persist the BLS-free history origin marker.");
         }
         const fs::path block_index_path{datadir / "blocks" / "index"};
         if (!fs::exists(block_index_path)) {
-            return Fail(error, "Legacy coins have no block index; the datadir was not changed.");
+            return PreparationFailure(error, "Legacy coins have no block index; the datadir was not changed.");
         }
         BlockTreeDB block_db{InspectionParams(chainman, block_index_path)};
         CDiskBlockIndex tip;
-        if (!ReadSourceIndex(block_db, best, tip, error)) return false;
+        if (!ReadSourceIndex(block_db, best, tip, error)) return ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB;
         if (roots == NEVMRootSchema::EMPTY &&
             tip.nHeight >= consensus.nNEVMStartBlock) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "The existing chainstate is missing its NEVM roots. It cannot "
                 "establish legacy upgrade provenance; no chainstate was erased.");
         }
         if (fs::exists(datadir / fs::u8path(
                 "chainstate" + std::string{SNAPSHOT_CHAINSTATE_SUFFIX}))) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "An AssumeUTXO snapshot chainstate is present. Automatic PQ "
                 "upgrade requires the fully validated legacy active chainstate; "
                 "finish snapshot validation with the legacy release first. "
@@ -452,20 +460,20 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
         }
         if (Consensus::CheckPQActivationConfiguration(consensus) !=
             Consensus::PQActivationResult::VALID) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "This legacy datadir requires a PQ release with a configured "
                 "activation height. The sync-only release cannot upgrade it; "
                 "continue using the legacy release. No chainstate was erased.");
         }
         if (tip.nHeight < consensus.nPQActivationHeight - 1) {
-            return Fail(error,
+            return PreparationFailure(error,
                 "The legacy datadir has not reached the block before PQ "
                 "activation. Continue syncing with the legacy release through "
                 "activation height minus one, shut down cleanly, then upgrade.");
         }
         const fs::path dmn_path{datadir / "evodb_dmn"};
         if (!fs::exists(dmn_path)) {
-            return Fail(error, "The legacy deterministic masternode snapshot is missing.");
+            return PreparationFailure(error, "The legacy deterministic masternode snapshot is missing.");
         }
         {
             CDBWrapper dmn_db{InspectionParams(chainman, dmn_path)};
@@ -475,30 +483,31 @@ bool PreparePQLegacyUpgrade(ChainstateManager& chainman,
             if (!snapshot || snapshot->IsNull() ||
                 snapshot->GetBlockHash() != best ||
                 snapshot->GetHeight() != tip.nHeight) {
-                return Fail(error,
+                return PreparationFailure(error,
                     "The exact legacy coins-tip masternode snapshot is missing "
                     "or inconsistent; no chainstate was erased.");
             }
         }
 
         PQLegacyUpgradeRecord record;
-        if (!InspectLegacyHistory(chainman, options, block_db, best, tip,
-                                   record, error)) return false;
+        const auto status{InspectLegacyHistory(chainman, options, block_db, best, tip,
+                                               record, error)};
+        if (status != ChainstateLoadStatus::SUCCESS) return status;
         if (!consensus.hashPQLegacyBootstrapBlock.IsNull() &&
             record.predecessor_hash != consensus.hashPQLegacyBootstrapBlock) {
-            return Fail(error, "The legacy predecessor conflicts with the release bootstrap "
+            return PreparationFailure(error, "The legacy predecessor conflicts with the release bootstrap "
                                "checkpoint; no chainstate was erased.");
         }
         if (!journal.CaptureLegacyUpgrade(record)) {
-            return Fail(error, "Cannot persist authenticated legacy upgrade provenance.");
+            return PreparationFailure(error, "Cannot persist authenticated legacy upgrade provenance.");
         }
         RequestPairedReplay(chainman, options, record);
         LogPrintf("Captured legacy PQ predecessor %s at height %d; rebuilding "
                   "Core chainstate and paired Geth from retained local blocks\n",
                   record.predecessor_hash.ToString(), record.activation_height - 1);
-        return true;
+        return ChainstateLoadStatus::SUCCESS;
     } catch (const std::exception& exception) {
-        return Fail(error,
+        return PreparationFailure(error,
             std::string{"Cannot prepare the direct PQ upgrade: "} + exception.what());
     }
 }

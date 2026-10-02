@@ -15,13 +15,15 @@ extern RecursiveMutex cs_main;
 namespace node {
 struct CacheSizes;
 struct ChainstateLoadOptions;
+enum class ChainstateLoadStatus;
 
 /**
  * Inspect legacy provenance and persist a paired-rebuild intent before any
  * chainstate or auxiliary database is opened for normal startup or wiped.
  * All previous handles to those on-disk databases must already be closed.
+ * Returns SUCCESS, INTERRUPTED, or FAILURE_INCOMPATIBLE_DB.
  */
-[[nodiscard]] bool PreparePQLegacyUpgrade(
+[[nodiscard]] ChainstateLoadStatus PreparePQLegacyUpgrade(
     ChainstateManager& chainman,
     ChainstateLoadOptions& options,
     const CacheSizes& cache_sizes,

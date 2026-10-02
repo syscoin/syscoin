@@ -237,7 +237,7 @@ struct LegacyMigrationSetup : ChainTestingSetup {
     {
         LOCK(cs_main);
         return node::PreparePQLegacyUpgrade(*m_node.chainman, options,
-                                           m_cache_sizes, error);
+                                           m_cache_sizes, error) == node::ChainstateLoadStatus::SUCCESS;
     }
 
     void CheckCoinsUnchanged()
@@ -516,6 +516,76 @@ BOOST_AUTO_TEST_CASE(legacy_capture_precedes_reindex_and_survives_repeated_plann
     node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
     captured.phase = node::PQLegacyUpgradePhase::REBUILD_REQUIRED;
     BOOST_CHECK(*journal.ReadUpgrade() == captured);
+}
+
+BOOST_AUTO_TEST_CASE(preflight_interrupt_returns_shutdown_status_and_can_retry)
+{
+    MakeLegacy();
+    int inspected{0};
+    node::ChainstateLoadOptions options;
+    // Interrupt after inspection has started, not at a generic startup gate.
+    options.check_interrupt = [&] { return ++inspected == 2; };
+    const auto [status, message]{node::LoadChainstate(*m_node.chainman, m_cache_sizes, options)};
+    BOOST_CHECK(status == node::ChainstateLoadStatus::INTERRUPTED);
+    BOOST_CHECK(message.original.find("preflight interrupted") != std::string::npos);
+    BOOST_CHECK_EQUAL(inspected, 2);
+    BOOST_CHECK(!fReindexGeth);
+    CheckUncapturedAndUnchanged();
+
+    options.check_interrupt = {};
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+    CheckCoinsUnchanged();
+}
+
+BOOST_AUTO_TEST_CASE(resumed_preflight_interrupt_preserves_saved_capture)
+{
+    MakeLegacy();
+    node::ChainstateLoadOptions options;
+    bilingual_str error;
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    node::PQLegacyUpgradeRecord captured;
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.ReadUpgrade());
+        captured = *journal.ReadUpgrade();
+    }
+    options = {};
+    fReindexGeth = false;
+    options.check_interrupt = [] { return true; };
+    const auto [status, message]{node::LoadChainstate(*m_node.chainman, m_cache_sizes, options)};
+    BOOST_CHECK(status == node::ChainstateLoadStatus::INTERRUPTED);
+    BOOST_CHECK(message.original.find("preflight interrupted") != std::string::npos);
+    BOOST_CHECK(!fReindexGeth);
+    CheckCoinsUnchanged();
+    {
+        node::PQLegacyUpgradeJournal journal{DB("pq-upgrade")};
+        BOOST_REQUIRE(journal.ReadUpgrade());
+        BOOST_CHECK(*journal.ReadUpgrade() == captured);
+    }
+    options.check_interrupt = {};
+    BOOST_REQUIRE_MESSAGE(Plan(options, error), error.original);
+    BOOST_CHECK(options.reindex_chainstate);
+    BOOST_CHECK(options.fReindexGeth);
+}
+
+BOOST_AUTO_TEST_CASE(preflight_body_error_remains_incompatible_database)
+{
+    MakeLegacy();
+    fs::resize_file(BlockFile(), positions.back() + 80);
+    int inspected{0};
+    node::ChainstateLoadOptions options;
+    // A real failure must not be reclassified by polling for a later interrupt.
+    options.check_interrupt = [&] { return ++inspected > 1; };
+    const auto [status, message]{node::LoadChainstate(*m_node.chainman, m_cache_sizes, options)};
+    BOOST_CHECK(status == node::ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB);
+    BOOST_CHECK(!message.empty());
+    BOOST_CHECK_EQUAL(inspected, 1);
+    BOOST_CHECK(!fReindexGeth);
+    CheckUncapturedAndUnchanged();
 }
 
 BOOST_AUTO_TEST_CASE(interrupted_capture_rechecks_bodies_but_replay_ready_preserves_progress)

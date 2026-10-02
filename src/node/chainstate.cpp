@@ -532,9 +532,10 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
     // resetting again after an interrupted launch.
     chainman.m_blockman.m_block_tree_db.reset();
     bilingual_str upgrade_error;
-    if (!PreparePQLegacyUpgrade(chainman, effective_options, cache_sizes,
-                                upgrade_error)) {
-        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB, upgrade_error};
+    const auto upgrade_status{PreparePQLegacyUpgrade(chainman, effective_options, cache_sizes,
+                                                     upgrade_error)};
+    if (upgrade_status != ChainstateLoadStatus::SUCCESS) {
+        return {upgrade_status, upgrade_error};
     }
 
     chainman.m_total_coinstip_cache = cache_sizes.coins;
