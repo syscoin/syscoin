@@ -43,7 +43,7 @@ bool CZMQAbstractNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nS
 {
     return true;
 }
-bool CZMQAbstractNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state)
+bool CZMQAbstractNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection)
 {
     return true;
 }

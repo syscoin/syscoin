@@ -87,7 +87,7 @@ public:
     virtual bool NotifyGetNEVMBlockInfo(uint64_t &nHeight,
                                         uint256& nSYSBlockHash,
                                         std::string &state);
-    virtual bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
+    virtual bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection = nullptr);
     virtual bool NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr);
 
 protected:

@@ -205,7 +205,7 @@ protected:
     virtual void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
                                         uint256& nSYSBlockHash,
                                         std::string &state) {}
-    virtual void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {}
+    virtual void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection = nullptr) {}
     virtual void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) {}
     friend class ValidationInterfaceTest;
 };
@@ -254,7 +254,7 @@ public:
     void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
                                 uint256& nSYSBlockHash,
                                 std::string &state);
-    void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state);
+    void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection = nullptr);
     void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr);
 };
 

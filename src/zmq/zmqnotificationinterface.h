@@ -54,7 +54,7 @@ protected:
     void NotifyGetNEVMBlockInfo(uint64_t &nHeight,
                                 uint256& nSYSBlockHash,
                                 std::string& state) override;
-    void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string& state) override;
+    void NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection = nullptr) override;
     void NotifyNEVMComms(const std::string& commMessage, bool &bResponse, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 private:
     friend class CZMQNotificationInterfaceTestAccess;

@@ -707,9 +707,11 @@ bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight,
     return true;
 }
 
-bool CZMQPublishNEVMBlockNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state)
+bool CZMQPublishNEVMBlockNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection)
 {
     LOCK(cs_nevm);
+    state.clear();
+    if (rejection) rejection->reset();
     if(bFirstTime) {
         bFirstTime = false;
         bool bResponse = false;
@@ -730,7 +732,7 @@ bool CZMQPublishNEVMBlockNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std:
     }
     std::vector<std::string> parts;
     if(ReceiveZmqMessage(parts)) {
-        if(parts.size() != 2) {
+        if(parts.size() != 2 && parts.size() != 3) {
             state = "nevm-response-invalid-parts";
             return false;
         }
@@ -738,31 +740,62 @@ bool CZMQPublishNEVMBlockNotifier::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std:
             state = "nevm-response-wrong-command";
             return false;
         }
+        // Template creation flushes deferred imports. Preserve an earlier
+        // rejected pair for Core reconciliation without parsing error text as
+        // a serialized template or discarding this request socket.
+        if (parts.size() == 3) {
+            if (parts[1] != "error") {
+                state = "nevm-response-invalid-parts";
+                return false;
+            }
+            const auto parsed{ParseNEVMBlockReject(parts[2])};
+            if (rejection) *rejection = parsed;
+            if (parsed) {
+                state = parsed->IsPayload() ? "nevm-template-payload-invalid"
+                                            : "nevm-template-consensus-invalid";
+            } else {
+                state = parts[2].starts_with("template-failed:")
+                    ? "nevm-template-failed" : "nevm-template-response-invalid-data";
+            }
+            LogPrint(BCLog::SYS, "NotifyGetNEVMBlock: %s\n", parts[2]);
+            return false;
+        }
+        if (parts[1] == "error") {
+            state = "nevm-response-invalid-parts";
+            return false;
+        }
         const std::vector<unsigned char> evmData{parts[1].begin(), parts[1].end()};
         // SYSCOIN
         CDataStream ss(evmData, SER_NETWORK, PROTOCOL_VERSION);
+        CNEVMBlock candidate;
         try {
-            ss >> evmBlock;
+            // Geth includes NEVMBlockConnect metadata after this prefix.
+            // Retain compatibility with that existing template response.
+            ss >> candidate;
         } catch (const std::exception&) {
             state = "nevm-response-unserialize";
             return false;
         }
-        if(evmBlock.nBlockHash.IsNull()) {
+        if(candidate.nBlockHash.IsNull()) {
             state = "nevm-response-parse-hash";
             return false;
         }
-        if(evmBlock.nTxRoot.IsNull()) {
+        if(candidate.nTxRoot.IsNull()) {
             state = "nevm-response-invalid-txroot";
             return false;
         }
-        if(evmBlock.nReceiptRoot.IsNull()) {
+        if(candidate.nReceiptRoot.IsNull()) {
             state = "nevm-response-invalid-receiptroot";
             return false;
         }
-        if(evmBlock.vchNEVMBlockData.empty()) {
+        if(candidate.vchNEVMBlockData.empty()) {
             state = "nevm-response-empty-data";
             return false;
         }
+        evmBlock.nBlockHash = candidate.nBlockHash;
+        evmBlock.nTxRoot = candidate.nTxRoot;
+        evmBlock.nReceiptRoot = candidate.nReceiptRoot;
+        evmBlock.vchNEVMBlockData = std::move(candidate.vchNEVMBlockData);
     } else {
         state = "nevm-response-not-found";
         return false;

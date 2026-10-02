@@ -3425,7 +3425,15 @@ bool ChainstateManager::PrepareNEVMBlockProduction()
     const CBlockIndex* tip{ActiveTip()};
     return !fNEVMConnection || tip == nullptr ||
         int64_t{tip->nHeight} + 1 < GetConsensus().nNEVMStartBlock ||
-        !m_nevm_prefix_recovery_needed;
+        (!m_nevm_prefix_recovery_needed && !m_nevm_template_rejection);
+}
+
+void ChainstateManager::RequestNEVMBlockProductionRecovery(
+    const std::optional<NEVMBlockReject>& rejection)
+{
+    AssertLockHeld(cs_main);
+    m_nevm_prefix_recovery_needed = true;
+    if (rejection && !m_nevm_template_rejection) m_nevm_template_rejection = rejection;
 }
 
 bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
@@ -3433,7 +3441,7 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
     AssertLockNotHeld(cs_main);
     error.clear();
     const auto recovery_pending = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
-        return m_nevm_prefix_recovery_needed && fNEVMConnection &&
+        return (m_nevm_prefix_recovery_needed || m_nevm_template_rejection) && fNEVMConnection &&
             !m_interrupt && !m_blockman.LoadingBlocks() &&
             IsPQBlockProductionAllowed() && NEVMBlockProductionPrerequisitesMet();
     };
@@ -3458,61 +3466,85 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
             if (chainstate != &ActiveChainstate() || !recovery_pending()) return true;
             const CBlockIndex* tip{ActiveTip()};
             if (tip == nullptr) return true;
-            // SYSCOIN BEGIN: Preserve the known attempted child across ticks.
-            CBlockIndex* pending{chainstate->NEVMPendingConnectAttempt()};
-            // SYSCOIN: A retired or unselected child may only be compensated,
-            // never published on the strength of its recorded external effect.
-            const bool cancel_pending{pending && chainstate->NEVMPendingConnectCandidate() != pending};
-            if (cancel_pending) chainstate->m_nevm_activation_continuation = true;
-            if (chainstate->RecoverNEVMPrefixThrough(*tip, pending, error, rejection)) {
-                if (cancel_pending && m_nevm_prefix_recovery_needed &&
-                    !chainstate->CancelUnselectedNEVMPendingConnect(*pending, error)) {
-                    return false;
+            rejection = m_nevm_template_rejection;
+            if (rejection) {
+                const auto* rejected{m_blockman.LookupBlockIndex(rejection->syscoin_hash)};
+                // A concurrent reorg may already have retired the failed branch.
+                // Verify the newly selected endpoint through ordinary recovery.
+                if (!rejected || !chainstate->m_chain.Contains(rejected)) {
+                    m_nevm_template_rejection.reset();
+                    rejection.reset();
                 }
-                if (!m_nevm_prefix_recovery_needed) {
-                    // SYSCOIN: This worker owns the completed endpoint proof;
-                    // unlike a live-prefix retry, it has no send in flight.
-                    const int64_t start{GetConsensus().nNEVMStartBlock};
-                    const uint64_t count{tip->nHeight < start ? 0 :
-                        static_cast<uint64_t>(int64_t{tip->nHeight} - start + 1)};
-                    if (!ClearNEVMPendingConnect(count, count ? tip->GetBlockHash() : uint256{}, error)) {
-                        m_nevm_prefix_recovery_needed = true;
+            }
+            if (!rejection) {
+                // SYSCOIN BEGIN: Preserve the known attempted child across ticks.
+                CBlockIndex* pending{chainstate->NEVMPendingConnectAttempt()};
+                // SYSCOIN: A retired or unselected child may only be compensated,
+                // never published on the strength of its recorded external effect.
+                const bool cancel_pending{pending && chainstate->NEVMPendingConnectCandidate() != pending};
+                if (cancel_pending) chainstate->m_nevm_activation_continuation = true;
+                if (chainstate->RecoverNEVMPrefixThrough(*tip, pending, error, rejection)) {
+                    if (cancel_pending && m_nevm_prefix_recovery_needed &&
+                        !chainstate->CancelUnselectedNEVMPendingConnect(*pending, error)) {
                         return false;
                     }
-                    // SYSCOIN BEGIN: Finish selection after resolving engine recovery.
-                    const CBlockIndex* attempted{chainstate->m_nevm_pending_connect
-                        ? m_blockman.LookupBlockIndex(*chainstate->m_nevm_pending_connect) : nullptr};
-                    // SYSCOIN: Parent alignment resolves the recorded attempt
-                    // even if it never applied or its child lost eligibility.
-                    // Ordinary selection still owns the next candidate.
-                    const bool owns_continuation{chainstate->m_nevm_activation_continuation ||
-                        (attempted && (attempted->pprev == tip || chainstate->m_chain.Contains(attempted)))};
-                    const CBlockIndex* next{owns_continuation ? chainstate->FindMostWorkChain() : nullptr};
-                    if (next == nullptr || next == tip) {
-                        chainstate->m_nevm_pending_connect.reset();
-                        chainstate->m_nevm_activation_continuation = false;
-                        return true;
+                    if (!m_nevm_prefix_recovery_needed) {
+                        // SYSCOIN: This worker owns the completed endpoint proof;
+                        // unlike a live-prefix retry, it has no send in flight.
+                        const int64_t start{GetConsensus().nNEVMStartBlock};
+                        const uint64_t count{tip->nHeight < start ? 0 :
+                            static_cast<uint64_t>(int64_t{tip->nHeight} - start + 1)};
+                        if (!ClearNEVMPendingConnect(count, count ? tip->GetBlockHash() : uint256{}, error)) {
+                            m_nevm_prefix_recovery_needed = true;
+                            return false;
+                        }
+                        // SYSCOIN BEGIN: Finish selection after resolving engine recovery.
+                        const CBlockIndex* attempted{chainstate->m_nevm_pending_connect
+                            ? m_blockman.LookupBlockIndex(*chainstate->m_nevm_pending_connect) : nullptr};
+                        // SYSCOIN: Parent alignment resolves the recorded attempt
+                        // even if it never applied or its child lost eligibility.
+                        // Ordinary selection still owns the next candidate.
+                        const bool owns_continuation{chainstate->m_nevm_activation_continuation ||
+                            (attempted && (attempted->pprev == tip || chainstate->m_chain.Contains(attempted)))};
+                        const CBlockIndex* next{owns_continuation ? chainstate->FindMostWorkChain() : nullptr};
+                        if (next == nullptr || next == tip) {
+                            chainstate->m_nevm_pending_connect.reset();
+                            chainstate->m_nevm_activation_continuation = false;
+                            return true;
+                        }
+                        chainstate->m_nevm_activation_continuation = true;
+                        m_nevm_prefix_recovery_needed = true;
+                        continue_activation = true;
+                        // SYSCOIN END: Consume this reason only under activation's own locks.
+                    } else {
+                        // Only the exact already-applied child leaves the flag armed
+                        // after successful recovery. Revalidate it again in activation.
+                        assert(pending != nullptr);
+                        pending_connect = pending;
                     }
-                    chainstate->m_nevm_activation_continuation = true;
-                    m_nevm_prefix_recovery_needed = true;
-                    continue_activation = true;
-                    // SYSCOIN END: Consume this reason only under activation's own locks.
-                } else {
-                    // Only the exact already-applied child leaves the flag armed
-                    // after successful recovery. Revalidate it again in activation.
-                    assert(pending != nullptr);
-                    pending_connect = pending;
+                } else if (!rejection) {
+                    return false;
                 }
-            } else if (!rejection) {
-                return false;
+                // SYSCOIN END: Preserve the known attempted child across ticks.
             }
-            // SYSCOIN END: Preserve the known attempted child across ticks.
         }
         // Use the same endpoint, payload and finality checks as activation.
         // Reconciliation may release cs_main, so retain activation exclusion.
         if (rejection) {
             BlockValidationState state;
-            if (!chainstate->ReconcileRejectedNEVMBlock(state, *rejection)) {
+            const bool reconciled{chainstate->ReconcileRejectedNEVMBlock(state, *rejection)};
+            {
+                LOCK(cs_main);
+                const auto* rejected{m_blockman.LookupBlockIndex(rejection->syscoin_hash)};
+                // Payload repair owns its own retry state. Keep an unresolved
+                // active verdict across operational failures of reconciliation.
+                if (m_nevm_template_rejection == rejection &&
+                    (reconciled || m_nevm_payload_repair == rejection ||
+                     !rejected || !chainstate->m_chain.Contains(rejected))) {
+                    m_nevm_template_rejection.reset();
+                }
+            }
+            if (!reconciled) {
                 error = state.ToString();
                 return false;
             }
@@ -4745,7 +4777,12 @@ bool ChainstateManager::QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
     AssertLockHeld(cs_main);
     // Repeated reports of this already authenticated identity cannot make
     // ordinary block delivery re-read/hash its bytes or repeatedly fsync.
-    if (m_nevm_payload_repair == rejection) return PersistNEVMPayloadRepair(state);
+    if (m_nevm_payload_repair == rejection) {
+        // Payload recovery already owns this authenticated verdict, even if
+        // persistence must retry. Do not requeue its old bytes after repair.
+        if (m_nevm_template_rejection == rejection) m_nevm_template_rejection.reset();
+        return PersistNEVMPayloadRepair(state);
+    }
     CBlockIndex* requested{m_blockman.LookupBlockIndex(rejection.syscoin_hash)};
     if (m_nevm_payload_repair && m_nevm_payload_stage != NEVMPayloadRepairStage::REPLAY) {
         const CBlockIndex* previous{m_blockman.LookupBlockIndex(m_nevm_payload_repair->syscoin_hash)};
@@ -4801,6 +4838,9 @@ bool ChainstateManager::QueueNEVMPayloadRepair(const NEVMBlockReject& rejection,
     m_nevm_payload_retry_after = {};
     m_nevm_payload_persist_retry_after = {};
     m_nevm_payload_pending.store(true, std::memory_order_release);
+    // Another activation path may take ownership before the mining worker.
+    // Hand off only the matching, now authenticated template rejection.
+    if (m_nevm_template_rejection == rejection) m_nevm_template_rejection.reset();
     return PersistNEVMPayloadRepair(state);
 }
 

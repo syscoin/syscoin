@@ -292,8 +292,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(
     if(NEVMActive_context && fNEVMConnection) {
         CNEVMBlock nevmBlock;
         std::string stateStr;
-        GetMainSignals().NotifyGetNEVMBlock(nevmBlock, stateStr);
+        std::optional<NEVMBlockReject> rejection;
+        GetMainSignals().NotifyGetNEVMBlock(nevmBlock, stateStr, &rejection);
         if(!stateStr.empty()) {
+            // The request may have partially flushed Geth's buffered prefix.
+            // Reconcile outside mining's cs_main/mempool locks before more work.
+            m_chainstate.m_chainman.RequestNEVMBlockProductionRecovery(rejection);
             throw std::runtime_error(strprintf("Could not fetch NEVM block %s", stateStr));
         }
         // block data stored in block which is a mutable field that is only sent over network

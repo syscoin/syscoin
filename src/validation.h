@@ -1359,6 +1359,9 @@ private:
     // SYSCOIN: Ordinary buffer loss can leave no payload/receipt marker.
     // Clear only after flushing and binding the applied pair to ActiveTip().
     bool m_nevm_prefix_recovery_needed GUARDED_BY(::cs_main){false};
+    // A template request can flush buffered blocks while mining holds cs_main.
+    // Retain its verdict until the recovery worker can reconcile with activation excluded.
+    std::optional<NEVMBlockReject> m_nevm_template_rejection GUARDED_BY(::cs_main);
     // SYSCOIN: One durable external attempt, never publication or fork-choice authority.
     std::optional<std::pair<uint256, uint256>> m_nevm_pending_connect_record GUARDED_BY(::cs_main);
     bool m_nevm_pending_connect_durable GUARDED_BY(::cs_main){false};
@@ -1753,6 +1756,9 @@ public:
     }
     /** Read-only gate for fresh/cached work; never replays under a mining lock. */
     [[nodiscard]] bool PrepareNEVMBlockProduction()
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Gate mining after a failed template request and retain any buffered verdict. */
+    void RequestNEVMBlockProductionRecovery(const std::optional<NEVMBlockReject>& rejection)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Retry mining recovery with activation excluded, before acquiring cs_main. */
     [[nodiscard]] bool MaybeRecoverNEVMBlockProduction(std::string& error)

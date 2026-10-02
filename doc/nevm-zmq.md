@@ -37,6 +37,17 @@ is `flushed`, the same `invalid` or `payload-invalid` token, or
 `flush-failed: <diagnostic>`. Only the complete canonical token carries a
 rejected pair; diagnostic text is never parsed as a validation verdict.
 
+A successful `nevmblock` template request retains its two-frame reply:
+`nevmblock` and the binary template. A failed request returns exactly three
+frames: `nevmblock`, `error`, and either a canonical `invalid` /
+`payload-invalid` token or `template-failed: <diagnostic>`. Template creation
+flushes buffered imports first, so its rejected pair can belong to an earlier
+accepted Core block. Geth reports that error without terminating or assembling
+a template. Core gates fresh and cached work and retains the classified verdict
+for its recovery scheduler, outside the mining locks. Operational failures
+trigger ordinary prefix recovery; payload repair and consensus invalidation
+retain their existing distinct checks.
+
 Geth classifies errors at their validation origin. Storage and local execution
 read failures take precedence over computed validation mismatches. Mutable
 payload failures do not establish invalidity of a committed block hash.
@@ -154,8 +165,8 @@ Restore Geth availability and restart to retry recovery.
 
 ## Delayed buffered rejection
 
-A consensus `invalid` rejection received during live connect, predecessor replay or deferred BTCC
-replay may identify a block Core previously accepted. Core binds both hashes
+A consensus `invalid` rejection received during live connect, template creation,
+predecessor replay or deferred BTCC replay may identify a block Core previously accepted. Core binds both hashes
 to that active block's stored commitment, then flushes and requires Geth's
 fresh applied pair to match its exact predecessor. Zero applied blocks require
 a zero paired hash and rejection of the first NEVM block. An unknown identity,

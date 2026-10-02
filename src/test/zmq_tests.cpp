@@ -761,6 +761,72 @@ BOOST_AUTO_TEST_CASE(nevm_reset_discards_unsent_disconnect_and_refreshes_every_a
     BOOST_CHECK(rejection->syscoin_hash == syscoin_hash);
 }
 
+BOOST_AUTO_TEST_CASE(nevm_template_errors_preserve_rejections_and_the_request_socket)
+{
+    const std::string address{"inproc://nevm-template-errors"};
+    auto interface = CZMQNotificationInterfaceTestAccess::Create(NEVMNotifiers(address));
+    RegisteredInterface registered{interface};
+    // Later callbacks that do not provide templates must not clear a rejection.
+    RegisteredInterface observer{std::make_shared<SynchronousObserver>()};
+    const auto snapshot = interface->GetActiveNotifiers();
+    NEVMResponder responder{CZMQNotificationInterfaceTestAccess::NEVMContext(*interface), address};
+    CNEVMBlock expected;
+    expected.nBlockHash = TestHash(201);
+    expected.nTxRoot = TestHash(202);
+    expected.nReceiptRoot = TestHash(203);
+    expected.vchNEVMBlockData = {1, 2, 3};
+    const NEVMBlockReject consensus_reject{TestHash(204), TestHash(205)};
+    const NEVMBlockReject payload_reject{TestHash(206), TestHash(207), TestHash(208)};
+    const std::string consensus_token{"invalid:" + consensus_reject.nevm_hash.GetHex() +
+        ":" + consensus_reject.syscoin_hash.GetHex()};
+    const std::string payload_token{"payload-invalid:" + payload_reject.nevm_hash.GetHex() +
+        ":" + payload_reject.syscoin_hash.GetHex() + ":" + payload_reject.payload_hash->GetHex()};
+    struct TestCase {
+        std::vector<std::string> reply;
+        std::string error;
+        std::optional<NEVMBlockReject> rejection;
+    };
+    const std::vector<TestCase> cases{
+        {{"nevmblock", "error", consensus_token}, "nevm-template-consensus-invalid", consensus_reject},
+        {{"nevmblock", "error", payload_token}, "nevm-template-payload-invalid", payload_reject},
+        {{"nevmblock", "error", "template-failed: storage unavailable"}, "nevm-template-failed", std::nullopt},
+        // Operational error text containing a token is not an authenticated classification.
+        {{"nevmblock", "error", "template-failed: " + consensus_token}, "nevm-template-failed", std::nullopt},
+        {{"nevmblock", "error", consensus_token + " trailing"}, "nevm-template-response-invalid-data", std::nullopt},
+        {{"nevmblock", "error", "payload-invalid:malformed"}, "nevm-template-response-invalid-data", std::nullopt},
+        {{"nevmblock", "error"}, "nevm-response-invalid-parts", std::nullopt},
+        {{"nevmblock", "error", consensus_token, "extra"}, "nevm-response-invalid-parts", std::nullopt},
+        {{"nevmblock", Serialized(expected), consensus_token}, "nevm-response-invalid-parts", std::nullopt},
+        {{"other", "error", consensus_token}, "nevm-response-wrong-command", std::nullopt},
+        {{"nevmblock", Serialized(expected).substr(0, 32)}, "nevm-response-unserialize", std::nullopt},
+        // The successful wire response remains exactly two frames. Geth's
+        // NEVMBlockConnect encoding includes empty metadata after the prefix.
+        {{"nevmblock", Serialized(expected) + std::string(36, '\0')}, "", std::nullopt},
+        {{"nevmblock", Serialized(expected)}, "", std::nullopt},
+    };
+    bool first{true};
+    for (const auto& test : cases) {
+        std::vector<NEVMExchange> script;
+        if (first) {
+            script.push_back({"nevmcomms", Serialized(std::string{"status"}), {"nevmcomms", "ack"}});
+            first = false;
+        }
+        script.push_back({"nevmblock", "nevmblock", test.reply});
+        CNEVMBlock received;
+        received.nBlockHash = TestHash(209);
+        const auto original{Serialized(received)};
+        std::string state{"prior-request-error"};
+        std::optional<NEVMBlockReject> rejection{consensus_reject};
+        responder.Serve([&] {
+            GetMainSignals().NotifyGetNEVMBlock(received, state, &rejection);
+        }, script);
+        BOOST_CHECK_EQUAL(state, test.error);
+        BOOST_CHECK(rejection == test.rejection);
+        BOOST_CHECK_EQUAL(Serialized(received), test.error.empty() ? Serialized(expected) : original);
+        BOOST_CHECK(interface->GetActiveNotifiers() == snapshot);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(nevm_failed_reset_is_retryable_and_shutdown_removes_null_socket_aliases)
 {
     const std::string address{"inproc://nevm-reset-failure"};

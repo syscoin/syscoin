@@ -65,7 +65,7 @@ public:
 class CZMQPublishNEVMBlockNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) override;
+    bool NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection = nullptr) override;
 };
 
 class CZMQPublishNEVMBlockConnectNotifier : public CZMQAbstractPublishNotifier

@@ -335,13 +335,18 @@ struct StartupNEVMSubscriber final : CValidationInterface {
     std::optional<uint256> template_block_hash;
     std::optional<NEVMTxRoot> template_roots;
     std::function<void(CNEVMBlock&)> template_response;
+    std::string template_error;
+    std::optional<NEVMBlockReject> template_rejection;
     // Decode the actual wire payload, including zero-identity template checks.
     std::function<uint64_t(const CNEVMHeader&, const CBlock&, const uint256&,
                            std::string&)> wire_connect;
 
-    void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& state) override
+    void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& state,
+                            std::optional<NEVMBlockReject>* rejection = nullptr) override
     {
-        state.clear();
+        state = template_error;
+        if (rejection) *rejection = template_rejection;
+        if (!state.empty()) return;
         template_serial = static_cast<uint8_t>(template_serial + 1U);
         block.nBlockHash.begin()[0] = template_serial;
         block.nTxRoot = block.nBlockHash;
@@ -5171,6 +5176,29 @@ struct RejectedNEVMPrefixSetup : LiveNEVMRecoverySetup {
         }
         if (boundary == Boundary::BATCH_FLUSH) expected.push_back(prefix[2]->GetHash());
         BOOST_CHECK(nevm->connected_blocks == expected);
+    }
+
+    void FailTemplate(const std::optional<NEVMBlockReject>& rejection)
+    {
+        SyncWithValidationInterfaceQueue();
+        auto& chainman{static_cast<TestChainstateManager&>(*m_node.chainman)};
+        chainman.ResetIbd(PQHistoryAuthState::READY);
+        BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+        nevm->template_error = rejection
+            ? (rejection->IsPayload() ? "nevm-template-payload-invalid" : "nevm-template-consensus-invalid")
+            : "nevm-template-failed";
+        nevm->template_rejection = rejection;
+        const auto commands{nevm->command_trace};
+        BOOST_CHECK_EXCEPTION(MakeNEVMBlock(), std::runtime_error, [](const std::runtime_error& error) {
+            return std::string{error.what()}.find("Could not fetch NEVM block") != std::string::npos;
+        });
+        if (rejection) ++verdict_deliveries;
+        nevm->template_error.clear();
+        nevm->template_rejection.reset();
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.PrepareNEVMBlockProduction()));
+        // No replay, invalidation or payload work is allowed under mining locks.
+        BOOST_CHECK(nevm->command_trace == commands);
+        CheckLocalState(/*connected=*/false);
     }
 
     void CheckMiningWorker(Boundary boundary)
@@ -13908,6 +13936,104 @@ BOOST_FIXTURE_TEST_CASE(nevm_mining_recovery_worker_reconciles_initial_flush_ver
                         RejectedNEVMPrefixSetup)
 {
     CheckMiningWorker(Boundary::INITIAL_FLUSH);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_failure_reconciles_buffered_verdict,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(VerdictFor(*prefix[1]));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    CheckReconciled();
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_failure_retains_verdict_after_status_error,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(VerdictFor(*prefix[1]));
+    nevm->block_info_error = "nevm-blockinfo-unavailable";
+    std::string error;
+    BOOST_CHECK(!m_node.chainman->MaybeRecoverNEVMBlockProduction(error));
+    BOOST_CHECK(!error.empty());
+    CheckLocalState(/*connected=*/false);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    nevm->block_info_error.clear();
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    CheckReconciled();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_failure_preserves_payload_repair,
+                        NEVMPayloadRepairSetup)
+{
+    PreparePayloadFixture();
+    FailTemplate(payload_verdict);
+    std::string error;
+    BOOST_CHECK(!m_node.chainman->MaybeRecoverNEVMBlockProduction(error));
+    BOOST_CHECK_EQUAL(error, "nevm-payload-repair-pending");
+    const auto request{Request()};
+    CheckStoredPayload(prefix[1]->vchNEVMBlockData, /*positions_unchanged=*/true);
+    CheckLocalState(/*connected=*/false);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    ConfigurePayloadCheck();
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->ProcessNEVMPayloadRepair(request, replacement_payload, state),
+                          state.ToString());
+    CompleteRepair();
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_payload_repair_taken_over_by_activation,
+                        NEVMPayloadRepairSetup)
+{
+    PreparePayloadFixture();
+    FailTemplate(payload_verdict);
+    // Ordinary activation can rediscover the rejected bytes before the mining
+    // worker runs, and must take ownership of that same template verdict.
+    nevm->connect_verdict = [this](const uint256& hash) -> std::optional<NEVMBlockReject> {
+        if (hash != prefix[1]->GetHash()) return std::nullopt;
+        ++verdict_deliveries;
+        return payload_verdict;
+    };
+    BlockValidationState activation_state;
+    BOOST_CHECK(!m_node.chainman->ActiveChainstate().ActivateBestChain(activation_state, candidate));
+    BOOST_CHECK_EQUAL(activation_state.GetRejectReason(), "nevm-payload-repair-pending");
+    BOOST_CHECK_EQUAL(verdict_deliveries, 2U);
+    const auto request{Request()};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+    ConfigurePayloadCheck();
+    BlockValidationState repair_state;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->ProcessNEVMPayloadRepair(request, replacement_payload, repair_state),
+                          repair_state.ToString());
+    CompleteRepair();
+    // Reprocessing the original template verdict here would fail its obsolete
+    // payload fingerprint and keep mining blocked after successful repair.
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_operational_failure_replays_without_invalidation,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(std::nullopt);
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip()) == original_tip);
+    BOOST_CHECK_EQUAL(nevm->applied_count, prefix.size());
+    BOOST_CHECK(nevm->applied_hash == prefix.back()->GetHash());
+    LOCK(::cs_main);
+    for (const auto& block : prefix) {
+        BOOST_CHECK_EQUAL(m_node.chainman->m_blockman.LookupBlockIndex(block->GetHash())->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+    BOOST_CHECK_EQUAL(candidate_index->nStatus & BLOCK_FAILED_MASK, 0U);
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_rejected_prefix_reconciles_zero_applied_first_block,

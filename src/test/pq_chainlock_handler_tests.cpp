@@ -2722,7 +2722,7 @@ struct ReplayMiningNEVMSubscriber final : CValidationInterface {
     std::string blockinfo_error;
     std::function<void()> on_blockinfo;
 
-    void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& error) override
+    void NotifyGetNEVMBlock(CNEVMBlock& block, std::string& error, std::optional<NEVMBlockReject>* = nullptr) override
     {
         ++template_requests;
         error = template_error;
@@ -3118,7 +3118,7 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
             if (on_checked) on_checked(block, state);
         }
 
-        void NotifyGetNEVMBlock(CNEVMBlock&, std::string& error) override
+        void NotifyGetNEVMBlock(CNEVMBlock&, std::string& error, std::optional<NEVMBlockReject>* = nullptr) override
         {
             ++template_requests;
             error = "late-payment-preseal-template-probe";
@@ -3908,6 +3908,26 @@ struct LatePaymentAuditPresealSetup : TestingSetup {
                     : "NEVM block production is waiting for execution recovery");
             });
         BOOST_CHECK_EQUAL(engine->template_requests, requests + (allowed ? 1 : 0));
+        if (allowed) {
+            // The deliberate fetch failure now requires execution recovery.
+            // Prove the unchanged applied endpoint through the real worker so
+            // later payment-readiness checks start from a healthy engine.
+            BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+            const auto connected{engine->connected};
+            const auto count{engine->count};
+            const auto hash{engine->hash};
+            const auto queries{engine->queries};
+            const auto flushes{engine->flushes};
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+            BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+            BOOST_CHECK_GT(engine->queries, queries);
+            BOOST_CHECK_GT(engine->flushes, flushes);
+            BOOST_CHECK(engine->connected == connected);
+            BOOST_CHECK_EQUAL(engine->count, count);
+            BOOST_CHECK(engine->hash == hash);
+            BOOST_CHECK_EQUAL(engine->template_requests, requests + 1);
+        }
     }
 
     void CheckBlocked(std::size_t applied = 0)

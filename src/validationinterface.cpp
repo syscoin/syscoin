@@ -335,6 +335,7 @@ void CMainSignals::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint256& nSYSBlockH
     // SYSCOIN: Count-only status cannot distinguish equal-height Syscoin forks.
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlockInfo(nHeight, nSYSBlockHash, state);});
 }
-void CMainSignals::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state) {
-    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlock(evmBlock, state);});
+void CMainSignals::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection) {
+    if (rejection) rejection->reset();
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NotifyGetNEVMBlock(evmBlock, state, rejection);});
 }

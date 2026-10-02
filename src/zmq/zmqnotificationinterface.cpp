@@ -277,10 +277,10 @@ void CZMQNotificationInterface::NotifyGetNEVMBlockInfo(uint64_t &nHeight, uint25
     });
 }
 
-void CZMQNotificationInterface::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state)
+void CZMQNotificationInterface::NotifyGetNEVMBlock(CNEVMBlock &evmBlock, std::string &state, std::optional<NEVMBlockReject>* rejection)
 {
-    TryForEach(notifiers, [&evmBlock, &state](CZMQAbstractNotifier* notifier) {
-        return notifier->NotifyGetNEVMBlock(evmBlock, state);
+    TryForEach(notifiers, [&evmBlock, &state, rejection](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyGetNEVMBlock(evmBlock, state, rejection);
     });
 }
 void CZMQNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, ChainstateManager& chainman, bool fInitialDownload)
