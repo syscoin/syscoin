@@ -2855,11 +2855,12 @@ BOOST_AUTO_TEST_CASE(async_config_rejects_unserviceable_lane_and_completion_boun
     CMNAuth::AsyncConfig config;
     BOOST_REQUIRE(config.IsValid());
 
-    auto invalid_lane = config;
-    invalid_lane.signing_admission.source_attempts_per_window = 3;
-    invalid_lane.signing_admission.identity_attempts_per_window = 3;
-    BOOST_CHECK(invalid_lane.signing_admission.IsValid());
-    BOOST_CHECK(!invalid_lane.IsValid());
+    for (const uint32_t limit : {0U, 3U}) {
+        auto invalid_lane = config;
+        invalid_lane.responder_sign_identity_attempts_per_window = limit;
+        BOOST_CHECK(invalid_lane.signing_admission.IsValid());
+        BOOST_CHECK(!invalid_lane.IsValid());
+    }
 
     auto undersized_completions = config;
     undersized_completions.max_completion_queue = 26;
@@ -3326,6 +3327,77 @@ BOOST_AUTO_TEST_CASE(async_cancel_and_nodeid_reuse_do_not_leak_verifier_session)
     BOOST_CHECK_EQUAL(calls.load(), 2);
 }
 
+BOOST_AUTO_TEST_CASE(async_responder_identity_limit_preserves_capacity_and_expires)
+{
+    const auto initiator_key{StoredKey(DeterministicKey(0), 1, 100)};
+    const auto responder_key{StoredKey(DeterministicKey(64), 2, 101)};
+    const auto identity_a{NonNullHash(10)};
+    const auto identity_b{NonNullHash(99)};
+    std::atomic<int64_t> now{1'000'000};
+    CMNAuth::AsyncHooks hooks;
+    hooks.now_micros = [&] { return now.load(); };
+    hooks.sign = [](const uint256&, uint32_t, const uint256&, GlobalSignature& signature) {
+        signature[0] = 1;
+        return true;
+    };
+    CMNAuth::AsyncProcessor async{CMNAuth::AsyncConfig{}, std::move(hooks)};
+    const auto enqueue = [&](int64_t peer, uint64_t source,
+                             const uint256& remote_identity, bool initiator = false) {
+        BOOST_REQUIRE(async.RegisterPeer(peer));
+        auto transcript{Transcript(initiator_key, responder_key, peer)};
+        if (initiator) {
+            transcript.initiator_pro_tx_hash = NonNullHash(11);
+            transcript.responder_pro_tx_hash = remote_identity;
+        } else {
+            transcript.initiator_pro_tx_hash = remote_identity;
+        }
+        return async.EnqueueSign(AsyncSignRequest(AsyncContext(
+            peer, source, initiator_key, responder_key, transcript,
+            initiator, /*authenticated_remote=*/!initiator)));
+    };
+    const auto finish = [&](int64_t peer, bool cancel = false) {
+        const auto completions{async.WaitForCompletions(std::chrono::seconds{2})};
+        BOOST_REQUIRE_EQUAL(completions.size(), 1U);
+        const auto& completion{completions.front()};
+        BOOST_REQUIRE(completion.Success());
+        BOOST_CHECK_EQUAL(completion.context.peer_id, peer);
+        if (cancel) {
+            async.CancelPeer(peer);
+        } else {
+            async.AcknowledgeSignCompletion(peer, completion.registration_generation,
+                                           completion.deadline_micros);
+        }
+    };
+    const auto rejected = [&](const CMNAuth::EnqueueResult& result) {
+        BOOST_CHECK(result.error == CMNAuth::AsyncError::SIGN_ADMISSION);
+        BOOST_CHECK(result.signing_error == MNAUTHSigningAdmissionError::RATE_LIMIT);
+    };
+
+    BOOST_REQUIRE(enqueue(1, 500, identity_a).Accepted());
+    finish(1, /*cancel=*/true);
+    // Disconnect/reconnect and changing source do not refund an identity's slot.
+    rejected(enqueue(2, 501, identity_a));
+    // The rejected repeat did not consume the second global/source slot.
+    BOOST_REQUIRE(enqueue(3, 500, identity_b).Accepted());
+    finish(3);
+    rejected(enqueue(4, 502, NonNullHash(100)));
+
+    // Responder limits must not tighten the independent initiator lane.
+    BOOST_REQUIRE(enqueue(5, 500, identity_a, /*initiator=*/true).Accepted());
+    finish(5);
+    BOOST_REQUIRE(enqueue(6, 500, identity_a, /*initiator=*/true).Accepted());
+    finish(6);
+    rejected(enqueue(7, 500, identity_a, /*initiator=*/true));
+
+    now = 60'000'000;
+    rejected(enqueue(8, 500, identity_a));
+    now = 61'000'000;
+    BOOST_REQUIRE(enqueue(9, 500, identity_a).Accepted());
+    finish(9);
+    BOOST_REQUIRE(enqueue(10, 500, identity_b).Accepted());
+    finish(10);
+}
+
 BOOST_AUTO_TEST_CASE(async_sign_lanes_reserve_and_prioritize_local_initiator)
 {
     auto initiator_secret{DeterministicKey(0)};
@@ -3372,8 +3444,10 @@ BOOST_AUTO_TEST_CASE(async_sign_lanes_reserve_and_prioritize_local_initiator)
         BOOST_REQUIRE(entered_cv.wait_for(
             lock, std::chrono::seconds{2}, [&] { return first_entered; }));
     }
+    auto second_identity_transcript{transcript};
+    second_identity_transcript.initiator_pro_tx_hash = NonNullHash(99);
     auto responder_two = AsyncContext(
-        2, 500, initiator_key, responder_key, transcript,
+        2, 500, initiator_key, responder_key, second_identity_transcript,
         /*local_is_initiator=*/false,
         /*authenticated_remote=*/true);
     BOOST_REQUIRE(async.EnqueueSign(

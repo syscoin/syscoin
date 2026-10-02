@@ -170,6 +170,8 @@ public:
         uint32_t responder_sign_attempts_per_window{2};
         uint32_t initiator_sign_source_attempts_per_window{6};
         uint32_t responder_sign_source_attempts_per_window{2};
+        // Reserve responder capacity for another authenticated identity.
+        uint32_t responder_sign_identity_attempts_per_window{1};
 
         [[nodiscard]] bool IsValid() const noexcept;
     };

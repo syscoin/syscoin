@@ -437,6 +437,8 @@ bool CMNAuth::AsyncConfig::IsValid() const noexcept
         responder_sign_attempts_per_window;
     responder_admission.source_attempts_per_window =
         responder_sign_source_attempts_per_window;
+    responder_admission.identity_attempts_per_window =
+        responder_sign_identity_attempts_per_window;
     if (!initiator_admission.IsValid() || !responder_admission.IsValid()) {
         return false;
     }
@@ -499,10 +501,12 @@ struct CMNAuth::AsyncProcessor::Impl {
     static llmq::pq::MNAUTHSigningRuntimeConfig SigningLaneConfig(
         llmq::pq::MNAUTHSigningRuntimeConfig config,
         uint32_t lane_attempts,
-        uint32_t source_attempts)
+        uint32_t source_attempts,
+        uint32_t identity_attempts)
     {
         config.global_attempts_per_window = lane_attempts;
         config.source_attempts_per_window = source_attempts;
+        config.identity_attempts_per_window = identity_attempts;
         return config;
     }
 
@@ -518,11 +522,13 @@ struct CMNAuth::AsyncProcessor::Impl {
           initiator_signing_admission{SigningLaneConfig(
               config.signing_admission,
               config.initiator_sign_attempts_per_window,
-              config.initiator_sign_source_attempts_per_window)},
+              config.initiator_sign_source_attempts_per_window,
+              config.signing_admission.identity_attempts_per_window)},
           responder_signing_admission{SigningLaneConfig(
               config.signing_admission,
               config.responder_sign_attempts_per_window,
-              config.responder_sign_source_attempts_per_window)},
+              config.responder_sign_source_attempts_per_window,
+              config.responder_sign_identity_attempts_per_window)},
           valid_config{config.IsValid()}
     {
         if (!hooks.verify) {

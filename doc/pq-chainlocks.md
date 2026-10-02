@@ -1705,6 +1705,9 @@ verification, implementation requires all of the following:
   the same budget dimensions, so an unauthenticated claim cannot debit an
   arbitrary operator's budget and connection churn cannot reset an
   expensive-work allowance;
+- by default, responder signing permits one attempt per authenticated identity
+  in each 60-second window, within the existing two-attempt global budget;
+  cancellation does not refund it, and initiator signing keeps its own limits;
 - a bounded verification allowance and queue reserve for locally initiated
   connections to exact registry endpoints, with bounded scheduling priority;
   inbound attempts cannot consume that reserve, and the total verification
