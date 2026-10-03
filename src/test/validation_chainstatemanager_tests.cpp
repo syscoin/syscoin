@@ -6640,6 +6640,9 @@ struct NEVMMintPoDAPublicationSetup : NEVMMintReadErrorSetup {
             BOOST_CHECK(roots.nTxRoot == mint.mint.nTxRoot);
             BOOST_CHECK(roots.nReceiptRoot == mint.mint.nReceiptRoot);
             BOOST_CHECK_EQUAL(pnevmtxmintdb->ExistsTx(mint.mint.nTxHash), applied);
+            uint256 mint_txid;
+            BOOST_CHECK_EQUAL(pnevmtxmintdb->ReadMintTx(mint.mint.nTxHash, mint_txid), applied);
+            if (applied) BOOST_CHECK(mint_txid == candidate->vtx[1]->GetHash());
             BOOST_CHECK_EQUAL(pnevmtxrootsdb->ReadTxRoots(candidate_header.nBlockHash, roots), applied);
             BOOST_CHECK(!pnevmtxrootsdb->GetPendingDisconnect());
         };
@@ -7248,7 +7251,7 @@ struct MintRollbackDurabilitySetup : TestChain100Setup {
         coins.SetBestBlock(stored_tip_hash);
         chainstate.m_chain.SetTip(*index);
         if (with_mint) {
-            MintDB().FlushDataToCache({mint_hash});
+            MintDB().FlushDataToCache({mint_hash}, {{mint_hash, block.vtx[1]->GetHash()}});
             BOOST_REQUIRE(MintDB().FlushCacheToDisk());
         }
         BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(coins));
@@ -8349,11 +8352,17 @@ struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
         SetMockTime(GetTime() + 1);
         mint.tx.vin.emplace_back(COutPoint{funding.GetHash(), 0});
         const auto candidate{MakeMintBlock(mint.tx)};
+        CMutableTransaction replacement_mint{mint.tx};
+        if (reincluded) ++replacement_mint.nLockTime;
         const auto spend{reincluded ? MakeTransactionRef(CreateValidMempoolTransaction(
-            MakeTransactionRef(mint.tx), 0, 102, coinbaseKey,
+            MakeTransactionRef(replacement_mint), 0, 102, coinbaseKey,
             CScript{} << OP_TRUE, 9000, /*submit=*/false)) : CTransactionRef{}};
-        const auto replacement{MakeMintBlock(mint.tx, spend)};
+        const auto replacement{MakeMintBlock(replacement_mint, spend)};
         BOOST_REQUIRE(candidate->GetHash() != replacement->GetHash());
+        if (reincluded) {
+            BOOST_REQUIRE(replacement_mint.GetHash() != mint.tx.GetHash());
+            BOOST_REQUIRE(CMintSyscoin(CTransaction{replacement_mint}).nTxHash == mint.mint.nTxHash);
+        }
         CBlockIndex* replacement_index{nullptr};
         {
             LOCK(::cs_main);
@@ -8484,6 +8493,9 @@ struct NEVMMintCleanupSetup : NEVMMintReadErrorSetup {
                         (reincluded ? replacement->GetHash() : source->GetHash()));
             BOOST_CHECK_EQUAL(pnevmtxmintdb->ExistsTx(mint.mint.nTxHash), reincluded);
             BOOST_CHECK_EQUAL(pnevmtxmintdb->Exists(mint.mint.nTxHash), reincluded);
+            uint256 mint_txid;
+            BOOST_CHECK_EQUAL(pnevmtxmintdb->ReadMintTx(mint.mint.nTxHash, mint_txid), reincluded);
+            if (reincluded) BOOST_CHECK(mint_txid == replacement_mint.GetHash());
             BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(minted_output));
             ReopenCoins();
         }
@@ -8869,7 +8881,7 @@ struct NEVMRootRollbackSetup : StartupNEVMRecoverySetup {
             undo.vtxundo.emplace_back();
             undo.vtxundo.back().vprevout.push_back(std::move(input));
             minted_coin = COutPoint{carrier.vtx[1]->GetHash(), 0};
-            MintDB().FlushDataToCache({mint_hash});
+            MintDB().FlushDataToCache({mint_hash}, {{mint_hash, carrier.vtx[1]->GetHash()}});
             BOOST_REQUIRE(MintDB().FlushCacheToDisk());
         }
         for (const auto& tx : carrier.vtx) AddCoins(coins, *tx, index->nHeight);
@@ -14637,10 +14649,49 @@ BOOST_FIXTURE_TEST_CASE(mint_replay_retains_proof_reconnected_on_new_branch,
     BOOST_CHECK(!chainstate.CoinsDB().HaveCoin(mint_coin));
     BOOST_CHECK(chainstate.CoinsDB().HaveCoin(replacement_coin));
     BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+    uint256 mint_txid;
+    BOOST_REQUIRE(MintDB().ReadMintTx(mint_hash, mint_txid));
+    BOOST_CHECK(mint_txid == replacement.vtx[1]->GetHash());
     BOOST_REQUIRE(MintDB().FlushCacheToDisk());
     BOOST_CHECK(MintDB().Exists(mint_hash));
+    BOOST_REQUIRE(MintDB().ReadMintTx(mint_hash, mint_txid));
+    BOOST_CHECK(mint_txid == replacement.vtx[1]->GetHash());
 }
 // SYSCOIN END: Coins removal must be synchronous before mint-marker erasure.
+
+BOOST_FIXTURE_TEST_CASE(nevm_root_recovery_refreshes_common_prefix_mint_txid,
+                        NEVMRootRollbackSetup)
+{
+    PrepareRootDisconnect(/*with_mint=*/true);
+    LOCK(::cs_main);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    const uint256 expected{carrier.vtx[1]->GetHash()};
+    const uint256 stale{uint256S("bad001")};
+    // The journal carrier remains canonical and is also the common prefix,
+    // so neither branch-suffix walk visits its mint transaction.
+    for (const bool marker_only : {false, true}) {
+        if (marker_only) {
+            BOOST_REQUIRE(MintDB().Write(mint_hash, true));
+        } else {
+            BOOST_REQUIRE(MintDB().Write(mint_hash, stale));
+        }
+        BOOST_REQUIRE(MintDB().ExistsTx(mint_hash));
+        uint256 actual;
+        BOOST_REQUIRE_EQUAL(MintDB().ReadMintTx(mint_hash, actual), !marker_only);
+        if (!marker_only) BOOST_CHECK(actual == stale);
+        BOOST_REQUIRE(RootsDB().BeginDisconnect(NEVMRootDisconnect{
+            carrier.GetHash(), orphan_header.nBlockHash,
+            orphan_header.nTxRoot, orphan_header.nReceiptRoot}));
+        BOOST_REQUIRE(chainstate.CoinsDB().GetBestBlock() == carrier.GetHash());
+        BOOST_REQUIRE(chainstate.ReplayBlocks());
+        BOOST_CHECK(!RootsDB().GetPendingDisconnect());
+        BOOST_CHECK(MintDB().ExistsTx(mint_hash));
+        BOOST_REQUIRE(MintDB().ReadMintTx(mint_hash, actual));
+        BOOST_CHECK(actual == expected);
+        BOOST_REQUIRE(MintDB().Read(mint_hash, actual));
+        BOOST_CHECK(actual == expected);
+    }
+}
 
 // SYSCOIN BEGIN: Exercise real process loss and empty-HEADS startup recovery.
 BOOST_FIXTURE_TEST_CASE(nevm_disconnect_root_crash_child, NEVMRootRollbackSetup,

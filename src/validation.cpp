@@ -7361,7 +7361,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
 // Recovery reads only the changed suffix, whose transactions supply mint cleanup.
 static bool ReadNEVMRecoveryMints(
     node::BlockManager& blockman, const CBlockIndex& index,
-    const NEVMRootUndo& undo, NEVMMintTxSet& mints)
+    const NEVMRootUndo& undo, NEVMMintTxSet& mints, NEVMMintTxIdMap* mint_txids = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     CBlock block;
@@ -7375,8 +7375,10 @@ static bool ReadNEVMRecoveryMints(
         header.nTxRoot != undo.roots.nTxRoot ||
         header.nReceiptRoot != undo.roots.nReceiptRoot) return false;
     for (const auto& tx : block.vtx) {
-        if (IsSyscoinMintTx(tx->nVersion) &&
-            !DisconnectMintAsset(*tx, mints)) return false;
+        if (IsSyscoinMintTx(tx->nVersion)) {
+            if (!DisconnectMintAsset(*tx, mints)) return false;
+            if (mint_txids) mint_txids->insert_or_assign(CMintSyscoin(*tx).nTxHash, tx->GetHash());
+        }
     }
     return true;
 }
@@ -7913,8 +7915,19 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     const CBlock& blockConnecting = *pthisBlock;
     // SYSCOIN: Stage mint markers in cache; they become durable on the next full
     // UTXO flush (write-ahead of CoinsTip) or on mint-containing disconnect/replay.
-    if(pnevmtxmintdb)
-        pnevmtxmintdb->FlushDataToCache(connection.mint_txs);
+    if(pnevmtxmintdb) {
+        NEVMMintTxIdMap mint_txids;
+        if (!connection.mint_txs.empty()) {
+            for (const auto& tx : blockConnecting.vtx) {
+                if (!IsSyscoinMintTx(tx->nVersion)) continue;
+                const CMintSyscoin mint(*tx);
+                if (connection.mint_txs.contains(mint.nTxHash)) {
+                    mint_txids.emplace(mint.nTxHash, tx->GetHash());
+                }
+            }
+        }
+        pnevmtxmintdb->FlushDataToCache(connection.mint_txs, mint_txids);
+    }
     if(pblockindexdb)
         pblockindexdb->FlushDataToCache(connection.txid_pairs);
     const auto time_4{SteadyClock::now()};
@@ -11296,7 +11309,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
 
 /** Apply the effects of a block on the utxo cache, ignoring that it may already have been applied. */
 // SYSCOIN: Rollforward reconstructs branch-bound receipt state before NEVM replay.
-bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
+bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, NEVMTxRootMap &mapNEVMTxRoots, NEVMMintTxSet &setMintTxs, NEVMMintTxIdMap& mint_txids, PoDAMAPMemory &mapPoDA, std::vector<std::pair<uint256, uint32_t> > &vecTXIDPairs)
 {
     // TODO: merge with ConnectBlock
     CBlock block;
@@ -11413,6 +11426,7 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
                     return error("%s: invalid mint payload while replaying tx=%s", __func__, txHash.ToString());
                 }
                 setMintTxs.insert(mintSyscoin.nTxHash);
+                mint_txids.insert_or_assign(mintSyscoin.nTxHash, txHash);
             }
             for (const CTxIn& txin : tx->vin) {
                 inputs.SpendCoin(txin.prevout);
@@ -11460,6 +11474,7 @@ bool Chainstate::ReplayBlocks()
     // SYSCOIN
     PoDAMAPMemory mapPoDAConnect;
     NEVMMintTxSet setMintTxsDisconnect, setMintTxsConnect;
+    NEVMMintTxIdMap mint_txids;
     std::vector<uint256> vecNEVMBlocks;
     std::vector<std::pair<uint256,uint32_t> > vecTXIDPairs;
     BlockValidationState state;
@@ -11510,24 +11525,28 @@ bool Chainstate::ReplayBlocks()
             sources.push_back(source);
         }
         std::map<uint256, std::optional<NEVMTxRoot>> recovered_roots;
+        NEVMMintTxSet discarded_mints, canonical_mints;
+        NEVMMintTxIdMap canonical_mint_txids;
         if (root_disconnect) {
             const auto* carrier{m_blockman.LookupBlockIndex(root_disconnect->carrier)};
             NEVMRootUndo undo;
             NEVMMintTxSet mints;
+            NEVMMintTxIdMap carrier_mint_txids;
             if (!carrier || !ReadNEVMRootUndo(*carrier, undo) ||
                 undo.block_hash != root_disconnect->block_hash ||
                 undo.roots.nTxRoot != root_disconnect->tx_root ||
                 undo.roots.nReceiptRoot != root_disconnect->receipt_root ||
-                !ReadNEVMRecoveryMints(m_blockman, *carrier, undo, mints)) {
+                !ReadNEVMRecoveryMints(m_blockman, *carrier, undo, mints, &carrier_mint_txids)) {
                 return error("ReplayBlocks(): NEVM root recovery does not match its carrier");
             }
             sources.push_back(carrier);
             if (recovered->GetAncestor(carrier->nHeight) == carrier) {
                 recovered_roots[undo.block_hash] = undo.roots;
+                canonical_mints.insert(mints.begin(), mints.end());
+                canonical_mint_txids.insert(carrier_mint_txids.begin(), carrier_mint_txids.end());
             }
         }
         int canonical_fork_height{recovered->nHeight};
-        NEVMMintTxSet discarded_mints, canonical_mints;
         for (const auto* source : sources) {
             const auto* fork{LastCommonAncestor(source, recovered)};
             if (!fork) return error("ReplayBlocks(): NEVM root branches have no common ancestor");
@@ -11551,7 +11570,7 @@ bool Chainstate::ReplayBlocks()
             const auto* index{recovered->GetAncestor(height)};
             NEVMRootUndo undo;
             if (!ReadNEVMRootUndo(*index, undo) ||
-                !ReadNEVMRecoveryMints(m_blockman, *index, undo, canonical_mints)) {
+                !ReadNEVMRecoveryMints(m_blockman, *index, undo, canonical_mints, &canonical_mint_txids)) {
                 return error("ReplayBlocks(): Cannot recover canonical NEVM roots at %s",
                              index->GetBlockHash().ToString());
             }
@@ -11561,7 +11580,7 @@ bool Chainstate::ReplayBlocks()
         // its common prefix. Only the recovered replacement suffix can own
         // the same proof again; preserve it even if its outputs were spent.
         for (const auto& hash : canonical_mints) discarded_mints.erase(hash);
-        if (!discarded_mints.empty() && !pnevmtxmintdb) {
+        if ((!discarded_mints.empty() || !canonical_mints.empty()) && !pnevmtxmintdb) {
             return error("ReplayBlocks(): Mint database unavailable for NEVM recovery");
         }
         // Pin the recovered coins endpoint before any destructive cleanup or
@@ -11592,6 +11611,12 @@ bool Chainstate::ReplayBlocks()
         // though the coins database no longer has interrupted-batch heads.
         if (!discarded_mints.empty() && !pnevmtxmintdb->FlushErase(discarded_mints)) {
             return error("ReplayBlocks(): Failed to erase recovered orphan mint markers");
+        }
+        if (!canonical_mints.empty()) {
+            pnevmtxmintdb->FlushDataToCache(canonical_mints, canonical_mint_txids);
+            if (!pnevmtxmintdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
+                return error("ReplayBlocks(): Failed to persist recovered mint transaction IDs");
+            }
         }
         std::optional<NEVMTxRoot> pending_root;
         if (root_disconnect) {
@@ -11686,7 +11711,7 @@ bool Chainstate::ReplayBlocks()
         LogPrintf("Rolling forward %s (%i)\n", pindex->GetBlockHash().ToString(), nHeight);
         m_chainman.GetNotifications().progress(_("Replaying blocks…"), (int)((nHeight - nForkHeight) * 100.0 / (pindexNew->nHeight - nForkHeight)), false);
         // SYSCOIN
-        if (!RollforwardBlock(pindex, cache, mapNEVMTxRoots, setMintTxsConnect, mapPoDAConnect, vecTXIDPairs)) return false;
+        if (!RollforwardBlock(pindex, cache, mapNEVMTxRoots, setMintTxsConnect, mint_txids, mapPoDAConnect, vecTXIDPairs)) return false;
     }
 
     cache.SetBestBlock(pindexNew->GetBlockHash());
@@ -11698,7 +11723,7 @@ bool Chainstate::ReplayBlocks()
                 setMintDisconnectOnly.insert(hash);
             }
         }
-        pnevmtxmintdb->FlushDataToCache(setMintTxsConnect);
+        pnevmtxmintdb->FlushDataToCache(setMintTxsConnect, mint_txids);
         if (!pnevmtxmintdb->FlushCacheToDisk(/*CHUNK_ITEMS=*/256, /*fSync=*/true)) {
             return error("ReplayBlocks(): Failed to persist mint replay additions");
         }

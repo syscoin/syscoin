@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 
 template <typename C> class Span;
 
@@ -99,4 +100,5 @@ public:
 };
 // SYSCOIN
 typedef std::unordered_set<uint256, SaltedTxidHasher> NEVMMintTxSet;
+typedef std::unordered_map<uint256, uint256, SaltedTxidHasher> NEVMMintTxIdMap;
 #endif // SYSCOIN_UTIL_HASHER_H

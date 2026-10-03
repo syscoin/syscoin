@@ -14,11 +14,13 @@
 #include <rpc/client.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
+#include <services/assetconsensus.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/time.h>
 
 #include <any>
+#include <memory>
 
 #include <boost/test/unit_test.hpp>
 
@@ -84,8 +86,137 @@ UniValue RPCTestingSetup::CallRPC(std::string args)
     }
 }
 
+// Restore the fixture's mint database even when a fatal test assertion unwinds.
+class ScopedMintLookupDB
+{
+    const fs::path m_path;
+    std::unique_ptr<CNEVMMintedTxDB> m_previous;
+
+public:
+    explicit ScopedMintLookupDB(const fs::path& path)
+        : m_path{path}, m_previous{std::move(pnevmtxmintdb)} {}
+
+    ~ScopedMintLookupDB() { pnevmtxmintdb = std::move(m_previous); }
+
+    void Reopen(bool wipe = false)
+    {
+        pnevmtxmintdb.reset();
+        pnevmtxmintdb = std::make_unique<CNEVMMintedTxDB>(DBParams{
+            .path = m_path,
+            .cache_bytes = 1U << 20,
+            .wipe_data = wipe});
+    }
+};
+
 
 BOOST_FIXTURE_TEST_SUITE(rpc_tests, RPCTestingSetup)
+
+// SYSCOIN: the mint lookup must return the containing Syscoin transaction ID
+// from the active cache as well as after a durable database reopen.
+BOOST_AUTO_TEST_CASE(rpc_syscoincheckmint_cache_disk_and_reopen)
+{
+    ScopedMintLookupDB mint_db{m_args.GetDataDirBase() / "rpc_mint_lookup"};
+    mint_db.Reopen(/*wipe=*/true);
+    const uint256 proof{uint256S("a101")};
+    const uint256 txid{uint256S("b101")};
+    gArgs.ForceSetArg("-rpcdoccheck", "1");
+
+    pnevmtxmintdb->FlushDataToCache({proof}, {{proof, txid}});
+    BOOST_REQUIRE(pnevmtxmintdb->ExistsTx(proof));
+    BOOST_REQUIRE(!pnevmtxmintdb->Exists(proof));
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint " + proof.GetHex())["txid"].get_str(), txid.GetHex());
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint 0x" + proof.GetHex())["txid"].get_str(), txid.GetHex());
+
+    BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+    uint256 persisted_txid;
+    BOOST_REQUIRE(pnevmtxmintdb->Read(proof, persisted_txid));
+    BOOST_CHECK(persisted_txid == txid);
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint " + proof.GetHex())["txid"].get_str(), txid.GetHex());
+
+    mint_db.Reopen();
+    BOOST_REQUIRE(pnevmtxmintdb->ExistsTx(proof));
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint " + proof.GetHex())["txid"].get_str(), txid.GetHex());
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint 0x" + proof.GetHex())["txid"].get_str(), txid.GetHex());
+}
+
+BOOST_AUTO_TEST_CASE(rpc_syscoincheckmint_legacy_rows)
+{
+    ScopedMintLookupDB mint_db{m_args.GetDataDirBase() / "rpc_mint_legacy_rows"};
+    mint_db.Reopen(/*wipe=*/true);
+    const uint256 known_proof{uint256S("a201")};
+    const uint256 known_txid{uint256S("b201")};
+    const uint256 marker_proof{uint256S("a202")};
+    const uint256 missing_proof{uint256S("a203")};
+    BOOST_REQUIRE(pnevmtxmintdb->Write(known_proof, known_txid));
+    BOOST_REQUIRE(pnevmtxmintdb->Write(marker_proof, true));
+    mint_db.Reopen();
+
+    BOOST_REQUIRE(pnevmtxmintdb->ExistsTx(known_proof));
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint " + known_proof.GetHex())["txid"].get_str(), known_txid.GetHex());
+    BOOST_REQUIRE(pnevmtxmintdb->ExistsTx(marker_proof));
+    BOOST_CHECK_EXCEPTION(CallRPC("syscoincheckmint " + marker_proof.GetHex()), std::runtime_error,
+        [](const std::runtime_error& error) {
+            return std::string{error.what()} == "Mint exists but its Syscoin transaction ID was not recorded; use -reindex to rebuild the lookup";
+        });
+    BOOST_CHECK(pnevmtxmintdb->ExistsTx(marker_proof));
+    BOOST_CHECK_EXCEPTION(CallRPC("syscoincheckmint " + missing_proof.GetHex()), std::runtime_error,
+        [](const std::runtime_error& error) {
+            return std::string{error.what()} == "Could not read Syscoin txid using mint transaction hash";
+        });
+}
+
+BOOST_AUTO_TEST_CASE(rpc_syscoincheckmint_erase_reconnect_and_unknown_cache)
+{
+    ScopedMintLookupDB mint_db{m_args.GetDataDirBase() / "rpc_mint_reconnect"};
+    mint_db.Reopen(/*wipe=*/true);
+    const uint256 proof{uint256S("a301")};
+    const uint256 old_txid{uint256S("b301")};
+    const uint256 new_txid{uint256S("b302")};
+    pnevmtxmintdb->FlushDataToCache({proof}, {{proof, old_txid}});
+    BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+
+    // Pending disconnect erases mask a durable ID until the same proof is
+    // included again, potentially in a different Syscoin transaction.
+    pnevmtxmintdb->EraseCache({proof});
+    BOOST_REQUIRE(pnevmtxmintdb->Exists(proof));
+    BOOST_REQUIRE(!pnevmtxmintdb->ExistsTx(proof));
+    BOOST_CHECK_EXCEPTION(CallRPC("syscoincheckmint " + proof.GetHex()), std::runtime_error,
+        [](const std::runtime_error& error) {
+            return std::string{error.what()} == "Could not read Syscoin txid using mint transaction hash";
+        });
+    pnevmtxmintdb->FlushDataToCache({proof}, {{proof, new_txid}});
+    BOOST_REQUIRE(pnevmtxmintdb->ExistsTx(proof));
+    uint256 persisted_txid;
+    BOOST_REQUIRE(pnevmtxmintdb->Read(proof, persisted_txid));
+    BOOST_CHECK(persisted_txid == old_txid);
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint " + proof.GetHex())["txid"].get_str(), new_txid.GetHex());
+    BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+    mint_db.Reopen();
+    BOOST_CHECK_EQUAL(CallRPC("syscoincheckmint " + proof.GetHex())["txid"].get_str(), new_txid.GetHex());
+
+    // A reconnected marker without a recorded ID must shadow the old durable
+    // owner, while still preventing the proof from being minted twice.
+    pnevmtxmintdb->EraseCache({proof});
+    pnevmtxmintdb->FlushDataToCache({proof});
+    BOOST_REQUIRE(pnevmtxmintdb->ExistsTx(proof));
+    BOOST_REQUIRE(pnevmtxmintdb->Read(proof, persisted_txid));
+    BOOST_CHECK(persisted_txid == new_txid);
+    const auto unavailable = [](const std::runtime_error& error) {
+        return std::string{error.what()} == "Mint exists but its Syscoin transaction ID was not recorded; use -reindex to rebuild the lookup";
+    };
+    BOOST_CHECK_EXCEPTION(CallRPC("syscoincheckmint " + proof.GetHex()), std::runtime_error, unavailable);
+    BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+    mint_db.Reopen();
+    BOOST_REQUIRE(pnevmtxmintdb->ExistsTx(proof));
+    BOOST_CHECK_EXCEPTION(CallRPC("syscoincheckmint " + proof.GetHex()), std::runtime_error, unavailable);
+
+    BOOST_REQUIRE(pnevmtxmintdb->FlushErase({proof}));
+    BOOST_CHECK(!pnevmtxmintdb->ExistsTx(proof));
+    BOOST_CHECK_EXCEPTION(CallRPC("syscoincheckmint " + proof.GetHex()), std::runtime_error,
+        [](const std::runtime_error& error) {
+            return std::string{error.what()} == "Could not read Syscoin txid using mint transaction hash";
+        });
+}
 
 // SYSCOIN: RPC interruption is idempotent across fresh test/server lifecycles.
 BOOST_AUTO_TEST_CASE(rpc_interrupt_stops_each_started_lifecycle)

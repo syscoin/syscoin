@@ -206,7 +206,8 @@ static RPCHelpMan syscoingettxroots()
 static RPCHelpMan syscoincheckmint()
 {
     return RPCHelpMan{"syscoincheckmint",
-    "\nGet the Syscoin mint transaction by looking up using NEVM tx hash (This is no the txid, it is the sha3 of the transaction bytes value).\n",
+    "\nGet the Syscoin mint transaction by looking up using NEVM tx hash (This is no the txid, it is the sha3 of the transaction bytes value).\n"
+    "Legacy replay-only records require -reindex to rebuild their transaction ID lookup.\n",
     {
         {"nevm_txhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "NEVM Tx Hash used to burn funds to move to Syscoin."}
     },
@@ -223,8 +224,13 @@ static RPCHelpMan syscoincheckmint()
 {
     std::string strTxHash = request.params[0].get_str();
     strTxHash = RemovePrefix(strTxHash, "0x");  // strip 0x
+    const uint256 nevmTxHash{uint256S(strTxHash)};
+    LOCK(cs_main);
     uint256 sysTxid;
-    if(!pnevmtxmintdb || !pnevmtxmintdb->Read(uint256S(strTxHash), sysTxid)){
+    if(!pnevmtxmintdb || !pnevmtxmintdb->ReadMintTx(nevmTxHash, sysTxid)){
+       if (pnevmtxmintdb && pnevmtxmintdb->ExistsTx(nevmTxHash)) {
+           throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Mint exists but its Syscoin transaction ID was not recorded; use -reindex to rebuild the lookup");
+       }
        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read Syscoin txid using mint transaction hash");
     }
     UniValue output(UniValue::VOBJ);

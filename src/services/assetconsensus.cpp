@@ -941,11 +941,12 @@ bool CNEVMTxRootsDB::FlushPendingErases()
     m_pending_erases.clear();
     return true;
 }
-void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) {
+void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots, const NEVMMintTxIdMap& txids) {
     LOCK(cs_cache);
     for (auto const& key : mapNEVMTxRoots) {
         m_pending_erases.erase(key);
-        mapCache.insert(key);
+        const auto txid{txids.find(key)};
+        mapCache.insert_or_assign(key, txid == txids.end() ? std::nullopt : std::optional{txid->second});
     }
 }
 bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
@@ -957,7 +958,10 @@ bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
     const std::size_t count = mapCache.size();
     if (!nevm_cache_detail::FlushCache(
             *this, mapCache, CHUNK_ITEMS, fSync,
-            [](CDBBatch& batch, const uint256& key) { batch.Write(key, true); },
+            [](CDBBatch& batch, const auto& entry) {
+                if (entry.second) batch.Write(entry.first, *entry.second);
+                else batch.Write(entry.first, true);
+            },
             [this](CDBBatch& batch, bool sync) { return WriteCacheBatch(batch, sync); })) return false;
 
     LogPrint(BCLog::SYS,
@@ -998,6 +1002,18 @@ bool CNEVMMintedTxDB::FlushPendingErases()
     if (!WriteCacheBatch(batch, true)) return false;
     m_pending_erases.clear();
     return true;
+}
+bool CNEVMMintedTxDB::ReadMintTx(const uint256& nTxHash, uint256& txid) {
+    LOCK(cs_cache);
+    if (m_pending_erases.contains(nTxHash)) return false;
+    if (const auto cached{mapCache.find(nTxHash)}; cached != mapCache.end()) {
+        // An unknown replacement must not inherit the previous branch's durable txid.
+        if (!cached->second) return false;
+        txid = *cached->second;
+        return true;
+    }
+    // Historical uint256 rows remain readable; one-byte replay markers contain no txid.
+    return CDBWrapper::Read(nTxHash, txid);
 }
 bool CNEVMMintedTxDB::ExistsTx(const uint256& nTxHash) {
     LOCK(cs_cache);
