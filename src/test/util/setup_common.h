@@ -25,8 +25,19 @@
 #include <consensus/consensus.h>
 
 class CFeeRate;
+// SYSCOIN BEGIN: governance readiness test declarations.
+class CBlockIndex;
+class CGovernanceManager;
+// SYSCOIN END: governance readiness test declarations.
 class Chainstate;
 class FastRandomContext;
+
+// SYSCOIN BEGIN: governance readiness test seam.
+namespace governance_tests {
+bool PublishGovernanceReadyForTest(CGovernanceManager& manager,
+                                   const CBlockIndex& tip);
+}
+// SYSCOIN END: governance readiness test seam.
 
 /** This is connected to the logger. Can be used to redirect logs to any other log */
 extern const std::function<void(const std::string&)> G_TEST_LOG_FUN;
@@ -106,6 +117,7 @@ struct TestChain100Setup : public TestingSetup {
         int count = COINBASE_MATURITY,
         const bool coins_db_in_memory = true,
         const bool block_tree_db_in_memory = true);
+    ~TestChain100Setup(); // SYSCOIN: restores fork-specific global sync state.
 
     /**
      * Create a new block with just given transactions, coinbase paying to
@@ -173,6 +185,16 @@ struct TestChain100Setup : public TestingSetup {
 
     std::vector<CTransactionRef> m_coinbase_txns; // For convenience, coinbase transactions
     CKey coinbaseKey; // private/public key needed to spend coinbase transactions
+
+private:
+    // SYSCOIN BEGIN: preserve fork sync state during deterministic bootstrap.
+    const int m_previous_masternode_sync_mode;
+
+    // The deterministic bootstrap chain intentionally predates the test-only
+    // PQ registry deployment. Keep its synthetic superblocks on the normal
+    // historical-sync validation lane, then restore full sync before tests run.
+    bool m_bootstrap_mining{false};
+    // SYSCOIN END: preserve fork sync state during deterministic bootstrap.
 };
 
 //

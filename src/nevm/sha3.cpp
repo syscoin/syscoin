@@ -20,17 +20,142 @@
  */
 
 #include <nevm/sha3.h>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <nevm/rlp.h>
-extern "C" void md_map_b2s256(uint8_t* hash, const uint8_t* msg, int len);
 using namespace std;
 using namespace dev;
 
 namespace dev
 {
+
+namespace blake2s_internal
+{
+
+constexpr std::array<uint32_t, 8> IV{
+    0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+    0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U,
+};
+
+constexpr std::array<std::array<uint8_t, 16>, 10> SIGMA{{
+    {{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}},
+    {{14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3}},
+    {{11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4}},
+    {{7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8}},
+    {{9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13}},
+    {{2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9}},
+    {{12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11}},
+    {{13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10}},
+    {{6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5}},
+    {{10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0}},
+}};
+
+uint32_t ReadLE32(const uint8_t* input)
+{
+    return static_cast<uint32_t>(input[0]) |
+        (static_cast<uint32_t>(input[1]) << 8) |
+        (static_cast<uint32_t>(input[2]) << 16) |
+        (static_cast<uint32_t>(input[3]) << 24);
+}
+
+void WriteLE32(uint8_t* output, uint32_t value)
+{
+    output[0] = static_cast<uint8_t>(value);
+    output[1] = static_cast<uint8_t>(value >> 8);
+    output[2] = static_cast<uint8_t>(value >> 16);
+    output[3] = static_cast<uint8_t>(value >> 24);
+}
+
+constexpr uint32_t RotR(uint32_t value, unsigned int shift)
+{
+    return (value >> shift) | (value << (32 - shift));
+}
+
+// BLAKE2s additions are modulo 2^32; widen first so integer sanitizers do not
+// treat the algorithm's required wraparound as an error.
+constexpr uint32_t AddModulo32(uint32_t a, uint32_t b,
+    uint32_t c = 0) noexcept
+{
+    return static_cast<uint32_t>(static_cast<uint64_t>(a) + b + c);
+}
+
+void Mix(uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d,
+    uint32_t x, uint32_t y)
+{
+    a = AddModulo32(a, b, x);
+    d = RotR(d ^ a, 16);
+    c = AddModulo32(c, d);
+    b = RotR(b ^ c, 12);
+    a = AddModulo32(a, b, y);
+    d = RotR(d ^ a, 8);
+    c = AddModulo32(c, d);
+    b = RotR(b ^ c, 7);
+}
+
+void Compress(std::array<uint32_t, 8>& state, const uint8_t* block,
+    uint64_t bytes, bool final)
+{
+    std::array<uint32_t, 16> message{};
+    std::array<uint32_t, 16> work{};
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = ReadLE32(block + 4 * i);
+    }
+    for (size_t i = 0; i < state.size(); ++i) {
+        work[i] = state[i];
+        work[i + 8] = IV[i];
+    }
+    work[12] ^= static_cast<uint32_t>(bytes);
+    work[13] ^= static_cast<uint32_t>(bytes >> 32);
+    if (final) work[14] = ~work[14];
+
+    for (const auto& permutation : SIGMA) {
+        Mix(work[0], work[4], work[8], work[12],
+            message[permutation[0]], message[permutation[1]]);
+        Mix(work[1], work[5], work[9], work[13],
+            message[permutation[2]], message[permutation[3]]);
+        Mix(work[2], work[6], work[10], work[14],
+            message[permutation[4]], message[permutation[5]]);
+        Mix(work[3], work[7], work[11], work[15],
+            message[permutation[6]], message[permutation[7]]);
+        Mix(work[0], work[5], work[10], work[15],
+            message[permutation[8]], message[permutation[9]]);
+        Mix(work[1], work[6], work[11], work[12],
+            message[permutation[10]], message[permutation[11]]);
+        Mix(work[2], work[7], work[8], work[13],
+            message[permutation[12]], message[permutation[13]]);
+        Mix(work[3], work[4], work[9], work[14],
+            message[permutation[14]], message[permutation[15]]);
+    }
+    for (size_t i = 0; i < state.size(); ++i) {
+        state[i] ^= work[i] ^ work[i + 8];
+    }
+}
+
+void Hash(uint8_t* output, const uint8_t* input, size_t input_size)
+{
+    std::array<uint32_t, 8> state{IV};
+    // Digest length 32, key length 0, fanout 1, depth 1.
+    state[0] ^= 0x01010020U;
+    uint64_t bytes{0};
+    while (input_size > 64) {
+        bytes += 64;
+        Compress(state, input, bytes, false);
+        input += 64;
+        input_size -= 64;
+    }
+    std::array<uint8_t, 64> final_block{};
+    if (input_size != 0) std::memcpy(final_block.data(), input, input_size);
+    bytes += input_size;
+    Compress(state, final_block.data(), bytes, true);
+    for (size_t i = 0; i < state.size(); ++i) {
+        WriteLE32(output + 4 * i, state[i]);
+    }
+}
+
+} // namespace blake2s_internal
 
 h256 EmptySHA3 = sha3(bytesConstRef());
 h256 EmptyListSHA3 = sha3(rlpList());
@@ -226,7 +351,7 @@ bool blake2s256(bytesConstRef _input, bytesRef o_output)
 	if (o_output.size() != 32) {
 		return false;
 	}
-	md_map_b2s256(o_output.data(), _input.data(), static_cast<int>(_input.size()));
+    blake2s_internal::Hash(o_output.data(), _input.data(), _input.size());
 	return true;
 }
 

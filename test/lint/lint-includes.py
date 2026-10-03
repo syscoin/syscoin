@@ -20,7 +20,9 @@ EXCLUDED_DIRS = ["contrib/devtools/syscoin-tidy/",
                  "src/crc32c/",
                  "src/secp256k1/",
                  "src/minisketch/",
-                 "src/dashbls/",
+                 # SYSCOIN: Preserve the pinned SLH-DSA reference sources;
+                 # local wrappers remain subject to the repository rules.
+                 "src/crypto/slhdsa/vendor/",
                  "src/immer/"]
 
 EXPECTED_BOOST_INCLUDES = ["boost/date_time/posix_time/posix_time.hpp",
@@ -46,12 +48,25 @@ EXPECTED_BOOST_INCLUDES = ["boost/date_time/posix_time/posix_time.hpp",
                            "boost/throw_exception.hpp",
                            "boost/tuple/tuple.hpp",
                            "boost/pool/pool_alloc.hpp",
+                           # SYSCOIN: Legacy EvoDB tests use these Boost helpers.
+                           "boost/filesystem.hpp",
+                           "boost/thread.hpp",
                            # SYSCOIN immer
                            "boost/intrusive_ptr.hpp",
                            "boost/python/suite/indexing/vector_indexing_suite.hpp",
                            "boost/python.hpp",
                            "boost/range/adaptors.hpp",
-                           "boost/range/irange.hpp"]
+                           # SYSCOIN: Managed Bitcoin policy invokes the
+                           # independent header backend with argv-safe
+                           # Boost.Process v1 primitives.
+                           "boost/process/v1/args.hpp",
+                           "boost/process/v1/child.hpp",
+                           "boost/process/v1/error.hpp",
+                           "boost/process/v1/exe.hpp",
+                           "boost/process/v1/group.hpp",
+                           "boost/process/v1/io.hpp",
+                           "boost/process/v1/pipe.hpp",
+                           "boost/version.hpp"]
 
 
 def get_toplevel():

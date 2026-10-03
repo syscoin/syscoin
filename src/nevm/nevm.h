@@ -8,6 +8,17 @@
 #include <nevm/rlp.h>
 
 #include <optional>
+#include <string>
+#include <vector>
+
+class CNEVMHeader;
+
+/** Authenticate retained NEVM block bytes against an already validated Core
+ * commitment before destructive local migration. This checks the header and
+ * body commitments, not EVM execution or contextual consensus validity. */
+bool CheckNEVMBlockPayloadIntegrity(const std::vector<uint8_t>& payload,
+                                   const CNEVMHeader& commitment,
+                                   std::string& error);
 
 bool VerifyProof(dev::bytesConstRef path,
                  const dev::RLP& value,

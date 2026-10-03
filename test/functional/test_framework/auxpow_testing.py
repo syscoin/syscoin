@@ -15,13 +15,14 @@ from test_framework.authproxy import JSONRPCException
 
 # 32-byte zero hash, hex-encoded.
 ZERO_HASH_HEX = "00" * 32
-# Non-null BTCPREV value for tests that require a commitment.
-NON_NULL_BTCPREV_HASH_HEX = "11" * 32
+# Non-palindromic BTCPREV value so the RPC-to-header binding tests also catch
+# an accidental display-order/internal-order hash reversal.
+NON_NULL_BTCPREV_HASH_HEX = bytes(range(32)).hex()
 
 def createAuxBlockWithBTCPREVIfRequired(node, addr):
   """
   Wrapper around node.createauxblock that supplies btcprevhash when the node
-  requires it (BTCPREV sign-offset blocks).
+  requires it (PQ BTCC candidate blocks).
   """
   try:
     return node.createauxblock(addr)

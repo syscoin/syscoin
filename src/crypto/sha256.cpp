@@ -2,6 +2,12 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+// SYSCOIN: Autotools exposes architecture backends through the generated
+// configuration header; upstream Bitcoin's CMake target defines them globally.
+#if defined(HAVE_CONFIG_H)
+#include <config/syscoin-config.h> // IWYU pragma: keep
+#endif
+
 #include <crypto/sha256.h>
 #include <crypto/common.h>
 

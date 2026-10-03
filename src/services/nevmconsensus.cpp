@@ -10,15 +10,12 @@
 #include <nevm/address.h>
 #include <nevm/sha3.h>
 #include <messagesigner.h>
-#include <logging.h>
 #include <util/rbf.h>
 #include <undo.h>
 #include <validationinterface.h>
 #include <timedata.h>
 #include <key_io.h>
 #include <logging.h>
-
-#include <algorithm>
 
 std::unique_ptr<CBlockIndexDB> pblockindexdb;
 std::unique_ptr<CNEVMDataDB> pnevmdatadb;
@@ -27,6 +24,19 @@ bool fNEVMConnection = false;
 bool fRegTest = false;
 bool fSigNet = false;
 
+namespace {
+bool PreferBlockBlobMetadata(const MapPoDAPayloadMeta& candidate,
+                             const MapPoDAPayloadMeta& current)
+{
+    // SYSCOIN: out-of-order blocks must never shorten a blob's retention.
+    // Equal-MTP duplicates choose the smaller txid so every arrival order
+    // converges on the same informational transaction reference.
+    return candidate.nMedianTime > current.nMedianTime ||
+           (candidate.nMedianTime == current.nMedianTime &&
+            candidate.txid < current.txid);
+}
+} // namespace
+
 bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMintTxs) {
  
     if(IsSyscoinMintTx(tx.nVersion)) {
@@ -34,6 +44,11 @@ bool DisconnectSyscoinTransaction(const CTransaction& tx, NEVMMintTxSet &setMint
             return false;       
     }
     return true;       
+}
+
+bool CNEVMDataDB::BlobExistsOnDisk(const std::vector<uint8_t>& key) const
+{
+    return pnevmdatablobdb->Exists(key);
 }
 
 void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory& mapPoDA, PoDAFlushSource source)
@@ -62,7 +77,7 @@ void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory& mapPoDA, PoDAFlushSource
         if (!have_metadata && !have_payload) continue;
         if (have_metadata && have_payload && meta.nSize != val.nSize) continue;
 
-        const bool have_blob = have_payload && pnevmdatablobdb->Exists(key);
+        const bool have_blob = have_payload && BlobExistsOnDisk(key);
         if (have_payload && !have_blob) {
             batchblob.Write(key, val.vchNEVMData);
         }
@@ -71,11 +86,10 @@ void CNEVMDataDB::FlushDataToCache(const PoDAMAPMemory& mapPoDA, PoDAFlushSource
             continue;
         }
 
-        // Blocks can arrive out of order; the shared blob must keep the newest
-        // observed retention deadline even when its metadata txid is refreshed.
-        const int64_t median_time = source == PoDAFlushSource::Block && have_metadata ?
-            std::max(meta.nMedianTime, val.nMedianTime) : val.nMedianTime;
-        cache_updates.try_emplace(key, val.txid, have_metadata ? meta.nSize : val.nSize, median_time);
+        const auto& preferred_meta = source == PoDAFlushSource::Block && have_metadata &&
+            !PreferBlockBlobMetadata(val, meta) ? meta : val;
+        cache_updates.try_emplace(key, preferred_meta.txid, have_metadata ? meta.nSize : val.nSize,
+                                  preferred_meta.nMedianTime);
         if (source == PoDAFlushSource::Block) {
             retained_keys.push_back(key);
         } else if (!have_blob) {
@@ -109,7 +123,7 @@ bool CNEVMDataDB::FlushCacheToDisk(const int64_t nMedianTime, bool fSync)
         }
     }
     for (const auto& [key, val] : mapCache) {
-        if (fTestNet && nMedianTime > val.nMedianTime + NEVM_DATA_EXPIRE_TIME) continue;
+        if (fTestNet && IsNEVMDataExpired(nMedianTime, val.nMedianTime)) continue;
         batch.Write(key, val);
     }
     if (!mapCache.empty()) {
@@ -204,15 +218,10 @@ bool CNEVMDataDB::PruneToBatch(
 {
     AssertLockHeld(cs_cache);
     int nCount = 0;
-    for (const auto& [key, meta] : mapCache) {
-        if (nMedianTime > meta.nMedianTime + NEVM_DATA_EXPIRE_TIME) {
-            batch.Erase(key);
-            batchblob.Erase(key);
-            pruned_keys.push_back(key);
-            ++nCount;
-        }
-    }
-    
+
+    // SYSCOIN: mapCache is the authoritative overlay for duplicate blob
+    // inclusions. Scan disk while the complete overlay is intact and ignore
+    // every shadowed key so stale metadata cannot retain or delete its bytes.
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
     pcursor->SeekToFirst();
     std::vector<uint8_t> vchVersionHash;
@@ -223,13 +232,13 @@ bool CNEVMDataDB::PruneToBatch(
                 pcursor->Next();
                 continue;
             }
-            // Cached block refreshes supersede older persisted retention times.
-            if (mapCache.count(vchVersionHash) != 0) {
+            if (mapCache.find(vchVersionHash) != mapCache.end()) {
                 pcursor->Next();
                 continue;
             }
             if (pcursor->GetValue(meta)) {
-                bool isExpired = nMedianTime > (meta.nMedianTime + NEVM_DATA_EXPIRE_TIME);
+                const bool isExpired{
+                    IsNEVMDataExpired(nMedianTime, meta.nMedianTime)};
                 if (isExpired) {
                     batch.Erase(vchVersionHash);
                     batchblob.Erase(vchVersionHash);
@@ -240,6 +249,15 @@ bool CNEVMDataDB::PruneToBatch(
             pcursor->Next();
         } catch (const std::exception& e) {
             return error("%s() : deserialize error: %s", __func__, e.what());
+        }
+    }
+
+    for (const auto& [key, meta] : mapCache) {
+        if (IsNEVMDataExpired(nMedianTime, meta.nMedianTime)) {
+            batch.Erase(key);
+            batchblob.Erase(key);
+            pruned_keys.push_back(key);
+            ++nCount;
         }
     }
     if(nCount > 0)

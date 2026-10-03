@@ -3,12 +3,15 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chain.h>
+#include <chainparams.h>
 #include <clientversion.h>
 #include <core_io.h>
+#include <evo/deterministicmns.h>
 #include <hash.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
 #include <merkleblock.h>
+#include <node/context.h>
 #include <rpc/util.h>
 #include <script/descriptor.h>
 #include <script/script.h>
@@ -19,13 +22,21 @@
 #include <util/fs.h>
 #include <util/time.h>
 #include <util/translation.h>
+#include <validation.h>
+#include <wallet/pqkey.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <tuple>
 #include <string>
+// SYSCOIN BEGIN: Parse PQ dump records without copying secrets to ordinary strings.
+#include <support/allocators/zeroafterfree.h>
+#include <util/string.h>
+#include <string_view>
+// SYSCOIN END: Parse PQ dump records without copying secrets to ordinary strings.
 
 #include <univalue.h>
 
@@ -58,6 +69,181 @@ static std::string DecodeDumpString(const std::string &str) {
         ret << c;
     }
     return ret.str();
+}
+
+// SYSCOIN BEGIN: Tagged independent PQ voting-key records in legacy wallet dumps.
+static constexpr std::string_view PQ_VOTING_DUMP_PREFIX{"pqvotingkey="};
+static constexpr std::string_view PQ_OWNER_DUMP_PREFIX{"pqownerkey="};
+
+static bool ParsePQKeyDumpRecord(std::string_view line, std::string_view prefix,
+                                 std::map<slhdsa::PublicKey, CKeyingMaterial>& keys)
+{
+    line = TrimStringView(line.substr(0, line.find('#')));
+    if (!line.starts_with(prefix.substr(0, prefix.size() - 1))) return false;
+    if (!line.starts_with(prefix)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid PQ key record");
+    }
+    line.remove_prefix(prefix.size());
+    const auto separator{line.find_first_of(" \t\r\n")};
+    if (separator == std::string_view::npos) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid PQ key record");
+    }
+    const auto secret_hex{line.substr(0, separator)};
+    const auto public_hex{TrimStringView(line.substr(separator))};
+    if (secret_hex.size() != 2 * slhdsa::SECRET_KEY_SIZE || !IsHex(secret_hex) ||
+        public_hex.size() != 2 * slhdsa::PUBLIC_KEY_SIZE || !IsHex(public_hex)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid PQ key record");
+    }
+    CKeyingMaterial secret(slhdsa::SECRET_KEY_SIZE);
+    slhdsa::PublicKey public_key;
+    // Decode the private bytes directly into memory that is cleansed on release.
+    for (size_t i = 0; i < secret.size(); ++i) {
+        secret[i] = (HexDigit(secret_hex[2 * i]) << 4) | HexDigit(secret_hex[2 * i + 1]);
+    }
+    for (size_t i = 0; i < public_key.size(); ++i) {
+        public_key[i] = (HexDigit(public_hex[2 * i]) << 4) | HexDigit(public_hex[2 * i + 1]);
+    }
+    if (const auto it{keys.find(public_key)}; it != keys.end()) {
+        if (it->second != secret) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Conflicting PQ key records");
+        }
+    } else {
+        keys.emplace(public_key, std::move(secret));
+    }
+    return true;
+}
+// SYSCOIN END: Tagged independent PQ voting-key records in legacy wallet dumps.
+
+static UniValue PQKeyRolesJSON(uint8_t roles)
+{
+    UniValue result{UniValue::VARR};
+    if (roles & static_cast<uint8_t>(PQKeyRole::OWNER)) result.push_back("owner");
+    if (roles & static_cast<uint8_t>(PQKeyRole::VOTING)) result.push_back("voting");
+    return result;
+}
+
+RPCHelpMan listpqkeys()
+{
+    return RPCHelpMan{"listpqkeys",
+        "\nLists this wallet's independent PQ public keys, local roles, and current masternode associations.\n"
+        "Includes unassigned keys and retained keys from past rotations. Works while locked and with legacy or descriptor wallets.\n"
+        "Local roles describe intended wallet use; on-chain owner and voting records determine authority. PQ public keys are not SYS payment addresses.\n",
+        {},
+        RPCResult{RPCResult::Type::ARR, "", "Public key inventory; never contains private keys", {
+            {RPCResult::Type::OBJ, "", "", {
+                {RPCResult::Type::STR_HEX, "public_key", "32-byte PQ public key"},
+                {RPCResult::Type::STR, "algorithm", "SLH-DSA-SHAKE-128s"},
+                {RPCResult::Type::ARR, "roles", "Local wallet roles", {{RPCResult::Type::STR, "", "owner or voting"}}},
+                {RPCResult::Type::BOOL, "has_private_key", "Whether this wallet stores the private key, including when encrypted and locked"},
+                {RPCResult::Type::ARR, "associations", "Current masternode owner/voting assignments at the active chain tip", {
+                    {RPCResult::Type::OBJ, "", "", {
+                        {RPCResult::Type::STR_HEX, "proTxHash", "Masternode registration hash"},
+                        {RPCResult::Type::STR, "role", "On-chain role: owner or voting"},
+                        {RPCResult::Type::NUM, "key_version", "Current on-chain key version"},
+                    }},
+                }},
+            }},
+        }},
+        RPCExamples{HelpExampleCli("listpqkeys", "")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            const auto inventory{wallet->ListPQKeys()};
+            auto* node{wallet->chain().context()};
+            if (!node || !node->chainman) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Wallet node context is unavailable");
+            }
+            CDeterministicMNList members;
+            {
+                LOCK(cs_main);
+                const auto* tip{node->chainman->ActiveTip()};
+                if (tip && deterministicMNManager && tip->nHeight >= Params().GetConsensus().DIP0003Height) {
+                    members = deterministicMNManager->GetListForBlock(tip);
+                }
+            }
+            std::map<slhdsa::PublicKey, UniValue> associations;
+            for (const auto& key : inventory) associations.emplace(key.public_key, UniValue{UniValue::VARR});
+            members.ForEachMN(false, [&](const CDeterministicMN& member) {
+                const auto append = [&](const auto& record, const char* role) {
+                    if (!record.HasActiveKey()) return;
+                    const auto it{associations.find(record.public_key)};
+                    if (it == associations.end()) return;
+                    UniValue assignment{UniValue::VOBJ};
+                    assignment.pushKV("proTxHash", member.proTxHash.GetHex());
+                    assignment.pushKV("role", role);
+                    assignment.pushKV("key_version", record.key_version);
+                    it->second.push_back(std::move(assignment));
+                };
+                append(member.pdmnState->pqOwnerKey, "owner");
+                append(member.pdmnState->pqVotingKey, "voting");
+            });
+            UniValue result{UniValue::VARR};
+            for (const auto& key : inventory) {
+                UniValue entry{UniValue::VOBJ};
+                entry.pushKV("public_key", HexStr(key.public_key));
+                entry.pushKV("algorithm", "SLH-DSA-SHAKE-128s");
+                entry.pushKV("roles", PQKeyRolesJSON(key.roles));
+                entry.pushKV("has_private_key", true);
+                entry.pushKV("associations", std::move(associations.at(key.public_key)));
+                result.push_back(std::move(entry));
+            }
+            return result;
+        }};
+}
+
+RPCHelpMan dumppqkey()
+{
+    return RPCHelpMan{"dumppqkey",
+        "\nExports one independent PQ private key and its local roles in a versioned, checksummed record.\n"
+        "Works with legacy and descriptor wallets. Requires an unlocked wallet. The result contains an unencrypted private key; keep it private.\n",
+        {{"public_key", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte public key from listpqkeys"}},
+        RPCResult{RPCResult::Type::STR, "", "Portable private-key record for importpqkey"},
+        RPCExamples{HelpExampleCli("dumppqkey", "\"public_key\"")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            const auto& encoded{request.params[0].get_str()};
+            if (encoded.size() != 2 * slhdsa::PUBLIC_KEY_SIZE || !IsHex(encoded)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PQ public key must be exactly 32 bytes in hex");
+            }
+            const auto bytes{ParseHex(encoded)};
+            slhdsa::PublicKey public_key{};
+            std::copy(bytes.begin(), bytes.end(), public_key.begin());
+            PQKeyExport key;
+            std::string error;
+            if (!wallet->ExportPQKey(public_key, key, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+            const auto result{EncodePQKey(key, error)};
+            if (!result) throw JSONRPCError(RPC_WALLET_ERROR, error);
+            return *result;
+        }};
+}
+
+RPCHelpMan importpqkey()
+{
+    return RPCHelpMan{"importpqkey",
+        "\nImports one record from dumppqkey, preserving its owner/voting role metadata.\n"
+        "Works with legacy and descriptor wallets. Requires an unlocked wallet with private-key support.\n"
+        "Does not enroll the key on-chain, restore an obsolete key version, or rescan spending transactions.\n",
+        {{"record", RPCArg::Type::STR, RPCArg::Optional::NO, "Versioned, checksummed private-key record from dumppqkey"}},
+        RPCResult{RPCResult::Type::OBJ, "", "Imported public identity and local roles", {
+            {RPCResult::Type::STR_HEX, "public_key", "32-byte PQ public key"},
+            {RPCResult::Type::ARR, "roles", "Roles carried by the imported record", {{RPCResult::Type::STR, "", "owner or voting"}}},
+        }},
+        RPCExamples{HelpExampleCli("importpqkey", "\"record\"")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) return NullUniValue;
+            EnsureWalletIsUnlocked(*wallet);
+            std::string error;
+            const auto key{DecodePQKey(request.params[0].get_str(), error)};
+            if (!key) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+            if (!wallet->ImportPQKey(*key, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("public_key", HexStr(key->public_key));
+            result.pushKV("roles", PQKeyRolesJSON(key->roles));
+            return result;
+        }};
 }
 
 static bool GetWalletAddressesForKey(const LegacyScriptPubKeyMan* spk_man, const CWallet& wallet, const CKeyID& keyid, std::string& strAddr, std::string& strLabel) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
@@ -497,6 +683,9 @@ RPCHelpMan importwallet()
 {
     return RPCHelpMan{"importwallet",
                 "\nImports keys from a wallet dump file (see dumpwallet). Requires a new wallet backup to include imported keys.\n"
+                // SYSCOIN BEGIN: PQ voting-key dump/import support.
+                "Includes independent PQ voting and owner keys exported by dumpwallet.\n"
+                // SYSCOIN END: PQ voting-key dump/import support.
                 "Note: Blockchain and Mempool will be rescanned after a successful import. Use \"getwalletinfo\" to query the scanning progress.\n"
                 "Note: This command is only compatible with legacy wallets.\n",
                 {
@@ -545,14 +734,29 @@ RPCHelpMan importwallet()
         pwallet->chain().showProgress(strprintf("%s " + _("Importing…").translated, pwallet->GetDisplayName()), 0, false); // show progress dialog in GUI
         std::vector<std::tuple<CKey, int64_t, bool, std::string>> keys;
         std::vector<std::pair<CScript, int64_t>> scripts;
+        // SYSCOIN BEGIN: Parse and validate PQ records before importing any keys.
+        std::map<slhdsa::PublicKey, CKeyingMaterial> voting_keys, owner_keys;
+        // SYSCOIN END: Parse and validate PQ records before importing any keys.
         while (file.good()) {
             pwallet->chain().showProgress("", std::max(1, std::min(50, (int)(((double)file.tellg() / (double)nFilesize) * 100))), false);
-            std::string line;
+            // SYSCOIN BEGIN: Cleanse PQ private text and recognize tags before legacy parsing.
+            // Legacy labels can exceed the locked allocator's maximum allocation.
+            std::basic_string<char, std::char_traits<char>, zero_after_free_allocator<char>> line;
             std::getline(file, line);
+            const std::string_view line_view{line.data(), line.size()};
+            try {
+                if (ParsePQKeyDumpRecord(line_view, PQ_VOTING_DUMP_PREFIX, voting_keys) ||
+                    ParsePQKeyDumpRecord(line_view, PQ_OWNER_DUMP_PREFIX, owner_keys)) continue;
+            } catch (...) {
+                pwallet->chain().showProgress("", 100, false);
+                throw;
+            }
+            // SYSCOIN END: Cleanse PQ private text and recognize tags before legacy parsing.
             if (line.empty() || line[0] == '#')
                 continue;
 
-            std::vector<std::string> vstr = SplitString(line, ' ');
+            // SYSCOIN: Legacy records retain their existing parser after PQ tag handling.
+            std::vector<std::string> vstr = SplitString(line_view, ' ');
             if (vstr.size() < 2)
                 continue;
             CKey key = DecodeSecret(vstr[0]);
@@ -582,6 +786,12 @@ RPCHelpMan importwallet()
                 scripts.emplace_back(script, birth_time);
             }
         }
+        // SYSCOIN BEGIN: Reject incomplete reads before persisting a partial dump.
+        if (file.bad()) {
+            pwallet->chain().showProgress("", 100, false);
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to read wallet dump file");
+        }
+        // SYSCOIN END: Reject incomplete reads before persisting a partial dump.
         file.close();
         EnsureBlockDataFromTime(*pwallet, nTimeBegin);
         // We now know whether we are importing private keys, so we can error if private keys are disabled
@@ -589,6 +799,13 @@ RPCHelpMan importwallet()
             pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
             throw JSONRPCError(RPC_WALLET_ERROR, "Importing wallets is disabled when private keys are disabled");
         }
+        // SYSCOIN BEGIN: Validate all PQ keys and atomically persist their mandatory flag.
+        std::string voting_error;
+        if (!pwallet->ImportPQKeys(voting_keys, owner_keys, voting_error)) {
+            pwallet->chain().showProgress("", 100, false);
+            throw JSONRPCError(RPC_WALLET_ERROR, voting_error);
+        }
+        // SYSCOIN END: Validate all PQ keys and atomically persist their mandatory flag.
         double total = (double)(keys.size() + scripts.size());
         double progress = 0;
         for (const auto& key_tuple : keys) {
@@ -692,6 +909,10 @@ RPCHelpMan dumpwallet()
 {
     return RPCHelpMan{"dumpwallet",
                 "\nDumps all wallet keys in a human-readable format to a server-side file. This does not allow overwriting existing files.\n"
+                // SYSCOIN BEGIN: Explain PQ secrets in plaintext legacy dumps.
+                "Includes independent PQ voting and owner private keys. The dumpfile is unencrypted; keep it private.\n"
+                "Restoring PQ keys requires importwallet from a version that supports both PQ owner and voting records.\n"
+                // SYSCOIN END: Explain PQ secrets in plaintext legacy dumps.
                 "Imported scripts are included in the dumpfile, but corresponding BIP173 addresses, etc. may not be added automatically by importwallet.\n"
                 "Note that if your wallet contains keys which are not derived from your HD seed (e.g. imported keys), these are not covered by\n"
                 "only backing up the seed itself, and must be backed up too (e.g. ensure you back up the whole dumpfile).\n"
@@ -737,6 +958,13 @@ RPCHelpMan dumpwallet()
         throw JSONRPCError(RPC_INVALID_PARAMETER, filepath.u8string() + " already exists. If you are sure this is what you want, move it out of the way first");
     }
 
+    // SYSCOIN BEGIN: Export every PQ secret before creating the dumpfile.
+    std::map<slhdsa::PublicKey, CKeyingMaterial> voting_keys, owner_keys;
+    std::string voting_error;
+    if (!wallet.ExportPQKeys(voting_keys, owner_keys, voting_error)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, voting_error);
+    }
+    // SYSCOIN END: Export every PQ secret before creating the dumpfile.
     std::ofstream file;
     file.open(filepath);
     if (!file.is_open())
@@ -824,8 +1052,31 @@ RPCHelpMan dumpwallet()
         }
     }
     file << "\n";
+    // SYSCOIN BEGIN: Explicit PQ tags cannot be confused with legacy keys or scripts.
+    for (const bool owner : {false, true}) {
+        const auto& pq_keys{owner ? owner_keys : voting_keys};
+        if (pq_keys.empty()) continue;
+        file << "# Independent PQ " << (owner ? "owner" : "voting")
+             << " private keys; restore with PQ-capable importwallet.\n";
+        for (const auto& [public_key, secret] : pq_keys) {
+            static constexpr char HEX_DIGITS[]{"0123456789abcdef"};
+            SecureString encoded(secret.size() * 2, '\0');
+            for (size_t i = 0; i < secret.size(); ++i) {
+                encoded[2 * i] = HEX_DIGITS[secret[i] >> 4];
+                encoded[2 * i + 1] = HEX_DIGITS[secret[i] & 15];
+            }
+            file << (owner ? PQ_OWNER_DUMP_PREFIX : PQ_VOTING_DUMP_PREFIX);
+            file.write(encoded.data(), encoded.size());
+            file << ' ' << HexStr(public_key) << '\n';
+        }
+        file << '\n';
+    }
+    // SYSCOIN END: Explicit PQ tags cannot be confused with legacy keys or scripts.
     file << "# End of dump\n";
     file.close();
+    // SYSCOIN BEGIN: A truncated dump must never report successful backup.
+    if (!file) throw JSONRPCError(RPC_WALLET_ERROR, "Unable to write wallet dump file");
+    // SYSCOIN END: A truncated dump must never report successful backup.
 
     UniValue reply(UniValue::VOBJ);
     reply.pushKV("filename", filepath.u8string());

@@ -1461,6 +1461,10 @@ RPCHelpMan sendall()
                     if (!tx || input.prevout.n >= tx->tx->vout.size() || !(pwallet->IsMine(tx->tx->vout[input.prevout.n]) & (coin_control.fAllowWatchOnly ? ISMINE_ALL : ISMINE_SPENDABLE))) {
                         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Input not found. UTXO (%s:%d) is not part of wallet.", input.prevout.hash.ToString(), input.prevout.n));
                     }
+                    // SYSCOIN: A SYS sweep cannot preserve asset allocations.
+                    if (!tx->tx->vout[input.prevout.n].assetInfo.IsNull()) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Asset inputs require an asset transaction");
+                    }
                     total_input_value += tx->tx->vout[input.prevout.n].nValue;
                 }
             } else {

@@ -25,7 +25,12 @@ static constexpr CAmount COIN = 100000000;
  * critical; in unusual circumstances like a(nother) overflow bug that allowed
  * for the creation of coins out of thin air modification could lead to a fork.
  * */
+// SYSCOIN BEGIN: Replace Bitcoin's amount sanity bound for Syscoin consensus.
+// static constexpr CAmount MAX_MONEY = 21000000 * COIN;
 static const CAmount MAX_MONEY = 1000000000000000000LL - 1LL;
+// SYSCOIN END: Replace Bitcoin's amount sanity bound.
 inline bool MoneyRange(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_MONEY); }
+// SYSCOIN BEGIN: Track amounts by asset identifier.
 typedef std::unordered_map<uint64_t, CAmount> CAssetsMap;
+// SYSCOIN END: Track amounts by asset identifier.
 #endif // SYSCOIN_CONSENSUS_AMOUNT_H

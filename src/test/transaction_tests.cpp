@@ -11,14 +11,19 @@
 #include <clientversion.h>
 #include <consensus/amount.h>
 #include <consensus/tx_check.h>
+#include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <core_io.h>
+#include <crypto/slhdsa/slhdsa.h>
 #include <key.h>
 #include <key_io.h>
+#include <llmq/pq_btcc.h> // SYSCOIN: PQ BTCC activation schedule coverage.
 #include <nevm/nevm.h>
 #include <nevm/sha3.h>
+#include <node/miner.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
+#include <pow.h>
 #include <script/script.h>
 #include <script/script_error.h>
 #include <script/sign.h>
@@ -27,6 +32,7 @@
 #include <services/assetconsensus.h>
 #include <streams.h>
 #include <test/util/json.h>
+#include <test/util/nevm_mint.h>
 #include <test/util/random.h>
 #include <test/util/script.h>
 #include <test/util/transaction_utils.h>
@@ -533,10 +539,14 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_parent_node_offsets)
     check({}, 0, {}, std::numeric_limits<uint16_t>::max(), false);
 }
 
-BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup)
+namespace {
+
+// Parsed placeholders exercise mempool bookkeeping only. Their proofs are
+// never submitted to validation or included in a block template.
+CTransactionRef MempoolMintPlaceholder(const uint256& proof, const COutPoint& input)
 {
     CMintSyscoin mint;
-    mint.nTxHash = uint256S("a1");
+    mint.nTxHash = proof;
     mint.voutAssets.emplace_back(1, std::vector<CAssetOutValue>{{0, 1}});
     mint.vchTxParentNodes = {0x80};
     mint.vchReceiptParentNodes = {0x80};
@@ -544,18 +554,34 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup
     mint.SerializeData(mint_data);
     CMutableTransaction mtx;
     mtx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_MINT;
-    mtx.vin.emplace_back(COutPoint{uint256S("a0"), 0});
+    mtx.vin.emplace_back(input);
     mtx.vout.emplace_back(10000, GetScriptForDestination(WitnessV0KeyHash{uint160(ParseHex("0100000000000000000000000000000000000000"))}));
     mtx.vout.emplace_back(0, CScript() << OP_RETURN << mint_data);
     mtx.LoadAssets();
-    const auto tx = MakeTransactionRef(mtx);
+    return MakeTransactionRef(mtx);
+}
+
+CTransactionRef MempoolMintChild(const CTransactionRef& parent)
+{
+    CMutableTransaction child;
+    child.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+    child.vout.emplace_back(parent->vout[0].nValue - 1000, CScript{} << OP_TRUE);
+    return MakeTransactionRef(child);
+}
+
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup)
+{
+    const auto tx{MempoolMintPlaceholder(uint256S("a1"), COutPoint{uint256S("a0"), 0})};
+    const CMintSyscoin mint(*tx);
     BOOST_REQUIRE(!CMintSyscoin(*tx).IsNull());
 
     CTxMemPool& pool = *Assert(m_node.mempool);
     LOCK2(cs_main, pool.cs);
     BOOST_REQUIRE_EQUAL(setMintTxsMempool.count(mint.nTxHash), 0U);
     // This parsed placeholder exercises bookkeeping only; its proof is never submitted for validation.
-    pool.addUnchecked(TestMemPoolEntryHelper{}.FromTx(tx));
+    pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(tx));
     BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 1U);
 
     for (const bool test_accept : {false, true}) {
@@ -573,6 +599,139 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reservation_ownership, TestingSetup
     pool.removeRecursive(*tx, MemPoolRemovalReason::EXPIRY);
     BOOST_CHECK_EQUAL(setMintTxsMempool.count(mint.nTxHash), 0U);
     BOOST_CHECK(!pool.exists(GenTxid::Txid(tx->GetHash())));
+}
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_confirmation_conflicts, TestChain100Setup)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    const auto proof{uint256S("b1")};
+    const auto pending{MempoolMintPlaceholder(proof, COutPoint{uint256S("b0"), 0})};
+    const auto child{MempoolMintChild(pending)};
+    const auto grandchild{MempoolMintChild(child)};
+    const auto unrelated{MempoolMintPlaceholder(uint256S("b2"), COutPoint{uint256S("b3"), 0})};
+    for (const auto& tx : {pending, child, grandchild, unrelated}) {
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(tx)));
+    }
+
+    // Block cleanup receives a different owner with disjoint ordinary inputs.
+    const auto confirmed{MempoolMintPlaceholder(proof, COutPoint{uint256S("b4"), 0})};
+    BOOST_REQUIRE(confirmed->GetHash() != pending->GetHash());
+    BOOST_REQUIRE(confirmed->vin[0].prevout != pending->vin[0].prevout);
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(unrelated->GetHash())));
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(uint256S("b2")), 1U);
+
+    // Repeated cleanup is harmless, and unrelated proof ownership survives.
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_CHECK_EQUAL(pool.size(), 1U);
+    pool.removeRecursive(*unrelated, MemPoolRemovalReason::EXPIRY);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(uint256S("b2")), 0U);
+    BOOST_REQUIRE_EQUAL(pool.size(), 0U);
+    const auto block_template{node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), &pool}.CreateNewBlock(CScript{} << OP_TRUE)};
+    BOOST_CHECK_EQUAL(block_template->block.vtx.size(), 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_exact_confirmation, TestingSetup)
+{
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    LOCK2(cs_main, pool.cs);
+    const auto proof{uint256S("c1")};
+    const auto confirmed{MempoolMintPlaceholder(proof, COutPoint{uint256S("c0"), 0})};
+    const auto child{MempoolMintChild(confirmed)};
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(confirmed)));
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(child)));
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(child->GetHash())));
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+    pool.removeRecursive(*child, MemPoolRemovalReason::EXPIRY);
+
+    // Reuse after removal must point to the new owner, including after expiry.
+    const auto replacement{MempoolMintPlaceholder(proof, COutPoint{uint256S("c2"), 0})};
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(replacement)));
+    pool.removeRecursive(*replacement, MemPoolRemovalReason::EXPIRY);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+    BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(replacement)));
+    pool.removeForBlock({confirmed}, 1);
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+    BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(syscoin_mint_mempool_reorg_cleanup, TestChain100Setup)
+{
+    // Keep an ordinary, mature coinbase spend valid across the disconnection.
+    mineBlocks(1);
+    auto& chainstate{m_node.chainman->ActiveChainstate()};
+    CTxMemPool& pool{*Assert(m_node.mempool)};
+    const auto ordinary{CreateValidMempoolTransaction(
+        m_coinbase_txns.front(), 0, 1, coinbaseKey,
+        GetScriptForDestination(WitnessV0KeyHash{coinbaseKey.GetPubKey()}),
+        m_coinbase_txns.front()->vout[0].nValue - 10000, /*submit=*/false)};
+    const auto proof{uint256S("d1")};
+    const auto pending{MempoolMintPlaceholder(proof, COutPoint{uint256S("d0"), 0})};
+    const auto child{MempoolMintChild(pending)};
+    CBlockIndex* disconnected_tip;
+    {
+        LOCK2(cs_main, pool.cs);
+        disconnected_tip = m_node.chainman->ActiveTip();
+        BOOST_REQUIRE_EQUAL(disconnected_tip->nHeight, 101);
+        const auto accepted{m_node.chainman->ProcessTransaction(MakeTransactionRef(ordinary))};
+        BOOST_REQUIRE_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                              accepted.m_state.ToString());
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(pending)));
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(child)));
+        BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 1U);
+    }
+
+    // Marking an inactive sibling performs empty reconciliation but does not
+    // roll back branch state, so it must preserve pending mint ownership.
+    CBlockHeader inactive_header{disconnected_tip->GetBlockHeader()};
+    ++inactive_header.nTime;
+    inactive_header.nNonce = 0;
+    while (!CheckProofOfWork(inactive_header.GetHash(), inactive_header.nBits,
+                            m_node.chainman->GetConsensus())) {
+        ++inactive_header.nNonce;
+    }
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->ProcessNewBlockHeaders(
+        {inactive_header}, /*min_pow_checked=*/true, header_state), header_state.ToString());
+    {
+        LOCK(cs_main);
+        auto* inactive{m_node.chainman->m_blockman.LookupBlockIndex(inactive_header.GetHash())};
+        BOOST_REQUIRE(inactive != nullptr);
+        BlockValidationState conflict_state;
+        BOOST_REQUIRE_MESSAGE(chainstate.MarkConflictingBlock(conflict_state, inactive),
+                              conflict_state.ToString());
+        BOOST_CHECK(m_node.chainman->ActiveTip() == disconnected_tip);
+        LOCK(pool.cs);
+        BOOST_REQUIRE_EQUAL(pool.size(), 3U);
+        BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 1U);
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(state, disconnected_tip), state.ToString());
+    {
+        LOCK2(cs_main, pool.cs);
+        BOOST_REQUIRE_EQUAL(m_node.chainman->ActiveHeight(), 100);
+        BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+        BOOST_REQUIRE(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+        BOOST_REQUIRE_EQUAL(setMintTxsMempool.count(proof), 0U);
+
+        // Only the legitimate ordinary transaction reaches the real assembler.
+        const auto block_template{node::BlockAssembler{chainstate, &pool}.CreateNewBlock(CScript{} << OP_TRUE)};
+        BOOST_REQUIRE_EQUAL(block_template->block.vtx.size(), 2U);
+        BOOST_CHECK(block_template->block.vtx[1]->GetHash() == ordinary.GetHash());
+
+        // Repeated reconciliation and reservation reuse remain consistent.
+        BOOST_REQUIRE(pool.addUnchecked(TestMemPoolEntryHelper{}.Time(Now<NodeSeconds>()).FromTx(pending)));
+        pool.RemoveMintTransactionsForReorg();
+        pool.RemoveMintTransactionsForReorg();
+        BOOST_CHECK_EQUAL(setMintTxsMempool.count(proof), 0U);
+        BOOST_CHECK_EQUAL(pool.size(), 1U);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(syscoin_mint_compares_roots_before_proof_parsing)
@@ -940,6 +1099,162 @@ BOOST_AUTO_TEST_CASE(syscoin_mint_typed_transaction_schemas)
     pnevmtxmintdb = std::move(previous_mint_db);
 }
 
+BOOST_AUTO_TEST_CASE(syscoin_mint_database_read_errors_are_retryable)
+{
+    struct FaultRootsDB : CNEVMTxRootsDB {
+        using CNEVMTxRootsDB::CNEVMTxRootsDB;
+        bool fail_reads{false};
+        size_t disk_reads{0};
+        bool ReadTxRootsFromDisk(const uint256& hash, NEVMTxRoot& roots) override
+        {
+            ++disk_reads;
+            if (fail_reads) throw dbwrapper_error("injected NEVM roots read failure");
+            return CNEVMTxRootsDB::ReadTxRootsFromDisk(hash, roots);
+        }
+    };
+    struct FaultMintDB : CNEVMMintedTxDB {
+        using CNEVMMintedTxDB::CNEVMMintedTxDB;
+        bool fail_reads{false};
+        size_t disk_reads{0};
+        bool ExistsTxOnDisk(const uint256& hash) override
+        {
+            ++disk_reads;
+            if (fail_reads) throw dbwrapper_error("injected NEVM mint read failure");
+            return CNEVMMintedTxDB::ExistsTxOnDisk(hash);
+        }
+    };
+    struct RestoreDatabases {
+        std::unique_ptr<CNEVMTxRootsDB> roots{std::move(pnevmtxrootsdb)};
+        std::unique_ptr<CNEVMMintedTxDB> mints{std::move(pnevmtxmintdb)};
+        ~RestoreDatabases()
+        {
+            pnevmtxrootsdb = std::move(roots);
+            pnevmtxmintdb = std::move(mints);
+        }
+    } restore_databases;
+    auto roots = std::make_unique<FaultRootsDB>(DBParams{
+        .path = "mint_read_error_roots", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    auto mints = std::make_unique<FaultMintDB>(DBParams{
+        .path = "mint_read_error_txs", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    auto* const roots_db{roots.get()};
+    auto* const mint_db{mints.get()};
+    pnevmtxrootsdb = std::move(roots);
+    pnevmtxmintdb = std::move(mints);
+
+    const auto& params{Params().GetConsensus()};
+    const uint32_t height = std::max(params.nNexusStartBlock, params.nCLReceiptStartBlock);
+    const WitnessV0KeyHash destination{uint160{}};
+    auto fixture{MakeValidNEVMMintFixture(params, height, destination, uint256S("db01"))};
+    fixture.tx.vin.emplace_back(COutPoint{uint256S("db02"), 0});
+    const CTransaction tx{fixture.tx};
+    const auto& mint{fixture.mint};
+    const NEVMTxRootMap valid_roots{{mint.nBlockHash, {mint.nTxRoot, mint.nReceiptRoot}}};
+    roots_db->FlushDataToCache(valid_roots);
+    BOOST_REQUIRE(roots_db->FlushCacheToDisk()); // Force the injected disk-read seam.
+    const NEVMMintTxSet initial_reservations{uint256S("db03")};
+    const auto initial_global_mints{WITH_LOCK(cs_main, return setMintTxsMempool)};
+    const CAssetsMap initial_outputs{{1, 1}};
+
+    for (const bool just_check : {false, true}) {
+        for (const bool roots_failure : {true, false}) {
+            BOOST_TEST_CONTEXT("just_check=" << just_check << " roots_failure=" << roots_failure) {
+                NEVMMintTxSet reservations{initial_reservations};
+                CAssetsMap assets_in;
+                CAssetsMap assets_out{initial_outputs};
+                roots_db->fail_reads = roots_failure;
+                mint_db->fail_reads = !roots_failure;
+                const size_t root_reads{roots_db->disk_reads};
+                const size_t mint_reads{mint_db->disk_reads};
+                TxValidationState failed_state;
+                BOOST_CHECK(!CheckSyscoinInputs(params, tx, tx.GetHash(), failed_state,
+                    height, just_check, reservations, assets_in, assets_out));
+                BOOST_CHECK(failed_state.IsError());
+                BOOST_CHECK(!failed_state.IsInvalid());
+                BOOST_CHECK_EQUAL(failed_state.GetResult(), TxValidationResult::TX_RESULT_UNSET);
+                BOOST_CHECK_EQUAL(failed_state.GetRejectReason(), roots_failure
+                    ? "injected NEVM roots read failure" : "injected NEVM mint read failure");
+                BOOST_CHECK_EQUAL(roots_db->disk_reads, root_reads + 1);
+                BOOST_CHECK_EQUAL(mint_db->disk_reads, mint_reads + (roots_failure ? 0 : 1));
+                BOOST_CHECK(reservations == initial_reservations);
+                BOOST_CHECK(assets_in.empty());
+                BOOST_CHECK(assets_out == initial_outputs);
+                BOOST_CHECK(WITH_LOCK(cs_main, return setMintTxsMempool == initial_global_mints));
+
+                roots_db->fail_reads = false;
+                mint_db->fail_reads = false;
+                BOOST_CHECK(!mint_db->ExistsTx(mint.nTxHash));
+                BOOST_REQUIRE(mint_db->FlushCacheToDisk());
+                BOOST_CHECK(!mint_db->Exists(mint.nTxHash));
+
+                // The identical proof and caller-owned state succeed as soon as
+                // the local read fault is removed, including check-only calls.
+                TxValidationState retry_state;
+                BOOST_CHECK_MESSAGE(CheckSyscoinInputs(params, tx, tx.GetHash(), retry_state,
+                    height, just_check, reservations, assets_in, assets_out), retry_state.ToString());
+                BOOST_CHECK(retry_state.IsValid());
+                BOOST_CHECK_EQUAL(reservations.size(), initial_reservations.size() + 1);
+                BOOST_CHECK_EQUAL(reservations.count(mint.nTxHash), 1U);
+                BOOST_CHECK(assets_in.empty());
+                BOOST_CHECK(assets_out.empty());
+                BOOST_CHECK(!mint_db->ExistsTx(mint.nTxHash));
+                BOOST_CHECK(WITH_LOCK(cs_main, return setMintTxsMempool == initial_global_mints));
+            }
+        }
+    }
+
+    const auto check_invalid = [&](const CTransaction& invalid_tx, const std::string& reason) {
+        for (const bool just_check : {false, true}) {
+            NEVMMintTxSet reservations{initial_reservations};
+            CAssetsMap assets_in;
+            CAssetsMap assets_out{initial_outputs};
+            TxValidationState state;
+            BOOST_CHECK(!CheckSyscoinInputs(params, invalid_tx, invalid_tx.GetHash(), state,
+                height, just_check, reservations, assets_in, assets_out));
+            BOOST_CHECK(state.IsInvalid());
+            BOOST_CHECK(!state.IsError());
+            BOOST_CHECK_EQUAL(state.GetResult(), just_check
+                ? TxValidationResult::TX_CONSENSUS : TxValidationResult::TX_CONFLICT);
+            BOOST_CHECK_EQUAL(state.GetRejectReason(), reason);
+            BOOST_CHECK(reservations == initial_reservations);
+            BOOST_CHECK(assets_in.empty());
+            BOOST_CHECK(assets_out == initial_outputs);
+            BOOST_CHECK(WITH_LOCK(cs_main, return setMintTxsMempool == initial_global_mints));
+        }
+    };
+
+    // A normal missing read and a positive consumed-transfer lookup retain
+    // their consensus-invalid classification.
+    BOOST_REQUIRE(roots_db->FlushErase({mint.nBlockHash}));
+    check_invalid(tx, "mint-txroot-missing");
+    roots_db->FlushDataToCache(valid_roots);
+    BOOST_REQUIRE(roots_db->FlushCacheToDisk());
+    mint_db->FlushDataToCache({mint.nTxHash});
+    BOOST_REQUIRE(mint_db->FlushCacheToDisk());
+    check_invalid(tx, "mint-exists");
+    BOOST_REQUIRE(mint_db->FlushErase({mint.nTxHash}));
+
+    CMintSyscoin invalid_proof{tx};
+    invalid_proof.vchTxPath = {0x01}; // The committed leaf has an empty nibble path.
+    std::vector<unsigned char> payload;
+    invalid_proof.SerializeData(payload);
+    auto invalid_mtx{fixture.tx};
+    invalid_mtx.vout.back().scriptPubKey = CScript{} << OP_RETURN << payload;
+    invalid_mtx.LoadAssets();
+    check_invalid(CTransaction{invalid_mtx}, "mint-verify-receipt-proof");
+
+    // A malformed RLP exception still describes invalid supplied proof data.
+    CMintSyscoin malformed_proof{tx};
+    malformed_proof.posReceipt = 0;
+    malformed_proof.vchReceiptParentNodes = {0x81}; // Truncated one-byte RLP string.
+    malformed_proof.SerializeData(payload);
+    invalid_mtx.vout.back().scriptPubKey = CScript{} << OP_RETURN << payload;
+    invalid_mtx.LoadAssets();
+    check_invalid(CTransaction{invalid_mtx}, "BadRLP");
+    BOOST_CHECK(!mint_db->ExistsTx(mint.nTxHash));
+}
+
 BOOST_AUTO_TEST_CASE(syscoin_bridge_raw_allocation_canonicality)
 {
     const uint32_t fork_height = (uint32_t)Params().GetConsensus().nCLReceiptStartBlock;
@@ -1098,31 +1413,69 @@ BOOST_AUTO_TEST_CASE(syscoin_bridge_uses_clreceipt_activation)
                 regtest_v2->GetConsensus().vchSyscoinVaultManager);
 }
 
-BOOST_AUTO_TEST_CASE(syscoin_btcc_activation_is_independent)
+// SYSCOIN: The PQ BTCC schedule is independent from legacy bridge receipts.
+BOOST_AUTO_TEST_CASE(syscoin_pq_btcc_activation_is_independent)
 {
     const auto main = CreateChainParams(*m_node.args, ChainType::MAIN);
     const auto testnet = CreateChainParams(*m_node.args, ChainType::TESTNET);
-    BOOST_CHECK_EQUAL(main->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
-    BOOST_CHECK_EQUAL(testnet->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
+    BOOST_CHECK(!llmq::pq::GetBTCCScheduleConfig(main->GetConsensus()).IsValid());
+    BOOST_CHECK(!llmq::pq::GetBTCCScheduleConfig(testnet->GetConsensus()).IsValid());
 
     ArgsManager args_cl;
     args_cl.ForceSetArg("-clreceiptstartheight", "123");
     const auto regtest_cl = CreateChainParams(args_cl, ChainType::REGTEST);
     BOOST_CHECK_EQUAL(regtest_cl->GetConsensus().nCLReceiptStartBlock, 123);
-    BOOST_CHECK_EQUAL(regtest_cl->GetConsensus().nBTCCStartBlock, std::numeric_limits<int>::max());
-    BOOST_CHECK(!IsBTCCDeploymentConfigured(regtest_cl->GetConsensus()));
-    BOOST_CHECK(!IsBTCCSignHeight(regtest_cl->GetConsensus(), 1000002));
-    BOOST_CHECK(!IsBTCCCarrierHeight(regtest_cl->GetConsensus(), 1000007));
+    BOOST_CHECK(!llmq::pq::GetBTCCScheduleConfig(regtest_cl->GetConsensus()).IsValid());
 
-    ArgsManager args_btcc;
-    args_btcc.ForceSetArg("-btccstartheight", "321");
-    const auto regtest_btcc = CreateChainParams(args_btcc, ChainType::REGTEST);
-    BOOST_CHECK_EQUAL(regtest_btcc->GetConsensus().nCLReceiptStartBlock, std::numeric_limits<int>::max());
-    BOOST_CHECK_EQUAL(regtest_btcc->GetConsensus().nBTCCStartBlock, 321);
-    BOOST_CHECK(IsBTCCDeploymentConfigured(regtest_btcc->GetConsensus()));
-    BOOST_CHECK(!IsBTCCSignHeight(regtest_btcc->GetConsensus(), 321));
-    BOOST_CHECK(IsBTCCSignHeight(regtest_btcc->GetConsensus(), 322));
-    BOOST_CHECK(IsBTCCCarrierHeight(regtest_btcc->GetConsensus(), 327));
+    ArgsManager args_pq_btcc;
+    args_pq_btcc.ForceSetArg("-pqbtcccandidateorigin", "407");
+    const auto regtest_pq_btcc = CreateChainParams(args_pq_btcc, ChainType::REGTEST);
+    const auto config{llmq::pq::GetBTCCScheduleConfig(regtest_pq_btcc->GetConsensus())};
+    BOOST_REQUIRE(config.IsValid());
+    BOOST_CHECK(!llmq::pq::IsBTCCCandidateHeight(config, 406));
+    BOOST_CHECK(llmq::pq::IsBTCPREVCommitmentHeight(regtest_pq_btcc->GetConsensus(), 407));
+    BOOST_CHECK(!llmq::pq::IsBTCPREVCommitmentHeight(regtest_pq_btcc->GetConsensus(), 416));
+    BOOST_CHECK(llmq::pq::IsBTCPREVCommitmentHeight(regtest_pq_btcc->GetConsensus(), 417));
+
+    ArgsManager args_genesis_origin;
+    args_genesis_origin.ForceSetArg("-pqbtcccandidateorigin", "0");
+    const auto regtest_genesis_origin =
+        CreateChainParams(args_genesis_origin, ChainType::REGTEST);
+    const auto genesis_config{llmq::pq::GetBTCCScheduleConfig(
+        regtest_genesis_origin->GetConsensus())};
+    BOOST_REQUIRE(genesis_config.IsValid());
+    BOOST_CHECK(llmq::pq::IsBTCCCandidateHeight(genesis_config, 0));
+    // SYSCOIN: Genesis is a schedule sentinel, not an AuxPoW BTCPREV carrier.
+    BOOST_CHECK(!llmq::pq::IsBTCPREVCommitmentHeight(
+        regtest_genesis_origin->GetConsensus(), 0));
+    BOOST_CHECK(llmq::pq::IsBTCPREVCommitmentHeight(
+        regtest_genesis_origin->GetConsensus(), 10));
+}
+
+BOOST_AUTO_TEST_CASE(syscoin_pq_recovery_refresh_is_regtest_only)
+{
+    ArgsManager override_args;
+    override_args.ForceSetArg("-pqrecoveryrefresh", "1100:4:2:2:2:1:1:20");
+    for (const auto chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::SIGNET}) {
+        const auto public_params{CreateChainParams(ArgsManager{}, chain)};
+        BOOST_CHECK_EQUAL(public_params->GetConsensus().nPQRecoveryRefreshActivationHeight, -1);
+        BOOST_CHECK_EQUAL(public_params->GetConsensus().nPQRecoveryRefreshGraceGroups, 0U);
+        BOOST_CHECK_EXCEPTION(CreateChainParams(override_args, chain), std::runtime_error,
+            [](const std::runtime_error& error) {
+                return std::string{error.what()} == "PQ deployment overrides are valid only on regtest";
+            });
+    }
+    const auto regtest{CreateChainParams(override_args, ChainType::REGTEST)};
+    const auto& consensus{regtest->GetConsensus()};
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshActivationHeight, 1100);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshGraceGroups, 1U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshSnapshotLagBlocks, 4U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshEntropyDelayBlocks, 2U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshCarrierDelayBlocks, 2U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshCarrierMinDepthBlocks, 2U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshSnapshotMinWorkBlocks, 1U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryRefreshCarrierMinWorkBlocks, 1U);
+    BOOST_CHECK_EQUAL(consensus.nPQRecoveryReadinessWindowBlocks, 20U);
 }
 
 struct BridgeV2CutoverTestingSetup : BasicTestingSetup {
@@ -1274,6 +1627,138 @@ BOOST_FIXTURE_TEST_CASE(syscoin_mint_manager_switches_at_bridge_v2_height, Bridg
 
     pnevmtxrootsdb = std::move(previous_roots_db);
     pnevmtxmintdb = std::move(previous_mint_db);
+}
+
+BOOST_AUTO_TEST_CASE(syscoin_mint_authorization_survives_untrusted_representation_changes)
+{
+    struct RestoreDatabases {
+        std::unique_ptr<CNEVMTxRootsDB> roots{std::move(pnevmtxrootsdb)};
+        std::unique_ptr<CNEVMMintedTxDB> mints{std::move(pnevmtxmintdb)};
+        ~RestoreDatabases()
+        {
+            pnevmtxrootsdb = std::move(roots);
+            pnevmtxmintdb = std::move(mints);
+        }
+    } restore;
+    pnevmtxrootsdb = std::make_unique<CNEVMTxRootsDB>(DBParams{
+        .path = "mint_authorization_roots", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    pnevmtxmintdb = std::make_unique<CNEVMMintedTxDB>(DBParams{
+        .path = "mint_authorization_replay", .cache_bytes = 1 << 20,
+        .memory_only = true, .wipe_data = true});
+    const auto& params{Params().GetConsensus()};
+    const uint32_t height = std::max(params.nNexusStartBlock, params.nCLReceiptStartBlock);
+    const WitnessV0KeyHash destination{uint160{}};
+    auto fixture{MakeValidNEVMMintFixture(params, height, destination, uint256S("bc01"))};
+    const COutPoint funding{uint256S("bc02"), 0};
+    fixture.tx.vin.emplace_back(funding);
+    // This test starts at the authenticated-root boundary. Mutated proof bytes
+    // never receive new authority: the stored roots remain fixed throughout.
+    pnevmtxrootsdb->FlushDataToCache({{fixture.mint.nBlockHash,
+        {fixture.mint.nTxRoot, fixture.mint.nReceiptRoot}}});
+    BOOST_REQUIRE(pnevmtxrootsdb->FlushCacheToDisk());
+
+    const auto transaction = [](const CMintSyscoin& mint, CMutableTransaction tx) {
+        CDataStream encoded(SER_NETWORK, PROTOCOL_VERSION);
+        encoded << mint;
+        const auto bytes{MakeUCharSpan(encoded)};
+        const std::vector<unsigned char> payload{bytes.begin(), bytes.end()};
+        tx.vout[1].scriptPubKey = CScript{} << OP_RETURN << payload;
+        // Reparse the wire form, rather than preserving in-memory assetInfo
+        // from a previous payload after modifying its output commitments.
+        CDataStream wire(SER_NETWORK, PROTOCOL_VERSION);
+        wire << tx;
+        CMutableTransaction decoded;
+        wire >> decoded;
+        return CTransaction{std::move(decoded)};
+    };
+    const auto check = [&](const CTransaction& tx, NEVMMintTxSet& reservations,
+                           const bool just_check, const std::string& reason,
+                           const CAssetCoinInfo& funding_asset = CAssetCoinInfo{}) {
+        CCoinsView empty;
+        CCoinsViewCache inputs{&empty};
+        inputs.AddCoin(funding, Coin{CTxOut{1000000, CScript{} << OP_TRUE,
+                                         funding_asset}, 1, false}, false);
+        TxValidationState state;
+        CAmount fee{0};
+        CAssetsMap assets_in, assets_out;
+        BOOST_REQUIRE_MESSAGE(Consensus::CheckTxInputs(tx, state, inputs, height,
+            fee, assets_in, assets_out), state.ToString());
+        const bool accepted{CheckSyscoinInputs(params, tx, tx.GetHash(), state,
+            height, just_check, reservations, assets_in, assets_out)};
+        BOOST_CHECK_EQUAL(accepted, reason.empty());
+        if (!reason.empty()) {
+            BOOST_CHECK(state.IsInvalid());
+            BOOST_CHECK(!state.IsError());
+            if (reason != "any") BOOST_CHECK_EQUAL(state.GetRejectReason(), reason);
+        } else {
+            BOOST_CHECK(state.IsValid());
+            BOOST_CHECK(assets_in.empty());
+            BOOST_CHECK(assets_out.empty());
+        }
+    };
+    const CTransaction valid{transaction(fixture.mint, fixture.tx)};
+    for (const bool just_check : {false, true}) {
+        NEVMMintTxSet reservations;
+        check(valid, reservations, just_check, "");
+        BOOST_REQUIRE_EQUAL(reservations.count(fixture.mint.nTxHash), 1U);
+        BOOST_CHECK(!pnevmtxmintdb->ExistsTx(fixture.mint.nTxHash));
+        auto alternate{fixture.tx};
+        alternate.nLockTime = 1; // A different Core txid cannot reuse the burn.
+        check(transaction(fixture.mint, alternate), reservations, just_check,
+              "mint-duplicate-transfer");
+
+        const auto reject = [&](const CMintSyscoin& mint,
+                                const CMutableTransaction& tx,
+                                const std::string& reason,
+                                const CAssetCoinInfo& asset = CAssetCoinInfo{}) {
+            NEVMMintTxSet attempt;
+            check(transaction(mint, tx), attempt, just_check, reason, asset);
+            BOOST_CHECK(attempt.empty());
+        };
+        auto redirected{fixture.tx};
+        redirected.vout[0].scriptPubKey = GetScriptForDestination(
+            WitnessV0KeyHash{uint160(ParseHex("0100000000000000000000000000000000000000"))});
+        reject(fixture.mint, redirected, "mint-mismatch-destination");
+        CMintSyscoin extra_amount{valid};
+        extra_amount.voutAssets[0].values.emplace_back(2, 1);
+        auto extra_output{fixture.tx};
+        extra_output.vout.emplace_back(0, redirected.vout[0].scriptPubKey);
+        reject(extra_amount, extra_output, "mint-output-mismatch");
+        CMintSyscoin extra_asset{valid};
+        extra_asset.voutAssets.emplace_back(2, std::vector<CAssetOutValue>{{2, 1}});
+        reject(extra_asset, extra_output, "assetallocation-single-asset");
+        CMintSyscoin unspendable{valid};
+        unspendable.voutAssets[0].values[0].n = 1;
+        reject(unspendable, fixture.tx, "mint-mismatch-destination");
+        reject(fixture.mint, fixture.tx, "mint-no-asset-inputs", CAssetCoinInfo{1, 1});
+
+        // Every single-byte mutation is checked against the original roots.
+        // Recompute the claimed transaction hash to reach the proof check
+        // instead of relying only on its earlier hash comparison.
+        for (const bool mutate_receipt : {false, true}) {
+            const auto& bytes = mutate_receipt ? fixture.mint.vchReceiptParentNodes
+                                              : fixture.mint.vchTxParentNodes;
+            for (size_t i = 0; i < bytes.size(); ++i) {
+                BOOST_TEST_CONTEXT("receipt=" << mutate_receipt << " byte=" << i) {
+                    CMintSyscoin altered{valid};
+                    (mutate_receipt ? altered.vchReceiptParentNodes : altered.vchTxParentNodes)[i] ^= 1;
+                    if (!mutate_receipt) {
+                        const auto hash{dev::sha3(dev::bytesConstRef(
+                            altered.vchTxParentNodes.data() + altered.posTx,
+                            altered.vchTxParentNodes.size() - altered.posTx)).asBytes()};
+                        std::copy(hash.begin(), hash.end(), altered.nTxHash.begin());
+                    }
+                    reject(altered, fixture.tx, "any");
+                }
+            }
+        }
+    }
+    pnevmtxmintdb->FlushDataToCache({fixture.mint.nTxHash});
+    BOOST_REQUIRE(pnevmtxmintdb->FlushCacheToDisk());
+    NEVMMintTxSet next_block;
+    check(valid, next_block, false, "mint-exists");
+    BOOST_CHECK(next_block.empty());
 }
 
 BOOST_AUTO_TEST_CASE(asset_amount_aggregate_range_checks)
@@ -1715,6 +2200,106 @@ BOOST_AUTO_TEST_CASE(test_witness)
     UpdateInput(input1.vin[0], CombineSignatures(input1, input2, output1));
     CheckWithFlag(output1, input1, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS, true);
     CheckWithFlag(output1, input1, STANDARD_SCRIPT_VERIFY_FLAGS, true);
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_data_relay_limits)
+{
+    // Relay policy checks the version and framing only. These deliberately
+    // unsigned payloads exercise the space needed by both SLH signatures;
+    // consensus tests separately require valid, completely decoded payloads.
+    constexpr size_t TWO_SIGNATURE_PAYLOAD_SIZE{2 + 2 * slhdsa::SIGNATURE_SIZE};
+    constexpr size_t MAX_PQ_OWNER_SCRIPT_SIZE{2 * slhdsa::SIGNATURE_SIZE + 1024};
+    constexpr size_t PUSHDATA2_FRAMING_SIZE{4}; // OP_RETURN, PUSHDATA2, uint16 length
+    const std::array<std::pair<int, unsigned char>, 2> formats{{
+        {SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR, 3},
+        {SYSCOIN_TX_VERSION_PQ_GLOBAL_KEY, 2},
+    }};
+    const auto check = [](const CMutableTransaction& tx, bool expected,
+                          const std::string& expected_reason = {},
+                          std::optional<unsigned> data_limit = MAX_OP_RETURN_RELAY) {
+        std::string reason;
+        BOOST_CHECK_EQUAL(IsStandardTx(CTransaction{tx}, data_limit, g_bare_multi, g_dust, reason), expected);
+        BOOST_CHECK_EQUAL(reason, expected_reason);
+    };
+    const auto data_script = [](unsigned char version, size_t payload_size) {
+        std::vector<unsigned char> payload(payload_size, 0);
+        payload[0] = version;
+        return CScript{} << OP_RETURN << payload;
+    };
+
+    for (const auto& [tx_version, payload_version] : formats) {
+        BOOST_TEST_CONTEXT("transaction version " << tx_version) {
+            CMutableTransaction tx;
+            tx.nVersion = tx_version;
+            tx.vin.resize(1);
+            tx.vin[0].prevout = COutPoint{uint256S("01"), 0};
+            tx.vin[0].scriptSig << std::vector<unsigned char>(65, 0);
+            tx.vout.emplace_back(0, data_script(payload_version, TWO_SIGNATURE_PAYLOAD_SIZE));
+            BOOST_REQUIRE_GT(tx.vout[0].scriptPubKey.size(), MAX_SCRIPT_SIZE);
+            check(tx, true);
+            check(tx, false, "scriptpubkey", std::nullopt);
+
+            auto changed = tx;
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_PQ_OWNER_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE);
+            BOOST_REQUIRE_EQUAL(changed.vout[0].scriptPubKey.size(), MAX_PQ_OWNER_SCRIPT_SIZE);
+            check(changed, true);
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_PQ_OWNER_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE + 1);
+            check(changed, false, "scriptpubkey");
+
+            // Neither another payload version nor a nonzero high version byte
+            // may inherit the expanded allowance.
+            changed = tx;
+            changed.vout[0].scriptPubKey = data_script(payload_version + 1, TWO_SIGNATURE_PAYLOAD_SIZE);
+            check(changed, false, "scriptpubkey");
+            std::vector<unsigned char> payload(TWO_SIGNATURE_PAYLOAD_SIZE, 0);
+            payload[0] = payload_version;
+            payload[1] = 1;
+            changed.vout[0].scriptPubKey = CScript{} << OP_RETURN << payload;
+            check(changed, false, "scriptpubkey");
+            payload[1] = 0;
+
+            changed = tx;
+            changed.vout[0].scriptPubKey << OP_0;
+            check(changed, false, "scriptpubkey");
+            changed = tx;
+            changed.vout[0].scriptPubKey << OP_RETURN;
+            check(changed, false, "scriptpubkey");
+
+            // PUSHDATA4 encodes the same bytes but is not the canonical push.
+            CScript noncanonical;
+            noncanonical << OP_RETURN << OP_PUSHDATA4;
+            for (unsigned shift = 0; shift < 32; shift += 8) {
+                noncanonical.push_back(static_cast<unsigned char>(payload.size() >> shift));
+            }
+            noncanonical.insert(noncanonical.end(), payload.begin(), payload.end());
+            changed.vout[0].scriptPubKey = noncanonical;
+            check(changed, false, "scriptpubkey");
+
+            changed = tx;
+            changed.vout[0].nValue = 1;
+            check(changed, false, "scriptpubkey");
+            changed = tx;
+            changed.vout.push_back(tx.vout[0]);
+            check(changed, false, "multi-op-return");
+
+            // Existing limits remain in force for other special transactions
+            // and for ordinary transaction data outputs.
+            changed = tx;
+            changed.nVersion = SYSCOIN_TX_VERSION_MN_REGISTER;
+            check(changed, false, "scriptpubkey");
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE);
+            check(changed, true);
+            changed.vout[0].scriptPubKey = data_script(payload_version,
+                MAX_SCRIPT_SIZE - PUSHDATA2_FRAMING_SIZE + 1);
+            check(changed, false, "scriptpubkey");
+            changed = tx;
+            changed.nVersion = 2;
+            check(changed, false, "scriptpubkey");
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_IsStandard)

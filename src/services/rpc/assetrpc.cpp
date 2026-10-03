@@ -206,14 +206,15 @@ static RPCHelpMan syscoingettxroots()
 static RPCHelpMan syscoincheckmint()
 {
     return RPCHelpMan{"syscoincheckmint",
-    "\nGet the Syscoin mint transaction by looking up using NEVM tx hash (This is no the txid, it is the sha3 of the transaction bytes value).\n",
+    "\nCheck whether an NEVM transaction hash has already been used to mint on Syscoin.\n"
+    "The lookup uses the NEVM mint proof hash, not the Syscoin transaction ID.\n",
     {
         {"nevm_txhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "NEVM Tx Hash used to burn funds to move to Syscoin."}
     },
     RPCResult{
         RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            {RPCResult::Type::BOOL, "minted", "Whether this NEVM transaction hash has already been minted"},
         }},
     RPCExamples{
         HelpExampleCli("syscoincheckmint", "d8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
@@ -223,12 +224,13 @@ static RPCHelpMan syscoincheckmint()
 {
     std::string strTxHash = request.params[0].get_str();
     strTxHash = RemovePrefix(strTxHash, "0x");  // strip 0x
-    uint256 sysTxid;
-    if(!pnevmtxmintdb || !pnevmtxmintdb->Read(uint256S(strTxHash), sysTxid)){
-       throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read Syscoin txid using mint transaction hash");
+    const uint256 nevmTxHash{uint256S(strTxHash)};
+    LOCK(cs_main);
+    if (!pnevmtxmintdb) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "NEVM mint database is not available");
     }
     UniValue output(UniValue::VOBJ);
-    output.pushKV("txid", sysTxid.GetHex());
+    output.pushKV("minted", pnevmtxmintdb->ExistsTx(nevmTxHash));
     return output;
 },
     };

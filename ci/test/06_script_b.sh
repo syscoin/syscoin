@@ -166,7 +166,37 @@ if [ -n "$USE_VALGRIND" ]; then
 fi
 
 if [ "$RUN_UNIT_TESTS" = "true" ]; then
-  bash -c "${TEST_RUNNER_ENV} DIR_UNIT_TEST_DATA=${DIR_UNIT_TEST_DATA} LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib make $MAKEJOBS check VERBOSE=1"
+  unit_test_shard_arg=""
+  if [ -n "${CI_UNIT_TESTS_SHARD}" ]; then
+    case "${CI_UNIT_TESTS_SHARD}" in
+      [1-4]|registry-population|chainlock-integration) ;;
+      *) echo "CI_UNIT_TESTS_SHARD must be 1, 2, 3, 4, registry-population or chainlock-integration" >&2; exit 1 ;;
+    esac
+    unit_test_sources=$(make --no-print-directory -s -C src print-unit-test-sources)
+    if [ "${CI_UNIT_TESTS_SHARD}" = registry-population ]; then
+      # Keep the full real-crypto population scenario on an otherwise separate
+      # runner. All other registry cases remain in the ordinary source shards.
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | grep -Fx 'test/pq_registry_tests.cpp')
+      registry_cases=population
+      echo "Running isolated Boost registry population case:"
+    elif [ "${CI_UNIT_TESTS_SHARD}" = chainlock-integration ]; then
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | grep -Fx 'test/pq_chainlock_integration_tests.cpp')
+      registry_cases=""
+      echo "Running isolated Boost ChainLock integration source:"
+    else
+      # Round-robin the same configured sources. Exclude only the dedicated
+      # population case wherever the registry source lands in this ordering.
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | awk -v shard="${CI_UNIT_TESTS_SHARD}" '(NR - 1) % 4 + 1 == shard')
+      # Filter after assignment so moving this source does not reshuffle others.
+      unit_test_sources=$(printf '%s\n' "${unit_test_sources}" | grep -Fvx 'test/pq_chainlock_integration_tests.cpp')
+      registry_cases=remaining
+      echo "Running Boost source shard ${CI_UNIT_TESTS_SHARD}/4:"
+    fi
+    test -n "${unit_test_sources}"
+    printf '%s\n' "${unit_test_sources}"
+    printf -v unit_test_shard_arg 'SYSCOIN_TESTS_TO_RUN=%q SYSCOIN_PQ_REGISTRY_CASES=%q' "${unit_test_sources//$'\n'/ }" "${registry_cases}"
+  fi
+  bash -c "${TEST_RUNNER_ENV} DIR_UNIT_TEST_DATA=${DIR_UNIT_TEST_DATA} LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib make $MAKEJOBS check VERBOSE=1 ${unit_test_shard_arg}"
 fi
 
 if [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then
@@ -174,7 +204,44 @@ if [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then
 fi
 
 if [ "$RUN_FUNCTIONAL_TESTS" = "true" ]; then
-  bash -c "LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib ${TEST_RUNNER_ENV} test/functional/test_runner.py --ci $MAKEJOBS --tmpdirprefix ${BASE_SCRATCH_DIR}/test_runner/ --ansi --combinedlogslen=99999999 --timeout-factor=${TEST_RUNNER_TIMEOUT_FACTOR} ${TEST_RUNNER_EXTRA} --quiet --failfast"
+  functional_progress_pid=""
+  functional_progress_dir=""
+  # This isolated, stateful test already logs its phases. Forward those logs
+  # independently so a job-level timeout does not hide the last phase reached.
+  if [[ "${GITHUB_ACTIONS}" == "true" && "${TEST_RUNNER_FILTER}" == '^feature_governance_dynamic\.py' ]]; then
+    if functional_progress_dir=$(mktemp -d); then
+      python3 "${BASE_ROOT_DIR}/test/util/ci-test-progress.py" \
+        --mode functional --path "${BASE_SCRATCH_DIR}/test_runner/" \
+        --parent-pid "$$" --ready-file "${functional_progress_dir}/ready" &
+      functional_progress_pid=$!
+      # Wait only for the old-log snapshot, never for diagnostic availability.
+      for ((attempt = 0; attempt < 20; ++attempt)); do
+        if [[ -e "${functional_progress_dir}/ready" ]] || ! kill -0 "${functional_progress_pid}" 2>/dev/null; then break; fi
+        sleep 0.1
+      done
+    fi
+  fi
+  functional_test_status=0
+  bash -c "LD_LIBRARY_PATH=${DEPENDS_DIR}/${HOST}/lib ${TEST_RUNNER_ENV} test/functional/test_runner.py --ci $MAKEJOBS --tmpdirprefix ${BASE_SCRATCH_DIR}/test_runner/ --ansi --combinedlogslen=99999999 --timeout-factor=${TEST_RUNNER_TIMEOUT_FACTOR} ${TEST_RUNNER_EXTRA} --failfast" || functional_test_status=$?
+  if [[ -n "${functional_progress_pid}" ]]; then
+    kill -TERM "${functional_progress_pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 20; ++attempt)); do
+      if ! kill -0 "${functional_progress_pid}" 2>/dev/null; then break; fi
+      sleep 0.1
+    done
+    if kill -0 "${functional_progress_pid}" 2>/dev/null; then
+      kill -KILL "${functional_progress_pid}" 2>/dev/null || true
+    fi
+    if ! kill -0 "${functional_progress_pid}" 2>/dev/null; then
+      wait "${functional_progress_pid}" 2>/dev/null || true
+    fi
+  fi
+  if [[ -n "${functional_progress_dir}" ]]; then
+    rm -f "${functional_progress_dir}/ready" || true
+    rmdir "${functional_progress_dir}" || true
+  fi
+  # Preserve the runner's status after diagnostic cleanup and the ERR trap.
+  (exit "${functional_test_status}")
 fi
 
 if [ "${RUN_TIDY}" = "true" ]; then

@@ -1,0 +1,39 @@
+{
+  "upstream": "e4fef4ae65c68ebd34774700dc4801c24313d469",
+  "target": "6f325c40e36e907cca735f70dc47ad00e4322f4b",
+  "tracked_files": 3454,
+  "file_statuses": {
+    "changed": 687,
+    "identical": 1113,
+    "no_upstream_path": 856,
+    "product_rename_only": 779,
+    "binary_difference": 19
+  },
+  "production_file_statuses": {
+    "changed": 244,
+    "product_rename_only": 297,
+    "identical": 130,
+    "no_upstream_path": 216
+  },
+  "hunks_by_category": {
+    "production": {
+      "no_marker_candidate": 746,
+      "local_syntax_marker": 701,
+      "partly_marked_or_ambiguous": 472,
+      "explicit_region": 147,
+      "removed_upstream_code": 85,
+      "local_removal_context": 10,
+      "explicit_removal_context": 12
+    },
+    "test": {
+      "no_marker_candidate": 144,
+      "local_removal_context": 4,
+      "removed_upstream_code": 20,
+      "partly_marked_or_ambiguous": 65,
+      "local_syntax_marker": 83,
+      "explicit_region": 23
+    }
+  },
+  "removed_upstream_files": 40,
+  "marker_issues": 0
+}

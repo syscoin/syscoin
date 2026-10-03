@@ -16,6 +16,7 @@
 #include <key_io.h>
 #include <logging.h>
 #include <core_io.h>
+#include <memusage.h>
 
 #include <algorithm>
 #include <unordered_set>
@@ -530,6 +531,9 @@ bool CheckSyscoinInputs(const Consensus::Params& params, const CTransaction& tx,
         if (good && tx.HasAssets() && mapAssetIn != mapAssetOut) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-asset-io-mismatch");
         }
+    } catch (const dbwrapper_error& e) {
+        // SYSCOIN: A local database failure says nothing about mint validity.
+        return state.Error(e.what());
     } catch (const std::exception& e) {
         return FormatSyscoinErrorMessage(state, e.what(), fJustCheck);
     } catch (...) {
@@ -624,11 +628,245 @@ bool CheckAssetAllocationInputs(const CTransaction &tx, const uint256& txHash, T
     }  
     return true;
 }
-// called on connect
+// SYSCOIN BEGIN: Revoke roots and retain recovery intent in one durable batch.
+namespace {
+// Legacy root keys serialize to 32 bytes, so this one-byte key cannot collide.
+constexpr uint8_t DB_NEVM_ROOT_DISCONNECT{'D'};
+constexpr uint8_t DB_NEVM_ROOT_PUBLISHED_TIP{'T'};
+constexpr uint8_t DB_NEVM_ROOT_SCHEMA{'V'};
+constexpr uint32_t NEVM_ROOT_SCHEMA_VERSION{1};
+constexpr uint8_t DB_NEVM_ROOT_UNDO{'U'};
 
+bool SameNEVMRoots(const NEVMTxRoot& left, const NEVMTxRoot& right)
+{
+    return left.nTxRoot == right.nTxRoot && left.nReceiptRoot == right.nReceiptRoot;
+}
+
+bool SameNEVMRoots(const std::optional<NEVMTxRoot>& left,
+                   const std::optional<NEVMTxRoot>& right)
+{
+    return left.has_value() == right.has_value() &&
+           (!left || SameNEVMRoots(*left, *right));
+}
+}
+
+CNEVMTxRootsDB::CNEVMTxRootsDB(const DBParams& params) : CDBWrapper(params)
+{
+    const auto read_record = [this](uint8_t record_key, auto& value,
+                                    std::size_t expected_size, const char* message) {
+        std::unique_ptr<CDBIterator> it{NewIterator()};
+        it->Seek(record_key);
+        it->CheckStatus();
+        uint8_t key;
+        if (!it->Valid() || !it->GetKeyExact(key) || key != record_key) return false;
+        if (it->GetValueSize() != expected_size || !it->GetValueExact(value)) {
+            throw dbwrapper_error(message);
+        }
+        return true;
+    };
+    LOCK(cs_cache);
+    uint32_t schema{0};
+    if (read_record(DB_NEVM_ROOT_SCHEMA, schema, sizeof(schema),
+                    "Invalid NEVM root schema; restart with -reindex")) {
+        if (schema != NEVM_ROOT_SCHEMA_VERSION) {
+            throw dbwrapper_error("Unsupported NEVM root schema; restart with -reindex");
+        }
+    } else {
+        // A legacy root table cannot establish whether a missing inverse means
+        // no previous owner. Initialize only an empty database; CDBWrapper may
+        // already have created its own obfuscation metadata.
+        std::unique_ptr<CDBIterator> it{NewIterator()};
+        it->SeekToFirst();
+        if (it->Valid()) {
+            std::string key;
+            if (it->GetKeyExact(key) && key == std::string("\000obfuscate_key", 14)) it->Next();
+        }
+        it->CheckStatus();
+        if (it->Valid()) {
+            throw dbwrapper_error("Legacy NEVM roots lack ownership undo; restart with -reindex to rebuild");
+        }
+        if (!CDBWrapper::Write(DB_NEVM_ROOT_SCHEMA, NEVM_ROOT_SCHEMA_VERSION, /*fSync=*/true)) {
+            throw dbwrapper_error("Failed to initialize NEVM root schema");
+        }
+    }
+    NEVMRootDisconnect disconnect;
+    if (read_record(DB_NEVM_ROOT_DISCONNECT, disconnect, 4 * uint256::size(),
+                    "Invalid pending NEVM root disconnect record")) {
+        if (!disconnect.IsValid()) {
+            throw dbwrapper_error("Invalid pending NEVM root disconnect record");
+        }
+        m_pending_disconnect = disconnect;
+    }
+    uint256 published_tip;
+    if (read_record(DB_NEVM_ROOT_PUBLISHED_TIP, published_tip, uint256::size(),
+                    "Invalid published NEVM root tip record")) {
+        if (published_tip.IsNull()) {
+            throw dbwrapper_error("Invalid published NEVM root tip record");
+        }
+        m_published_tip = published_tip;
+    }
+}
+
+std::optional<NEVMRootDisconnect> CNEVMTxRootsDB::GetPendingDisconnect() const
+{
+    LOCK(cs_cache);
+    return m_pending_disconnect;
+}
+
+std::optional<uint256> CNEVMTxRootsDB::GetPublishedTip() const
+{
+    LOCK(cs_cache);
+    return m_published_tip;
+}
+
+bool CNEVMTxRootsDB::ReadRootUndoLocked(const uint256& carrier, NEVMRootUndo& undo)
+{
+    AssertLockHeld(cs_cache);
+    if (const auto cached{m_root_undo.find(carrier)}; cached != m_root_undo.end()) {
+        undo = cached->second;
+        return true;
+    }
+    const auto key{std::make_pair(DB_NEVM_ROOT_UNDO, carrier)};
+    std::unique_ptr<CDBIterator> it{NewIterator()};
+    it->Seek(key);
+    it->CheckStatus();
+    std::pair<uint8_t, uint256> stored_key;
+    if (!it->Valid() || !it->GetKeyExact(stored_key) || stored_key != key) return false;
+    NEVMRootUndo stored;
+    if (!it->GetValueExact(stored) || carrier.IsNull() ||
+        stored.parent.IsNull() || stored.parent == carrier) {
+        throw dbwrapper_error("Malformed NEVM root undo; restart with -reindex");
+    }
+    undo = std::move(stored);
+    return true;
+}
+
+bool CNEVMTxRootsDB::ReadRootUndo(const uint256& carrier, NEVMRootUndo& undo)
+{
+    LOCK(cs_cache);
+    return ReadRootUndoLocked(carrier, undo);
+}
+
+void CNEVMTxRootsDB::StageConnect(const uint256& carrier, const uint256& parent,
+                                const uint256& block_hash, const NEVMTxRoot& roots)
+{
+    LOCK(cs_cache);
+    if (carrier.IsNull() || parent.IsNull() || carrier == parent || m_pending_disconnect) {
+        throw dbwrapper_error("Cannot stage NEVM root ownership against an unresolved parent");
+    }
+    std::optional<NEVMTxRoot> previous;
+    NEVMTxRoot current;
+    if (ReadTxRootsLocked(block_hash, current)) {
+        previous = current;
+    } else if (!m_pending_erases.contains(block_hash) && CDBWrapper::Exists(block_hash)) {
+        throw dbwrapper_error("Malformed previous NEVM roots; restart with -reindex");
+    }
+    NEVMRootUndo undo;
+    if (ReadRootUndoLocked(carrier, undo)) {
+        if (undo.parent != parent || undo.block_hash != block_hash ||
+            !SameNEVMRoots(undo.roots, roots) ||
+            (!SameNEVMRoots(undo.previous, previous) &&
+             (!previous || !SameNEVMRoots(*previous, roots)))) {
+            throw dbwrapper_error("NEVM root undo conflicts with its carrier or parent ownership");
+        }
+    } else {
+        // Stage the inverse first. A failed allocation can leave extra inverse
+        // metadata, but must never publish a root without its recovery record.
+        m_root_undo.emplace(carrier, NEVMRootUndo{parent, block_hash, roots, previous});
+    }
+    mapCache.insert_or_assign(block_hash, roots);
+    m_pending_erases.erase(block_hash);
+}
+
+bool CNEVMTxRootsDB::FlushRootUndoLocked(bool sync)
+{
+    AssertLockHeld(cs_cache);
+    return nevm_cache_detail::FlushCache(
+        *this, m_root_undo, /*chunk_items=*/4096, sync,
+        [](CDBBatch& batch, const auto& entry) {
+            batch.Write(std::make_pair(DB_NEVM_ROOT_UNDO, entry.first), entry.second);
+        },
+        [this](CDBBatch& batch, bool flush_sync) { return WriteCacheBatch(batch, flush_sync); });
+}
+
+bool CNEVMTxRootsDB::FlushRootUndo(bool sync)
+{
+    LOCK(cs_cache);
+    return FlushRootUndoLocked(sync);
+}
+
+std::size_t CNEVMTxRootsDB::GetRootUndoMemoryUsage() const
+{
+    LOCK(cs_cache);
+    return memusage::DynamicUsage(m_root_undo);
+}
+
+bool CNEVMTxRootsDB::RecordPublishedTip(const uint256& target)
+{
+    LOCK(cs_cache);
+    if (target.IsNull()) return false;
+    // The source cursor must never survive without every inverse needed to
+    // undo its suffix, including roots still waiting in the put cache.
+    if (!FlushRootUndoLocked(/*sync=*/true)) return false;
+    if (m_published_tip == target) return true;
+    CDBBatch batch(*this);
+    batch.Write(DB_NEVM_ROOT_PUBLISHED_TIP, target);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    m_published_tip = target;
+    return true;
+}
+
+bool CNEVMTxRootsDB::BeginDisconnect(const NEVMRootDisconnect& disconnect)
+{
+    LOCK(cs_cache);
+    if (m_pending_disconnect || !disconnect.IsValid()) return false;
+    // A just-connected child can still have a cached-only inverse. The
+    // durable revocation must not outlive the record needed to resolve it.
+    if (!FlushRootUndoLocked(/*sync=*/true)) return false;
+    CDBBatch batch(*this);
+    batch.Write(DB_NEVM_ROOT_DISCONNECT, disconnect);
+    batch.Erase(disconnect.block_hash);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    m_pending_disconnect = disconnect;
+    mapCache.erase(disconnect.block_hash);
+    m_pending_erases.erase(disconnect.block_hash);
+    return true;
+}
+
+bool CNEVMTxRootsDB::CompleteRootRecovery(
+    const uint256& recovered_tip, const std::optional<NEVMTxRoot>& pending_root)
+{
+    LOCK(cs_cache);
+    if (recovered_tip.IsNull()) return false;
+    CDBBatch batch(*this);
+    if (m_pending_disconnect) {
+        const auto& block_hash = m_pending_disconnect->block_hash;
+        if (pending_root) {
+            batch.Write(block_hash, *pending_root);
+        } else {
+            batch.Erase(block_hash);
+        }
+    }
+    batch.Erase(DB_NEVM_ROOT_DISCONNECT);
+    batch.Write(DB_NEVM_ROOT_PUBLISHED_TIP, recovered_tip);
+    if (!WriteCacheBatch(batch, /*sync=*/true)) return false;
+    if (m_pending_disconnect) {
+        mapCache.erase(m_pending_disconnect->block_hash);
+        m_pending_erases.erase(m_pending_disconnect->block_hash);
+    }
+    m_pending_disconnect.reset();
+    m_published_tip = recovered_tip;
+    return true;
+}
+// SYSCOIN END: Revoke roots and retain recovery intent in one durable batch.
+
+// SYSCOIN BEGIN: Retry failed erases without changing ordinary put batching.
 void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
     LOCK(cs_cache);
     for (const auto& entry : mapNEVMTxRoots) {
+        // SYSCOIN: Only explicit coins recovery can restore a revoked root.
+        if (m_pending_disconnect && m_pending_disconnect->block_hash == entry.first) continue;
+        m_pending_erases.erase(entry.first);
         auto result = mapCache.emplace(entry.first, entry.second);
         if (!result.second) {
             result.first->second = entry.second;
@@ -638,13 +876,15 @@ void CNEVMTxRootsDB::FlushDataToCache(const NEVMTxRootMap &mapNEVMTxRoots) {
 bool CNEVMTxRootsDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
 {
     LOCK(cs_cache);
+    if (!FlushRootUndoLocked(fSync)) return false;
+    if (!FlushPendingErases()) return false;
     if (mapCache.empty()) return true;
 
     const std::size_t count = mapCache.size();
     if (!nevm_cache_detail::FlushCache(
             *this, mapCache, CHUNK_ITEMS, fSync,
             [](CDBBatch& batch, const auto& entry) { batch.Write(entry.first, entry.second); },
-            [this](CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); })) return false;
+            [this](CDBBatch& batch, bool sync) { return WriteCacheBatch(batch, sync); })) return false;
 
     LogPrint(BCLog::SYS,
              "Flushed NEVM-tx-roots cache, %zu items written in %zu-entry chunks\n",
@@ -654,45 +894,71 @@ bool CNEVMTxRootsDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
 
 bool CNEVMTxRootsDB::ReadTxRoots(const uint256& nBlockHash, NEVMTxRoot& txRoot) {
     LOCK(cs_cache);
+    return ReadTxRootsLocked(nBlockHash, txRoot);
+}
+bool CNEVMTxRootsDB::ReadTxRootsLocked(const uint256& nBlockHash, NEVMTxRoot& txRoot) {
+    AssertLockHeld(cs_cache);
+    // SYSCOIN: Reopening the database must preserve the durable revocation.
+    if (m_pending_disconnect && m_pending_disconnect->block_hash == nBlockHash) return false;
+    if (m_pending_erases.contains(nBlockHash)) return false;
     auto it = mapCache.find(nBlockHash);
     if (it != mapCache.end()) {
         txRoot = it->second;
         return true;
     }
-    return Read(nBlockHash, txRoot);
-} 
+    return ReadTxRootsFromDisk(nBlockHash, txRoot);
+}
+void CNEVMTxRootsDB::StageErase(const std::vector<uint256>& block_hashes)
+{
+    AssertLockHeld(cs_cache);
+    for (const auto& hash : block_hashes) {
+        m_pending_erases.insert(hash);
+        mapCache.erase(hash);
+    }
+}
+void CNEVMTxRootsDB::EraseCache(const std::vector<uint256>& block_hashes)
+{
+    LOCK(cs_cache);
+    StageErase(block_hashes);
+}
 bool CNEVMTxRootsDB::FlushErase(const std::vector<uint256> &vecBlockHashes) {
     LOCK(cs_cache);
     if(vecBlockHashes.empty())
         return true;
-    CDBBatch batch(*this);
-    for (const auto& hash: vecBlockHashes) {
-        batch.Erase(hash);
-        auto it = mapCache.find(hash);
-        if (it != mapCache.end()) {
-            mapCache.erase(hash);
-        }
-    }
+    StageErase(vecBlockHashes);
     if(vecBlockHashes.size() > 0)
         LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx roots\n", vecBlockHashes.size());
-    return WriteBatch(batch, true);
+    return FlushPendingErases();
+}
+bool CNEVMTxRootsDB::FlushPendingErases()
+{
+    AssertLockHeld(cs_cache);
+    if (m_pending_erases.empty()) return true;
+    CDBBatch batch(*this);
+    for (const auto& hash : m_pending_erases) batch.Erase(hash);
+    // Preserve the synchronous durability requested by the original erase.
+    if (!WriteCacheBatch(batch, true)) return false;
+    m_pending_erases.clear();
+    return true;
 }
 void CNEVMMintedTxDB::FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) {
     LOCK(cs_cache);
     for (auto const& key : mapNEVMTxRoots) {
+        m_pending_erases.erase(key);
         mapCache.insert(key);
     }
 }
 bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
 {
     LOCK(cs_cache);
+    if (!FlushPendingErases()) return false;
     if (mapCache.empty()) return true;
 
     const std::size_t count = mapCache.size();
     if (!nevm_cache_detail::FlushCache(
             *this, mapCache, CHUNK_ITEMS, fSync,
             [](CDBBatch& batch, const uint256& key) { batch.Write(key, true); },
-            [this](CDBBatch& batch, bool sync) { return WriteBatch(batch, sync); })) return false;
+            [this](CDBBatch& batch, bool sync) { return WriteCacheBatch(batch, sync); })) return false;
 
     LogPrint(BCLog::SYS,
              "Flushed NEVM-minted-tx cache, %zu items written in %zu-entry chunks\n",
@@ -700,26 +966,45 @@ bool CNEVMMintedTxDB::FlushCacheToDisk(std::size_t CHUNK_ITEMS, bool fSync)
     return true;
 }
 
+void CNEVMMintedTxDB::StageErase(const NEVMMintTxSet& tx_hashes)
+{
+    AssertLockHeld(cs_cache);
+    for (const auto& key : tx_hashes) {
+        m_pending_erases.insert(key);
+        mapCache.erase(key);
+    }
+}
+void CNEVMMintedTxDB::EraseCache(const NEVMMintTxSet& tx_hashes)
+{
+    LOCK(cs_cache);
+    StageErase(tx_hashes);
+}
 bool CNEVMMintedTxDB::FlushErase(const NEVMMintTxSet &mapNEVMTxRoots) {
     LOCK(cs_cache);
     if(mapNEVMTxRoots.empty())
         return true;
-    CDBBatch batch(*this);
-    for (const auto &key : mapNEVMTxRoots) {
-        batch.Erase(key);
-        auto it = mapCache.find(key);
-        if(it != mapCache.end()){
-            mapCache.erase(it);
-        }
-    }
+    StageErase(mapNEVMTxRoots);
     if(mapNEVMTxRoots.size() > 0)
         LogPrint(BCLog::SYS, "Flushing, erasing %d nevm tx mints\n", mapNEVMTxRoots.size());
-    return WriteBatch(batch, true);
+    return FlushPendingErases();
+}
+bool CNEVMMintedTxDB::FlushPendingErases()
+{
+    AssertLockHeld(cs_cache);
+    if (m_pending_erases.empty()) return true;
+    CDBBatch batch(*this);
+    for (const auto& key : m_pending_erases) batch.Erase(key);
+    // Preserve the synchronous durability requested by the original erase.
+    if (!WriteCacheBatch(batch, true)) return false;
+    m_pending_erases.clear();
+    return true;
 }
 bool CNEVMMintedTxDB::ExistsTx(const uint256& nTxHash) {
     LOCK(cs_cache);
-    return (mapCache.find(nTxHash) != mapCache.end()) || Exists(nTxHash);
+    if (m_pending_erases.contains(nTxHash)) return false;
+    return (mapCache.find(nTxHash) != mapCache.end()) || ExistsTxOnDisk(nTxHash);
 }
+// SYSCOIN END: Retry failed erases without changing ordinary put batching.
 std::string stringFromSyscoinTx(const int &nVersion) {
     switch (nVersion) {
 	case SYSCOIN_TX_VERSION_ALLOCATION_SEND:

@@ -7,9 +7,11 @@
 """
 
 import os
+import re
 import stat
 import subprocess
 from test_framework.test_framework import SyscoinTestFramework
+from test_framework.test_node import ErrorMatch
 
 
 class BlockstoreReindexTest(SyscoinTestFramework):
@@ -74,9 +76,12 @@ class BlockstoreReindexTest(SyscoinTestFramework):
 
         if undo_immutable:
             self.log.info("Attempt to restart and reindex the node with the unwritable block file")
+            # SYSCOIN: The same damaged stream is checked during shutdown.
+            # Require one or more identical fatal lines and no other stderr.
+            fatal_error = re.escape("Error: A fatal internal error occurred, see debug.log for details")
             with self.nodes[0].assert_debug_log(expected_msgs=['FlushStateToDisk', 'failed to open file'], unexpected_msgs=[]):
                 self.nodes[0].assert_start_raises_init_error(extra_args=['-reindex', '-fastprune'],
-                    expected_msg="Error: A fatal internal error occurred, see debug.log for details")
+                    expected_msg=f"{fatal_error}(?:\\n{fatal_error})*", match=ErrorMatch.FULL_REGEX)
             undo_immutable()
 
         filename.chmod(0o777)

@@ -13,6 +13,8 @@
 #include <kernel/chainparams.h>
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
+#include <node/pq_activation_handoff.h> // SYSCOIN: durable local PQ activation provenance.
+#include <span.h>
 #include <sync.h>
 #include <util/fs.h>
 #include <util/hasher.h>
@@ -64,6 +66,12 @@ public:
     void ReadReindexing(bool& fReindexing);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
+    // SYSCOIN BEGIN: Persist the local BLS-to-PQ activation handoff atomically.
+    bool HasPQActivationHandoff() const;
+    bool WritePQActivationHandoff(
+        const node::PQActivationHandoffRecord& record);
+    bool ReadPQActivationHandoff(node::PQActivationHandoffRecord& record);
+    // SYSCOIN END: Persist the local BLS-to-PQ activation handoff atomically.
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
@@ -164,7 +172,6 @@ private:
     [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false);
 
     [[nodiscard]] bool FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
     bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize);
 
     FlatFileSeq BlockFileSeq() const;
@@ -175,7 +182,7 @@ private:
     bool WriteBlockToDisk(const CBlock& block, FlatFilePos& pos) const;
     bool UndoWriteToDisk(const CBlockUndo& blockundo, FlatFilePos& pos, const uint256& hashBlock) const;
 
-    /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
+    /** Select block/rev files for pruneblockchain without changing their indexes or deleting them. */
     void FindFilesToPruneManual(
         std::set<int>& setFilesToPrune,
         int nManualPruneHeight,
@@ -183,7 +190,7 @@ private:
         ChainstateManager& chainman);
 
     /**
-     * Prune block and undo files (blk???.dat and rev???.dat) so that the disk space used is less than a user-defined target.
+     * Select block and undo files (blk???.dat and rev???.dat) to bring disk usage below a user-defined target.
      * The user sets the target (in MB) on the command line or in config file.  This will be run on startup and whenever new
      * space is allocated in a block or undo file, staying below the target. Changing back to unpruned requires a reindex
      * (which in this case means the blockchain must be re-downloaded.)
@@ -192,8 +199,8 @@ private:
      * Block and undo files are deleted in lock-step (when blk00003.dat is deleted, so is rev00003.dat.)
      * Pruning cannot take place until the longest chain is at least a certain length (CChainParams::nPruneAfterHeight).
      * Pruning will never delete a block within a defined distance (currently 288) from the active chain's tip.
-     * The block index is updated by unsetting HAVE_DATA and HAVE_UNDO for any blocks that were stored in the deleted files.
-     * A db flag records the fact that at least some block files have been pruned.
+     * Selection does not mutate the block index. FlushStateToDisk must durably flush coins and their
+     * dependencies before calling PruneOneBlockFile, publishing the indexes, and unlinking these files.
      *
      * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
      * @param        last_prune        The last height we're able to prune, according to the prune locks
@@ -295,6 +302,15 @@ public:
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
 
+    // SYSCOIN: PQ catch-up durably flushes block and undo files before
+    // publishing replay progress.
+    /** Flush the current block and undo file for the chainstate type at the given height. */
+    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
+
+    // SYSCOIN: Fence pending block/undo evidence across both chainstate cursors
+    // before a recovery marker publishes references through WriteBlockIndexDB.
+    [[nodiscard]] bool FlushBlockFilesForDurability() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -304,7 +320,7 @@ public:
      * This could happen on some systems if the file was still being read while unlinked,
      * or if we crash before unlinking.
      */
-    void ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     // SYSCOIN
     CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header, enum BlockStatus nStatus = BLOCK_VALID_TREE) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -326,6 +342,31 @@ public:
 
     /** Store block on disk. If dbp is not nullptr, then it provides the known position of the block within a block file on disk. */
     FlatFilePos SaveBlockToDisk(const CBlock& block, int nHeight, const FlatFilePos* dbp);
+
+    // SYSCOIN BEGIN: NEVM payload replacement and reindex adoption interfaces.
+    /**
+     * Replace only the stored NEVM payload, preserving the block and its undo.
+     * The caller must have authenticated the replacement with the engine.
+     * The target's block-index entry must already be persisted by normal flushing.
+     * Publish new disk positions only after the records and index are durable.
+     */
+    [[nodiscard]] bool ReplaceNEVMBlockData(BlockValidationState& state,
+                                          CBlockIndex& index,
+                                          Span<const uint8_t> payload)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /**
+     * Adopt an existing corrected record during reindex, before undo exists.
+     * The caller must have read candidate from known_pos and authenticated the
+     * old payload rejection and replacement with the engine. Ordinary reindex
+     * flushing persists the new position; the Core block must remain identical.
+     */
+    [[nodiscard]] bool AdoptNEVMBlockDataForReindex(BlockValidationState& state,
+                                                  CBlockIndex& index,
+                                                  const CBlock& candidate,
+                                                  const FlatFilePos& known_pos)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    // SYSCOIN END: NEVM payload replacement and reindex adoption interfaces.
 
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }
@@ -360,6 +401,15 @@ public:
 
     //! Create or update a prune lock identified by its name
     void UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Durable replay markers may move forward, but they must never
+    // undo a lower floor installed by DisconnectTip for reorg rollback data.
+    int UpdatePruneLockLowerOnly(const std::string& name,
+                                 const PruneLockInfo& lock_info)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    // SYSCOIN: Replay obligations must erase released locks; an INT_MAX
+    // sentinel would be moved backward by DisconnectTip and become active.
+    void RemovePruneLock(const std::string& name)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Open a block file (blk?????.dat) */
     CAutoFile OpenBlockFile(const FlatFilePos& pos, bool fReadOnly = false) const;

@@ -1,11 +1,12 @@
 # Headers-only patch spec (Bitcoin v30.2 base)
 
-This document defines the expected behavior of the optional Bitcoin patch used by
-Syscoin BTCC signer policy checks.
+This document defines the expected behavior of the security-critical Bitcoin
+patch used by Syscoin's managed BTCC miner/signer policy backend.
 
 ## Base and scope
 
-- Base source is pinned in `bitcoin.lock` (`BITCOIN_COMMIT`).
+- Base source is pinned in `bitcoin.lock` by both `BITCOIN_COMMIT` and
+  `BITCOIN_SOURCE_ARCHIVE_SHA256`.
 - Patch must apply cleanly with `git apply` against that commit.
 - Patch goal is **header-chain policy support**, not full transaction validation.
 
@@ -55,9 +56,15 @@ Patch behavior must preserve useful semantics for these calls in headers-only mo
 ## Validation checklist for patch authors
 
 - Patch applies cleanly to pinned base commit.
+- Pinned archive digest is checked before extraction; a tampered cache fails.
 - `bitcoind` and `bitcoin-cli` build with the Syscoin helper build flow.
 - Header-only node can run continuously and answer the required RPCs.
-- Manual checks:
+- Automated managed-binary checks cover:
+  - best-header `getblockhash` beyond genesis,
+  - canonical and fork `getblockheader` confirmations,
+  - IBD/readiness and active-tip advancement,
+  - stop/restart/adoption/reindex and wrong-network rejection.
+- Manual release checks:
   - canonical tip hash changes with incoming headers,
   - candidate header hash membership and confirmations are queryable,
   - recent fork tips are visible for policy gating.

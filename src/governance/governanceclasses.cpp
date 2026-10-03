@@ -94,14 +94,18 @@ CAmount ParsePaymentAmount(const std::string& strAmount)
 *   Add Governance Object
 */
 
-bool CGovernanceManager::AddNewTrigger(uint256 nHash, int active_height)
+GovernanceTriggerAdmissionResult CGovernanceManager::AddNewTrigger(
+    uint256 nHash, int active_height)
 {
     AssertLockHeld(cs);
+    if (!IsReady() && !m_rebuilding_cached_triggers) {
+        return GovernanceTriggerAdmissionResult::UNAVAILABLE;
+    }
     // IF WE ALREADY HAVE THIS HASH, RETURN
     if (mapTrigger.count(nHash)) {
         LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- Already have hash, nHash = %s, count = %d, size = %s\n",
                     __func__, nHash.GetHex(), mapTrigger.count(nHash), mapTrigger.size());
-        return false;
+        return GovernanceTriggerAdmissionResult::LOCAL_INELIGIBLE;
     }
     CSuperblock_sptr pSuperblock;
     try {
@@ -109,10 +113,10 @@ bool CGovernanceManager::AddNewTrigger(uint256 nHash, int active_height)
         pSuperblock = pSuperblockTmp;
     } catch (std::exception& e) {
         LogPrintf("CGovernanceManager::%s -- Error creating superblock: %s\n", __func__, e.what());
-        return false;
+        return GovernanceTriggerAdmissionResult::INVALID;
     } catch (...) {
         LogPrintf("CGovernanceManager::%s -- Unknown Error creating superblock\n", __func__);
-        return false;
+        return GovernanceTriggerAdmissionResult::INVALID;
     }
 
     if (pSuperblock->GetBlockHeight() <= active_height) {
@@ -123,13 +127,17 @@ bool CGovernanceManager::AddNewTrigger(uint256 nHash, int active_height)
             nHash.ToString(),
             pSuperblock->GetBlockHeight(),
             active_height);
-        return false;
+        return GovernanceTriggerAdmissionResult::LOCAL_INELIGIBLE;
     }
 
     pSuperblock->SetStatus(SeenObjectStatus::Valid);
     mapTrigger.insert(std::make_pair(nHash, pSuperblock));
+    m_pq_inactive_triggers.erase(nHash);
+    InvalidateObjectPageCache();
 
-    return !pSuperblock->IsExpired();
+    return pSuperblock->IsExpired()
+        ? GovernanceTriggerAdmissionResult::LOCAL_INELIGIBLE
+        : GovernanceTriggerAdmissionResult::ACCEPTED;
 }
 
 /**
@@ -145,6 +153,10 @@ void CGovernanceManager::CleanAndRemoveTriggers()
 
     auto it = mapTrigger.begin();
     while (it != mapTrigger.end()) {
+        if (m_pq_inactive_triggers.contains(it->first)) {
+            ++it;
+            continue;
+        }
         bool remove = false;
         CGovernanceObject* pObj = nullptr;
         const CSuperblock_sptr& pSuperblock = it->second;
@@ -190,6 +202,7 @@ void CGovernanceManager::CleanAndRemoveTriggers()
             }
             LogPrint(BCLog::GOBJECT, "CGovernanceManager::%s -- Removing trigger object %s\n", __func__, strDataAsPlainString);
             // delete the trigger
+            InvalidateObjectPageCache();
             mapTrigger.erase(it++);
         } else {
             ++it;
@@ -204,15 +217,22 @@ void CGovernanceManager::CleanAndRemoveTriggers()
 *   - Return the triggers in a list
 */
 
-std::vector<CSuperblock_sptr> CGovernanceManager::GetActiveTriggers()
+std::vector<CSuperblock_sptr> CGovernanceManager::GetActiveTriggers(
+    const CBlockIndex* expected_tip)
 {
     AssertLockHeld(cs);
     std::vector<CSuperblock_sptr> vecResults;
+    if (expected_tip != nullptr ? !IsReadyForTip(expected_tip)
+                                : !IsReady()) {
+        return vecResults;
+    }
 
     // LOOK AT THESE OBJECTS AND COMPILE A VALID LIST OF TRIGGERS
     for (const auto& pair : mapTrigger) {
+        if (m_pq_inactive_triggers.contains(pair.first)) continue;
         const CGovernanceObject* pObj = FindConstGovernanceObject(pair.first);
-        if (pObj) {
+        if (pObj && !pObj->IsSetCachedDelete() &&
+            !pObj->IsSetExpired()) {
             vecResults.push_back(pair.second);
         }
     }
@@ -226,17 +246,27 @@ std::vector<CSuperblock_sptr> CGovernanceManager::GetActiveTriggers()
 *   - Does this block have a non-executed and activated trigger?
 */
 
-bool CSuperblockManager::IsSuperblockTriggered(int nBlockHeight)
+SuperblockTriggerState CSuperblockManager::GetSuperblockTriggerState(
+    int nBlockHeight, const CBlockIndex* expected_tip)
 {
     LogPrint(BCLog::GOBJECT, "CSuperblockManager::IsSuperblockTriggered -- Start nBlockHeight = %d\n", nBlockHeight);
     if (!CSuperblock::IsValidBlockHeight(nBlockHeight)) {
-        return false;
+        return SuperblockTriggerState::NOT_TRIGGERED;
     }
+    if (governance == nullptr) return SuperblockTriggerState::UNAVAILABLE;
 
-    LOCK(governance->cs);
-    const auto tip_mn_list = deterministicMNManager->GetListAtChainTip();
+    LOCK2(cs_main, governance->cs);
+    if (expected_tip != nullptr
+            ? !governance->IsReadyForTip(expected_tip)
+            : !governance->IsReady()) {
+        return SuperblockTriggerState::UNAVAILABLE;
+    }
+    const auto tip_mn_list = expected_tip != nullptr
+        ? deterministicMNManager->GetListForBlock(expected_tip)
+        : deterministicMNManager->GetListAtChainTip();
     // GET ALL ACTIVE TRIGGERS
-    std::vector<CSuperblock_sptr> vecTriggers = governance->GetActiveTriggers();
+    std::vector<CSuperblock_sptr> vecTriggers =
+        governance->GetActiveTriggers(expected_tip);
 
     LogPrint(BCLog::GOBJECT, "CSuperblockManager::IsSuperblockTriggered -- vecTriggers.size() = %d\n", vecTriggers.size());
 
@@ -269,24 +299,38 @@ bool CSuperblockManager::IsSuperblockTriggered(int nBlockHeight)
 
         if (pObj->IsSetCachedFunding()) {
             LogPrint(BCLog::GOBJECT, "CSuperblockManager::IsSuperblockTriggered -- fCacheFunding = true, returning true\n");
-            return true;
+            return SuperblockTriggerState::TRIGGERED;
         } else {
             LogPrint(BCLog::GOBJECT, "CSuperblockManager::IsSuperblockTriggered -- fCacheFunding = false, continuing\n");
         }
     }
 
-    return false;
+    return SuperblockTriggerState::NOT_TRIGGERED;
 }
 
-
-bool CSuperblockManager::GetBestSuperblock(CSuperblock_sptr& pSuperblockRet, int nBlockHeight)
+bool CSuperblockManager::IsSuperblockTriggered(int nBlockHeight)
 {
-    if (!CSuperblock::IsValidBlockHeight(nBlockHeight)) {
+    return GetSuperblockTriggerState(nBlockHeight) ==
+        SuperblockTriggerState::TRIGGERED;
+}
+
+bool CSuperblockManager::GetBestSuperblock(
+    CSuperblock_sptr& pSuperblockRet, int nBlockHeight,
+    const CBlockIndex* expected_tip)
+{
+    if (governance == nullptr) return false;
+    AssertLockHeld(cs_main);
+    AssertLockHeld(governance->cs);
+    if ((expected_tip != nullptr
+             ? !governance->IsReadyForTip(expected_tip)
+             : !governance->IsReady()) ||
+        !CSuperblock::IsValidBlockHeight(nBlockHeight)) {
         return false;
     }
 
     AssertLockHeld(governance->cs);
-    std::vector<CSuperblock_sptr> vecTriggers = governance->GetActiveTriggers();
+    std::vector<CSuperblock_sptr> vecTriggers =
+        governance->GetActiveTriggers(expected_tip);
     int nYesCount = 0;
 
     for (const auto& pSuperblock : vecTriggers) {
@@ -318,14 +362,21 @@ bool CSuperblockManager::GetBestSuperblock(CSuperblock_sptr& pSuperblockRet, int
 *   - Returns payments for superblock
 */
 
-bool CSuperblockManager::GetSuperblockPayments(int nBlockHeight, std::vector<CTxOut>& voutSuperblockRet)
+bool CSuperblockManager::GetSuperblockPayments(
+    int nBlockHeight, std::vector<CTxOut>& voutSuperblockRet,
+    const CBlockIndex* expected_tip)
 {
-    LOCK(governance->cs);
+    if (governance == nullptr) return false;
+    LOCK2(cs_main, governance->cs);
+    if (expected_tip != nullptr
+            ? !governance->IsReadyForTip(expected_tip)
+            : !governance->IsReady()) return false;
 
     // GET THE BEST SUPERBLOCK FOR THIS BLOCK HEIGHT
 
     CSuperblock_sptr pSuperblock;
-    if (!CSuperblockManager::GetBestSuperblock(pSuperblock, nBlockHeight)) {
+    if (!CSuperblockManager::GetBestSuperblock(
+            pSuperblock, nBlockHeight, expected_tip)) {
         LogPrint(BCLog::GOBJECT, "CSuperblockManager::GetSuperblockPayments -- Can't find superblock for height %d\n", nBlockHeight);
         return false;
     }
@@ -364,25 +415,39 @@ bool CSuperblockManager::GetSuperblockPayments(int nBlockHeight, std::vector<CTx
     return true;
 }
 
-bool CSuperblockManager::IsValidSuperblock(const CTransaction& txNew, int nBlockHeight, const CAmount &blockReward, const CAmount& nGovernanceBudget, const std::vector<bool>* matched_outputs)
+bool CSuperblockManager::IsValidSuperblock(
+    const CTransaction& txNew, int nBlockHeight,
+    const CAmount &blockReward, const CAmount& nGovernanceBudget,
+    const std::vector<bool>* matched_outputs,
+    const CBlockIndex* expected_tip)
 {
+    if (governance == nullptr) return false;
+    LOCK2(cs_main, governance->cs);
+    if (expected_tip != nullptr
+            ? !governance->IsReadyForTip(expected_tip)
+            : !governance->IsReady()) return false;
     // GET BEST SUPERBLOCK, SHOULD MATCH
-    LOCK(governance->cs);
 
     CSuperblock_sptr pSuperblock;
-    if (CSuperblockManager::GetBestSuperblock(pSuperblock, nBlockHeight)) {
+    if (CSuperblockManager::GetBestSuperblock(
+            pSuperblock, nBlockHeight, expected_tip)) {
         return pSuperblock->IsValid(txNew, nBlockHeight, blockReward, nGovernanceBudget, matched_outputs);
     }
 
     return false;
 }
 
-void CSuperblockManager::ExecuteBestSuperblock(int nBlockHeight)
+void CSuperblockManager::ExecuteBestSuperblock(
+    int nBlockHeight, const CBlockIndex* expected_tip)
 {
-    LOCK(governance->cs);
+    if (governance == nullptr) return;
+    LOCK2(cs_main, governance->cs);
+    if (expected_tip != nullptr
+            ? !governance->IsReadyForTip(expected_tip)
+            : !governance->IsReady()) return;
 
     CSuperblock_sptr pSuperblock;
-    if (GetBestSuperblock(pSuperblock, nBlockHeight)) {
+    if (GetBestSuperblock(pSuperblock, nBlockHeight, expected_tip)) {
         // All checks are done in CSuperblock::IsValid via IsBlockValueValid,
         // tip wouldn't be updated if anything was wrong. Mark this trigger as executed.
         pSuperblock->SetExecuted();
@@ -485,8 +550,18 @@ void CSuperblock::GetNearestSuperblocksHeights(int nBlockHeight, int& nLastSuper
 
 CAmount CSuperblock::GetPaymentsLimit(const CBlockIndex* pindex)
 {
+    // Before the first superblock there is no adaptive predecessor. A later
+    // cadence change can also yield a non-superblock predecessor height; keep
+    // that historical zero rather than treating it as first-cycle state.
+    if (pindex == nullptr) {
+        return SUPERBLOCK_BUDGET;
+    }
     if (!IsValidBlockHeight(pindex->nHeight)) {
-        return 0;
+        int last_superblock{0};
+        int unused_next{0};
+        GetNearestSuperblocksHeights(
+            pindex->nHeight, last_superblock, unused_next);
+        return last_superblock == 0 ? SUPERBLOCK_BUDGET : 0;
     }
     CAmount nPaymentsLimit = 0;
     if(!governance->m_sb->ReadCache(pindex->GetBlockHash(), nPaymentsLimit)) {

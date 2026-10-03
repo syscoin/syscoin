@@ -299,22 +299,23 @@ BOOST_AUTO_TEST_CASE(retained_block_expiry_is_monotone_across_timestamp_orders)
     const uint256 second_txid{uint256S("02")};
     uint8_t seed{0};
     for (bool newer_block_first : {false, true}) {
+        const uint256 newest_txid{newer_block_first ? first_txid : second_txid};
         for (bool flush_first : {false, true}) {
             for (bool flush_second : {false, true}) {
                 const std::vector<uint8_t> key(32, ++seed);
                 Store(key, first_txid, newer_block_first ? 2000 : 1000, PoDAFlushSource::Block);
                 if (flush_first) BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(2000));
                 Store(key, second_txid, newer_block_first ? 1000 : 2000, PoDAFlushSource::Block);
-                CheckMetadata(key, second_txid, 2000);
+                CheckMetadata(key, newest_txid, 2000);
                 if (flush_second) BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(2000));
 
                 Store(key, uint256S("03"), 3000, PoDAFlushSource::Block, /*size=*/3);
                 Store(key, second_txid, 4000, PoDAFlushSource::Mempool);
-                CheckMetadata(key, second_txid, 2000);
+                CheckMetadata(key, newest_txid, 2000);
                 BOOST_REQUIRE(pnevmdatadb->PruneStandalone(1001 + NEVM_DATA_EXPIRE_TIME));
-                CheckMetadata(key, second_txid, 2000);
+                CheckMetadata(key, newest_txid, 2000);
                 BOOST_REQUIRE(pnevmdatadb->PruneStandalone(2000 + NEVM_DATA_EXPIRE_TIME));
-                CheckMetadata(key, second_txid, 2000);
+                CheckMetadata(key, newest_txid, 2000);
                 BOOST_REQUIRE(pnevmdatadb->PruneStandalone(2001 + NEVM_DATA_EXPIRE_TIME));
                 BOOST_CHECK(!pnevmdatadb->BlobExists(key));
                 BOOST_CHECK(!pnevmdatablobdb->Exists(key));
@@ -327,20 +328,20 @@ BOOST_AUTO_TEST_CASE(retained_block_expiry_uses_newest_cache_time_and_survives_f
 {
     Open(/*memory_only=*/false, /*wipe_data=*/true);
     const std::vector<uint8_t> key(32, 1);
-    const uint256 last_txid{uint256S("03")};
+    const uint256 newest_txid{uint256S("02")};
     Store(key, uint256S("01"), 1000, PoDAFlushSource::Block);
     BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(1000));
-    Store(key, uint256S("02"), 3000, PoDAFlushSource::Block);
-    Store(key, last_txid, 2000, PoDAFlushSource::Block);
-    CheckMetadata(key, last_txid, 3000);
+    Store(key, newest_txid, 3000, PoDAFlushSource::Block);
+    Store(key, uint256S("03"), 2000, PoDAFlushSource::Block);
+    CheckMetadata(key, newest_txid, 3000);
     BOOST_REQUIRE(pnevmdatadb->PruneStandalone(2001 + NEVM_DATA_EXPIRE_TIME));
-    CheckMetadata(key, last_txid, 3000);
+    CheckMetadata(key, newest_txid, 3000);
     BOOST_REQUIRE(pnevmdatadb->FlushCacheToDisk(3000));
 
     Open(/*memory_only=*/false, /*wipe_data=*/false);
-    CheckMetadata(key, last_txid, 3000);
+    CheckMetadata(key, newest_txid, 3000);
     BOOST_REQUIRE(pnevmdatadb->PruneStandalone(2001 + NEVM_DATA_EXPIRE_TIME));
-    CheckMetadata(key, last_txid, 3000);
+    CheckMetadata(key, newest_txid, 3000);
     BOOST_REQUIRE(pnevmdatadb->PruneStandalone(3001 + NEVM_DATA_EXPIRE_TIME));
     BOOST_CHECK(!pnevmdatadb->BlobExists(key));
     BOOST_CHECK(!pnevmdatablobdb->Exists(key));

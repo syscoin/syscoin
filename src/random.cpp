@@ -529,12 +529,15 @@ enum class RNGLevel {
     PERIODIC, //!< Called by RandAddPeriodic()
 };
 
+// SYSCOIN: PQ seed generation chunks longer requests at this extraction bound.
+static constexpr std::size_t MAX_RAND_BYTES_PER_CALL{32};
+
 static void ProcRand(unsigned char* out, int num, RNGLevel level) noexcept
 {
     // Make sure the RNG is initialized first (as all Seed* function possibly need hwrand to be available).
     RNGState& rng = GetRNGState();
 
-    assert(num <= 32);
+    assert(num >= 0 && static_cast<std::size_t>(num) <= MAX_RAND_BYTES_PER_CALL);
 
     CSHA512 hasher;
     switch (level) {
@@ -560,6 +563,20 @@ static void ProcRand(unsigned char* out, int num, RNGLevel level) noexcept
 
 void GetRandBytes(Span<unsigned char> bytes) noexcept { ProcRand(bytes.data(), bytes.size(), RNGLevel::FAST); }
 void GetStrongRandBytes(Span<unsigned char> bytes) noexcept { ProcRand(bytes.data(), bytes.size(), RNGLevel::SLOW); }
+
+// SYSCOIN: PQ seeds can exceed ProcRand's single-extraction bound.
+void GetStrongRandBytesChunked(Span<unsigned char> bytes) noexcept
+{
+    while (!bytes.empty()) {
+        const std::size_t chunk_size{
+            bytes.size() > MAX_RAND_BYTES_PER_CALL
+                ? MAX_RAND_BYTES_PER_CALL
+                : bytes.size()};
+        GetStrongRandBytes(bytes.first(chunk_size));
+        bytes = bytes.subspan(chunk_size);
+    }
+}
+
 void RandAddPeriodic() noexcept { ProcRand(nullptr, 0, RNGLevel::PERIODIC); }
 void RandAddEvent(const uint32_t event_info) noexcept { GetRNGState().AddEvent(event_info); }
 

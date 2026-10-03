@@ -23,8 +23,6 @@ implicit-integer-sign-change:minisketch/
 implicit-integer-sign-change:secp256k1/
 implicit-signed-integer-truncation:*/include/c++/
 implicit-signed-integer-truncation:leveldb/
-# SYSCOIN
-implicit-signed-integer-truncation:quorums_dkgsession.cpp/
 implicit-signed-integer-truncation:secp256k1/
 implicit-unsigned-integer-truncation:*/include/c++/
 implicit-unsigned-integer-truncation:leveldb/

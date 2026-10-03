@@ -1,0 +1,587 @@
+// Copyright (c) 2026 The Syscoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <llmq/pq_operator_key_state.h>
+
+#include <llmq/pq_global_auth.h>
+#include <streams.h>
+
+#include <boost/test/unit_test.hpp>
+
+#include <cstddef>
+#include <array>
+#include <cstdint>
+#include <ostream>
+
+using namespace llmq::pq;
+
+namespace llmq::pq {
+
+std::ostream& operator<<(std::ostream& out, OperatorKeyStateResult value)
+{
+    return out << static_cast<unsigned>(value);
+}
+
+std::ostream& operator<<(std::ostream& out, ChildRootResolutionStatus value)
+{
+    return out << static_cast<unsigned>(value);
+}
+
+} // namespace llmq::pq
+
+namespace {
+
+uint256 NonNullHash(uint32_t value)
+{
+    uint256 hash;
+    for (std::size_t i{0}; i < sizeof(value); ++i) {
+        hash.begin()[i] = static_cast<uint8_t>(value >> (8 * i));
+    }
+    if (hash.IsNull()) hash.begin()[0] = 1;
+    return hash;
+}
+
+ChainLockScheduleConfig Schedule()
+{
+    ChainLockScheduleConfig config;
+    config.epoch_origin = 1440;
+    return config;
+}
+
+OperatorKeyScheduleView View(int32_t height)
+{
+    const auto view = DeriveOperatorKeyScheduleView(
+        Schedule(), height, /*registration_cutoff_blocks=*/144,
+        /*future_horizon_epochs=*/8);
+    BOOST_REQUIRE(view);
+    return *view;
+}
+
+GlobalKeyRecord Candidate(const uint256& genesis,
+                          const uint256& pro_tx_hash,
+                          uint32_t key_version,
+                          uint32_t generation,
+                          uint32_t first_epoch,
+                          uint32_t tag)
+{
+    GlobalKeyRecord record;
+    record.key_version = key_version;
+    record.public_key[0] = static_cast<uint8_t>(tag);
+    record.child_key_commitment.generation = generation;
+    record.child_key_commitment.first_epoch = first_epoch;
+    const auto tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, generation, first_epoch)};
+    BOOST_REQUIRE(tree_id);
+    record.child_key_commitment.tree_id = *tree_id;
+    record.child_key_commitment.root = NonNullHash(2000 + tag);
+    return record;
+}
+
+GlobalSignature DummySignature()
+{
+    GlobalSignature signature{};
+    signature[0] = 1;
+    return signature;
+}
+
+ProviderRevokeAuthorization RevokeAuthorization(
+    const uint256& pro_tx_hash,
+    uint32_t global_key_version,
+    uint32_t tag)
+{
+    ProviderRevokeAuthorization authorization;
+    authorization.payload_version = 1;
+    authorization.pro_tx_hash = pro_tx_hash;
+    authorization.global_key_version = global_key_version;
+    authorization.transaction_inputs_hash = NonNullHash(tag);
+    return authorization;
+}
+
+OperatorKeyState RegisteredState(const uint256& genesis,
+                                 const uint256& pro_tx_hash,
+                                 const OperatorKeyScheduleView& view,
+                                 const GlobalKeyRecord& candidate)
+{
+    auto state = OperatorKeyState::ForOperator(pro_tx_hash);
+    BOOST_REQUIRE(state.Advance(view) == OperatorKeyStateResult::OK);
+    BOOST_REQUIRE(
+        state.ApplyInitialGlobalKey(
+            view, genesis, candidate, NonNullHash(9), DummySignature(),
+            /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    return state;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_SUITE(pq_operator_key_state_tests)
+
+BOOST_AUTO_TEST_CASE(recovery_readiness_is_explicit_frozen_and_key_scoped)
+{
+    const uint256 genesis{NonNullHash(700)};
+    const uint256 pro_tx_hash{NonNullHash(701)};
+    const auto initial_view{View(1000)};
+    const auto initial{Candidate(genesis, pro_tx_hash, 1, 1, 0, 70)};
+    auto state{RegisteredState(genesis, pro_tx_hash, initial_view, initial)};
+    const auto inclusion_view{View(1295)};
+    BOOST_REQUIRE(state.Advance(inclusion_view) == OperatorKeyStateResult::OK);
+    RecoveryReadinessAuthorization authorization;
+    authorization.pro_tx_hash = pro_tx_hash;
+    authorization.global_key_version = 1;
+    authorization.group = 1;
+    authorization.reference_height = 1290;
+    authorization.reference_hash = NonNullHash(702);
+    authorization.transaction_inputs_hash = NonNullHash(703);
+    constexpr int32_t snapshot_height{1296};
+    BOOST_CHECK(!state.IsRecoveryReady(1, 1290, authorization.reference_hash, snapshot_height));
+    const auto before{state};
+    BOOST_CHECK(state.ApplyRecoveryReadiness(inclusion_view, genesis, authorization,
+        DummySignature(), snapshot_height) == OperatorKeyStateResult::RECOVERY_READINESS_AUTH_FAILED);
+    BOOST_CHECK(state == before);
+    BOOST_REQUIRE(state.ApplyRecoveryReadiness(inclusion_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(state.global_key == before.global_key);
+    BOOST_CHECK(state.frozen_child_roots == before.frozen_child_roots);
+    BOOST_CHECK(state.schedule == before.schedule);
+    BOOST_CHECK(state.IsRecoveryReady(1, 1290, authorization.reference_hash, snapshot_height));
+    BOOST_CHECK(!state.IsRecoveryReady(2, 1290, authorization.reference_hash, snapshot_height));
+    BOOST_CHECK(!state.IsRecoveryReady(1, 1290, NonNullHash(704), snapshot_height));
+    const auto before_hash{GetPQKeyConsensusStateHash(genesis, std::array{before})};
+    const auto ready_hash{GetPQKeyConsensusStateHash(genesis, std::array{state})};
+    BOOST_REQUIRE(before_hash && ready_hash);
+    BOOST_CHECK(*before_hash != *ready_hash);
+
+    DataStream stream;
+    stream << state;
+    OperatorKeyState decoded;
+    stream >> decoded;
+    BOOST_CHECK(stream.empty());
+    BOOST_CHECK(decoded == state);
+    CDataStream encoded{SER_NETWORK, 0};
+    encoded << state;
+    const auto wire_bytes{MakeUCharSpan(encoded)};
+    std::vector<unsigned char> bytes{wire_bytes.begin(), wire_bytes.end()};
+    bytes[bytes.size() - RecoveryReadinessRecord::WIRE_SIZE - 1] = 2;
+    CDataStream bad_flag{bytes, SER_NETWORK, 0};
+    BOOST_CHECK_THROW(bad_flag >> decoded, std::ios_base::failure);
+    BOOST_CHECK(state.ApplyRecoveryReadiness(inclusion_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::INVALID_RECOVERY_READINESS);
+
+    auto at_reference{before};
+    BOOST_REQUIRE(at_reference.Advance(View(1295)) == OperatorKeyStateResult::OK);
+    auto same_height_reference{authorization};
+    same_height_reference.reference_height = inclusion_view.block_height;
+    BOOST_CHECK(at_reference.ApplyRecoveryReadiness(inclusion_view, genesis, same_height_reference,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::INVALID_RECOVERY_READINESS);
+    const auto cutoff_view{View(snapshot_height)};
+    BOOST_REQUIRE(state.Advance(cutoff_view) == OperatorKeyStateResult::OK);
+    BOOST_REQUIRE(state.ApplyRecoveryReadiness(cutoff_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    const auto frozen{state};
+    const auto later_view{View(snapshot_height + 1)};
+    BOOST_REQUIRE(state.Advance(later_view) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(state.ApplyRecoveryReadiness(later_view, genesis, authorization,
+        DummySignature(), snapshot_height, /*check_sigs=*/false) == OperatorKeyStateResult::INVALID_RECOVERY_READINESS);
+    BOOST_CHECK(frozen.IsRecoveryReady(1, 1290, authorization.reference_hash, snapshot_height));
+    BOOST_CHECK(state.HasActiveGlobalKey());
+    BOOST_CHECK(state.ResolveChildRoot(0).record == frozen.ResolveChildRoot(0).record);
+
+    auto replacement{initial};
+    replacement.key_version = 2;
+    replacement.public_key[0]++;
+    BOOST_REQUIRE(state.ApplyGlobalKeyRotation(later_view, genesis, replacement,
+        NonNullHash(705), DummySignature(), /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(!state.recovery_readiness);
+    auto revoked{frozen};
+    BOOST_REQUIRE(revoked.ApplyProviderRevocation(cutoff_view, genesis,
+        RevokeAuthorization(pro_tx_hash, 1, 706), DummySignature(),
+        /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(!revoked.recovery_readiness);
+}
+
+BOOST_AUTO_TEST_CASE(schedule_view_uses_exclusive_canonical_cutoff)
+{
+    const auto preparation = View(1000);
+    BOOST_CHECK_EQUAL(preparation.has_current_epoch, 0U);
+    BOOST_CHECK_EQUAL(preparation.first_mutable_epoch, 0U);
+    BOOST_CHECK_EQUAL(preparation.last_admissible_epoch, 7U);
+
+    BOOST_CHECK_EQUAL(View(1295).first_mutable_epoch, 0U);
+    BOOST_CHECK_EQUAL(View(1296).first_mutable_epoch, 1U);
+    BOOST_CHECK_EQUAL(View(1440).current_epoch, 0U);
+    BOOST_CHECK_EQUAL(View(1440).first_mutable_epoch, 1U);
+    BOOST_CHECK_EQUAL(View(1871).first_mutable_epoch, 2U);
+    BOOST_CHECK_EQUAL(View(1872).first_mutable_epoch, 3U);
+
+    BOOST_CHECK(!DeriveOperatorKeyScheduleView(Schedule(), 1872, 144, 0));
+    BOOST_CHECK(!DeriveOperatorKeyScheduleView(
+        Schedule(), 1872, 144, MAX_OPERATOR_SCHEDULE_EPOCHS + 1));
+}
+
+BOOST_AUTO_TEST_CASE(owner_bootstrap_binds_root_and_requires_authorization)
+{
+    const uint256 genesis{NonNullHash(1)};
+    const uint256 pro_tx_hash{NonNullHash(2)};
+    const auto view{View(1000)};
+    const auto candidate{Candidate(
+        genesis, pro_tx_hash, 1, 1, view.first_mutable_epoch, 1)};
+    auto state = OperatorKeyState::ForOperator(pro_tx_hash);
+    BOOST_REQUIRE(state.Advance(view) == OperatorKeyStateResult::OK);
+
+    BOOST_CHECK(
+        state.ApplyInitialGlobalKey(
+            view, genesis, candidate, NonNullHash(3), DummySignature(),
+            /*owner_authorization_verified=*/false,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::OWNER_AUTHORIZATION_REQUIRED);
+    auto wrong_tree_id{candidate};
+    wrong_tree_id.child_key_commitment.tree_id = NonNullHash(999);
+    BOOST_REQUIRE(wrong_tree_id.child_key_commitment.tree_id !=
+                  candidate.child_key_commitment.tree_id);
+    BOOST_CHECK(
+        state.ApplyInitialGlobalKey(
+            view, genesis, wrong_tree_id, NonNullHash(3), DummySignature(),
+            /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
+    auto wrong_version{candidate};
+    wrong_version.key_version = 2;
+    BOOST_CHECK(
+        state.ApplyInitialGlobalKey(
+            view, genesis, wrong_version, NonNullHash(3), DummySignature(),
+            /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::GLOBAL_REGISTRATION_AUTH_FAILED);
+    auto wrong_generation{candidate};
+    wrong_generation.child_key_commitment.generation = 2;
+    const auto generation_two_tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, /*generation=*/2,
+        wrong_generation.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(generation_two_tree_id);
+    wrong_generation.child_key_commitment.tree_id =
+        *generation_two_tree_id;
+    BOOST_CHECK(
+        state.ApplyInitialGlobalKey(
+            view, genesis, wrong_generation, NonNullHash(3), DummySignature(),
+            /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::GLOBAL_REGISTRATION_AUTH_FAILED);
+    BOOST_REQUIRE(
+        state.ApplyInitialGlobalKey(
+            view, genesis, candidate, NonNullHash(3), DummySignature(),
+            /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(state.HasActiveGlobalKey());
+    BOOST_CHECK(state.global_key.child_key_commitment ==
+                candidate.child_key_commitment);
+
+    DataStream stream;
+    stream << state;
+    OperatorKeyState decoded;
+    stream >> decoded;
+    BOOST_CHECK(stream.empty());
+    BOOST_CHECK(decoded == state);
+}
+
+BOOST_AUTO_TEST_CASE(rotation_cutoff_preserves_branch_historical_roots)
+{
+    const uint256 genesis{NonNullHash(10)};
+    const uint256 pro_tx_hash{NonNullHash(11)};
+    const auto initial_view{View(1000)};
+    const auto initial{Candidate(
+        genesis, pro_tx_hash, 1, 1,
+        initial_view.first_mutable_epoch, 10)};
+    auto state{RegisteredState(genesis, pro_tx_hash, initial_view, initial)};
+
+    const auto cutoff_view{View(1440)};
+    BOOST_REQUIRE(state.Advance(cutoff_view) == OperatorKeyStateResult::OK);
+    const auto frozen_zero{state.ResolveChildRoot(0)};
+    BOOST_REQUIRE(frozen_zero.record);
+    BOOST_CHECK(frozen_zero.status ==
+                ChildRootResolutionStatus::FROZEN_PRESENT);
+    BOOST_CHECK(frozen_zero.record->commitment ==
+                initial.child_key_commitment);
+
+    auto wrong_cutoff{Candidate(
+        genesis, pro_tx_hash, 2, 2, 0, 11)};
+    BOOST_CHECK(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, wrong_cutoff, NonNullHash(12),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
+
+    const auto replacement{Candidate(
+        genesis, pro_tx_hash, 2, 2,
+        cutoff_view.first_mutable_epoch, 12)};
+    auto wrong_tree_id{replacement};
+    wrong_tree_id.child_key_commitment.tree_id = NonNullHash(1'999);
+    BOOST_REQUIRE(wrong_tree_id.child_key_commitment.tree_id !=
+                  replacement.child_key_commitment.tree_id);
+    BOOST_CHECK(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, wrong_tree_id, NonNullHash(13),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
+    auto skipped_generation{replacement};
+    skipped_generation.child_key_commitment.generation = 3;
+    const auto generation_three_tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, /*generation=*/3,
+        skipped_generation.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(generation_three_tree_id);
+    skipped_generation.child_key_commitment.tree_id =
+        *generation_three_tree_id;
+    BOOST_CHECK(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, skipped_generation, NonNullHash(13),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::GLOBAL_ROTATION_AUTH_FAILED);
+    auto skipped_key_version{replacement};
+    skipped_key_version.key_version = 3;
+    BOOST_CHECK(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, skipped_key_version, NonNullHash(13),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::GLOBAL_ROTATION_AUTH_FAILED);
+
+    auto key_only_first{initial};
+    key_only_first.key_version = 2;
+    key_only_first.public_key[0]++;
+    auto key_only_then_root{state};
+    BOOST_REQUIRE(
+        key_only_then_root.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, key_only_first, NonNullHash(13),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::OK);
+    BOOST_CHECK(key_only_then_root.global_key.child_key_commitment ==
+                initial.child_key_commitment);
+    const auto root_after_key_only{Candidate(
+        genesis, pro_tx_hash, 3, 2,
+        cutoff_view.first_mutable_epoch, 14)};
+    BOOST_CHECK(root_after_key_only.child_key_commitment.tree_id ==
+                replacement.child_key_commitment.tree_id);
+    BOOST_REQUIRE(
+        key_only_then_root.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, root_after_key_only, NonNullHash(14),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::OK);
+
+    BOOST_REQUIRE(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, replacement, NonNullHash(13),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::OK);
+    const auto historical{state.ResolveChildRoot(0)};
+    const auto future{state.ResolveChildRoot(1)};
+    BOOST_REQUIRE(historical.record);
+    BOOST_REQUIRE(future.record);
+    BOOST_CHECK(historical.record->commitment ==
+                initial.child_key_commitment);
+    BOOST_CHECK(future.record->commitment ==
+                replacement.child_key_commitment);
+
+    auto key_only = replacement;
+    key_only.key_version = 3;
+    key_only.public_key[0]++;
+    BOOST_REQUIRE(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, key_only, NonNullHash(14),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::OK);
+    BOOST_CHECK(state.global_key.child_key_commitment.tree_id ==
+                replacement.child_key_commitment.tree_id);
+    BOOST_CHECK(state.ResolveChildRoot(1).record->commitment ==
+                replacement.child_key_commitment);
+}
+
+BOOST_AUTO_TEST_CASE(owner_recovery_is_delayed_and_starts_a_fresh_tree)
+{
+    const uint256 genesis{NonNullHash(20)};
+    const uint256 pro_tx_hash{NonNullHash(21)};
+    const auto initial_view{View(1440)};
+    const auto initial{Candidate(
+        genesis, pro_tx_hash, 1, 1,
+        initial_view.first_mutable_epoch, 20)};
+    auto revoked{RegisteredState(genesis, pro_tx_hash, initial_view, initial)};
+
+    const auto authorization{
+        RevokeAuthorization(pro_tx_hash, initial.key_version, 25)};
+    auto wrong_key_version{authorization};
+    ++wrong_key_version.global_key_version;
+    BOOST_CHECK(
+        revoked.ApplyProviderRevocation(
+            initial_view, genesis, wrong_key_version, DummySignature(),
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::PROVIDER_REVOCATION_AUTH_FAILED);
+    BOOST_REQUIRE(
+        revoked.ApplyProviderRevocation(
+            initial_view, genesis, authorization, DummySignature(),
+            /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(!revoked.HasActiveGlobalKey());
+    BOOST_CHECK_EQUAL(revoked.revoked_height,
+                      static_cast<uint32_t>(initial_view.block_height));
+    BOOST_CHECK(revoked.global_key.child_key_commitment.tree_id ==
+                initial.child_key_commitment.tree_id);
+
+    const auto early_view{View(
+        initial_view.block_height + OWNER_RECOVERY_DELAY_BLOCKS - 1)};
+    auto early{revoked};
+    BOOST_REQUIRE(early.Advance(early_view) == OperatorKeyStateResult::OK);
+    const auto early_candidate{Candidate(
+        genesis, pro_tx_hash, 2, 2,
+        early_view.first_mutable_epoch, 21)};
+    BOOST_CHECK(
+        early.ApplyInitialGlobalKey(
+            early_view, genesis, early_candidate, NonNullHash(22),
+            DummySignature(), /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::GLOBAL_RECOVERY_NOT_ALLOWED);
+
+    const auto recovery_view{View(
+        initial_view.block_height + OWNER_RECOVERY_DELAY_BLOCKS)};
+    BOOST_REQUIRE(revoked.Advance(recovery_view) ==
+                  OperatorKeyStateResult::OK);
+    auto reused_tree = initial;
+    reused_tree.key_version = 2;
+    reused_tree.public_key[0]++;
+    reused_tree.child_key_commitment.first_epoch =
+        recovery_view.first_mutable_epoch;
+    const auto reused_generation_tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash,
+        reused_tree.child_key_commitment.generation,
+        reused_tree.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(reused_generation_tree_id);
+    reused_tree.child_key_commitment.tree_id =
+        *reused_generation_tree_id;
+    BOOST_CHECK(
+        revoked.ApplyInitialGlobalKey(
+            recovery_view, genesis, reused_tree, NonNullHash(23),
+            DummySignature(), /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::GLOBAL_RECOVERY_NOT_ALLOWED);
+
+    const auto recovery{Candidate(
+        genesis, pro_tx_hash, 2, 2,
+        recovery_view.first_mutable_epoch, 22)};
+    auto wrong_tree_id{recovery};
+    wrong_tree_id.child_key_commitment.tree_id = NonNullHash(2'999);
+    BOOST_REQUIRE(wrong_tree_id.child_key_commitment.tree_id !=
+                  recovery.child_key_commitment.tree_id);
+    BOOST_CHECK(
+        revoked.ApplyInitialGlobalKey(
+            recovery_view, genesis, wrong_tree_id, NonNullHash(24),
+            DummySignature(), /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
+    BOOST_REQUIRE(
+        revoked.ApplyInitialGlobalKey(
+            recovery_view, genesis, recovery, NonNullHash(24),
+            DummySignature(), /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    BOOST_CHECK(revoked.HasActiveGlobalKey());
+    BOOST_CHECK_EQUAL(revoked.revoked_height, 0U);
+    const auto expected_recovery_tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, /*generation=*/2,
+        recovery_view.first_mutable_epoch)};
+    BOOST_REQUIRE(expected_recovery_tree_id);
+    BOOST_CHECK(revoked.global_key.child_key_commitment.tree_id ==
+                *expected_recovery_tree_id);
+    BOOST_CHECK(revoked.global_key.child_key_commitment.tree_id !=
+                initial.child_key_commitment.tree_id);
+}
+
+BOOST_AUTO_TEST_CASE(child_root_generation_cap_is_lifetime_bound)
+{
+    const uint256 genesis{NonNullHash(30)};
+    const uint256 pro_tx_hash{NonNullHash(31)};
+    const auto initial_view{View(1000)};
+    const auto initial{Candidate(
+        genesis, pro_tx_hash, 1, 1,
+        initial_view.first_mutable_epoch, 30)};
+    auto state{RegisteredState(genesis, pro_tx_hash, initial_view, initial)};
+    state.global_key.child_key_commitment.generation =
+        CHILD_KEY_TREE_MAX_GENERATION - 1;
+    const auto penultimate_tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, CHILD_KEY_TREE_MAX_GENERATION - 1,
+        state.global_key.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(penultimate_tree_id);
+    state.global_key.child_key_commitment.tree_id =
+        *penultimate_tree_id;
+    BOOST_REQUIRE(state.IsStructurallyValid());
+
+    const auto cutoff_view{View(1440)};
+    BOOST_REQUIRE(state.Advance(cutoff_view) == OperatorKeyStateResult::OK);
+    const auto final_root{Candidate(
+        genesis, pro_tx_hash, 2, CHILD_KEY_TREE_MAX_GENERATION,
+        cutoff_view.first_mutable_epoch, 31)};
+    BOOST_REQUIRE(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, final_root, NonNullHash(32),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::OK);
+
+    auto seventeenth{final_root};
+    seventeenth.key_version = 3;
+    seventeenth.public_key[0]++;
+    seventeenth.child_key_commitment.generation =
+        CHILD_KEY_TREE_MAX_GENERATION + 1;
+    seventeenth.child_key_commitment.tree_id = NonNullHash(3'999);
+    seventeenth.child_key_commitment.root = NonNullHash(4'000);
+    BOOST_CHECK(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, seventeenth, NonNullHash(33),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
+
+    auto key_only{state.global_key};
+    key_only.activated_height = 0;
+    ++key_only.key_version;
+    ++key_only.public_key[0];
+    BOOST_REQUIRE(
+        state.ApplyGlobalKeyRotation(
+            cutoff_view, genesis, key_only, NonNullHash(34),
+            DummySignature(), /*check_sigs=*/false) ==
+        OperatorKeyStateResult::OK);
+
+    const auto recovery_initial{Candidate(
+        genesis, pro_tx_hash, 1, 1,
+        cutoff_view.first_mutable_epoch, 34)};
+    auto revoked{RegisteredState(
+        genesis, pro_tx_hash, cutoff_view, recovery_initial)};
+    revoked.global_key.child_key_commitment.generation =
+        CHILD_KEY_TREE_MAX_GENERATION;
+    const auto final_generation_tree_id{GetChildKeyTreeId(
+        genesis, pro_tx_hash, CHILD_KEY_TREE_MAX_GENERATION,
+        revoked.global_key.child_key_commitment.first_epoch)};
+    BOOST_REQUIRE(final_generation_tree_id);
+    revoked.global_key.child_key_commitment.tree_id =
+        *final_generation_tree_id;
+    BOOST_REQUIRE(revoked.IsStructurallyValid());
+    const auto authorization{
+        RevokeAuthorization(pro_tx_hash, recovery_initial.key_version, 35)};
+    BOOST_REQUIRE(
+        revoked.ApplyProviderRevocation(
+            cutoff_view, genesis, authorization, DummySignature(),
+            /*check_sigs=*/false) == OperatorKeyStateResult::OK);
+    const auto recovery_view{View(
+        cutoff_view.block_height + OWNER_RECOVERY_DELAY_BLOCKS)};
+    BOOST_REQUIRE(revoked.Advance(recovery_view) ==
+                  OperatorKeyStateResult::OK);
+    auto exhausted_recovery{recovery_initial};
+    exhausted_recovery.key_version = 2;
+    exhausted_recovery.public_key[0]++;
+    exhausted_recovery.child_key_commitment.generation =
+        CHILD_KEY_TREE_MAX_GENERATION + 1;
+    exhausted_recovery.child_key_commitment.first_epoch =
+        recovery_view.first_mutable_epoch;
+    exhausted_recovery.child_key_commitment.tree_id = NonNullHash(4'001);
+    exhausted_recovery.child_key_commitment.root = NonNullHash(4'002);
+    BOOST_CHECK(
+        revoked.ApplyInitialGlobalKey(
+            recovery_view, genesis, exhausted_recovery, NonNullHash(36),
+            DummySignature(), /*owner_authorization_verified=*/true,
+            /*check_sigs=*/false) ==
+        OperatorKeyStateResult::INVALID_CHILD_ROOT_COMMITMENT);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
