@@ -59,25 +59,6 @@ void CheckStoredEntry(CDBWrapper& db, const NEVMTxRootMap::value_type& entry)
     BOOST_CHECK(roots.nReceiptRoot == entry.second.nReceiptRoot);
 }
 
-class FailingMintWritebackDB : public CNEVMMintedTxDB
-{
-public:
-    using CNEVMMintedTxDB::CNEVMMintedTxDB;
-    std::size_t write_calls{0};
-    std::size_t fail_at{0};
-    bool throw_error{false};
-
-protected:
-    bool WriteCacheBatch(CDBBatch& batch, bool sync) override
-    {
-        if (++write_calls == fail_at) {
-            if (throw_error) throw dbwrapper_error("injected mint writeback failure");
-            return false;
-        }
-        return CNEVMMintedTxDB::WriteCacheBatch(batch, sync);
-    }
-};
-
 template <typename Cache>
 void CheckFailedChunk(const fs::path& path, Cache cache, std::size_t chunk_items,
                       std::size_t failed_chunk, bool throw_error, bool sync)
@@ -182,69 +163,6 @@ BOOST_AUTO_TEST_CASE(empty_cache_does_not_write)
     for (const std::size_t chunk_items : {0U, 1U, 256U}) {
         BOOST_CHECK(nevm_cache_detail::FlushCache(db, mints, chunk_items, true, unexpected_entry, unexpected_writer));
         BOOST_CHECK(nevm_cache_detail::FlushCache(db, roots, chunk_items, false, unexpected_entry, unexpected_writer));
-    }
-}
-
-BOOST_AUTO_TEST_CASE(mint_txids_survive_writeback_and_erase_failures)
-{
-    for (const bool throw_error : {false, true}) {
-        BOOST_TEST_CONTEXT("throw=" << throw_error) {
-            FailingMintWritebackDB db({
-                .path = m_args.GetDataDirBase() / "mint_txid_writeback",
-                .cache_bytes = 1 << 20, .memory_only = true});
-            const NEVMMintTxSet proofs{TestHash(1), TestHash(2), TestHash(3)};
-            const NEVMMintTxIdMap txids{
-                {TestHash(1), TestHash(1001)},
-                {TestHash(2), TestHash(1002)},
-                {TestHash(3), TestHash(1003)}};
-            db.FlushDataToCache(proofs, txids);
-            db.fail_at = 2;
-            db.throw_error = throw_error;
-            if (throw_error) {
-                BOOST_CHECK_THROW(db.FlushCacheToDisk(/*CHUNK_ITEMS=*/1), dbwrapper_error);
-            } else {
-                BOOST_CHECK(!db.FlushCacheToDisk(/*CHUNK_ITEMS=*/1));
-            }
-            std::size_t persisted{0};
-            for (const auto& [proof, expected] : txids) {
-                uint256 actual;
-                BOOST_CHECK(db.ExistsTx(proof));
-                BOOST_REQUIRE(db.ReadMintTx(proof, actual));
-                BOOST_CHECK(actual == expected);
-                persisted += db.Exists(proof);
-            }
-            BOOST_CHECK_EQUAL(persisted, 1U);
-            db.fail_at = 0;
-            BOOST_REQUIRE(db.FlushCacheToDisk(/*CHUNK_ITEMS=*/1));
-
-            const uint256 erased{TestHash(1)};
-            db.fail_at = db.write_calls + 1;
-            if (throw_error) {
-                BOOST_CHECK_THROW(db.FlushErase({erased}), dbwrapper_error);
-            } else {
-                BOOST_CHECK(!db.FlushErase({erased}));
-            }
-            BOOST_REQUIRE(db.Exists(erased));
-            BOOST_CHECK(!db.ExistsTx(erased));
-            uint256 actual;
-            BOOST_CHECK(!db.ReadMintTx(erased, actual));
-            for (const auto& [proof, expected] : txids) {
-                if (proof == erased) continue;
-                BOOST_CHECK(db.ExistsTx(proof));
-                BOOST_REQUIRE(db.ReadMintTx(proof, actual));
-                BOOST_CHECK(actual == expected);
-            }
-            db.fail_at = 0;
-            BOOST_REQUIRE(db.FlushCacheToDisk());
-            BOOST_CHECK(!db.Exists(erased));
-            const uint256 replacement{TestHash(2001)};
-            db.FlushDataToCache({erased}, {{erased, replacement}});
-            BOOST_REQUIRE(db.ReadMintTx(erased, actual));
-            BOOST_CHECK(actual == replacement);
-            BOOST_REQUIRE(db.FlushCacheToDisk());
-            BOOST_REQUIRE(db.ReadMintTx(erased, actual));
-            BOOST_CHECK(actual == replacement);
-        }
     }
 }
 

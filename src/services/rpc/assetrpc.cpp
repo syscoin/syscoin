@@ -206,15 +206,15 @@ static RPCHelpMan syscoingettxroots()
 static RPCHelpMan syscoincheckmint()
 {
     return RPCHelpMan{"syscoincheckmint",
-    "\nGet the Syscoin mint transaction by looking up using NEVM tx hash (This is no the txid, it is the sha3 of the transaction bytes value).\n"
-    "Legacy replay-only records require -reindex to rebuild their transaction ID lookup.\n",
+    "\nCheck whether an NEVM transaction hash has already been used to mint on Syscoin.\n"
+    "The lookup uses the NEVM mint proof hash, not the Syscoin transaction ID.\n",
     {
         {"nevm_txhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "NEVM Tx Hash used to burn funds to move to Syscoin."}
     },
     RPCResult{
         RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            {RPCResult::Type::BOOL, "minted", "Whether this NEVM transaction hash has already been minted"},
         }},
     RPCExamples{
         HelpExampleCli("syscoincheckmint", "d8ac75c7b4084c85a89d6e28219ff162661efb8b794d4b66e6e9ea52b4139b10")
@@ -226,15 +226,11 @@ static RPCHelpMan syscoincheckmint()
     strTxHash = RemovePrefix(strTxHash, "0x");  // strip 0x
     const uint256 nevmTxHash{uint256S(strTxHash)};
     LOCK(cs_main);
-    uint256 sysTxid;
-    if(!pnevmtxmintdb || !pnevmtxmintdb->ReadMintTx(nevmTxHash, sysTxid)){
-       if (pnevmtxmintdb && pnevmtxmintdb->ExistsTx(nevmTxHash)) {
-           throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Mint exists but its Syscoin transaction ID was not recorded; use -reindex to rebuild the lookup");
-       }
-       throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Could not read Syscoin txid using mint transaction hash");
+    if (!pnevmtxmintdb) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "NEVM mint database is not available");
     }
     UniValue output(UniValue::VOBJ);
-    output.pushKV("txid", sysTxid.GetHex());
+    output.pushKV("minted", pnevmtxmintdb->ExistsTx(nevmTxHash));
     return output;
 },
     };

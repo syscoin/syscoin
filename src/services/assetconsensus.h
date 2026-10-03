@@ -143,8 +143,7 @@ public:
 };
 
 class CNEVMMintedTxDB : public CDBWrapper {
-    // Replay authorization still uses key existence; the optional value serves RPC lookup only.
-    std::unordered_map<uint256, std::optional<uint256>, SaltedTxidHasher> mapCache;
+    NEVMMintTxSet mapCache;
     mutable Mutex cs_cache; // Mutex to protect cache operations (non-recursive for better performance)
     NEVMMintTxSet m_pending_erases GUARDED_BY(cs_cache);
     void StageErase(const NEVMMintTxSet& tx_hashes) EXCLUSIVE_LOCKS_REQUIRED(cs_cache);
@@ -159,8 +158,7 @@ public:
     void EraseCache(const NEVMMintTxSet& tx_hashes) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushErase(const NEVMMintTxSet &setMintTxs) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool FlushCacheToDisk(std::size_t CHUNK_ITEMS = 256, bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
-    void FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots, const NEVMMintTxIdMap& txids = {}) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
-    bool ReadMintTx(const uint256& nTxHash, uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
+    void FlushDataToCache(const NEVMMintTxSet &mapNEVMTxRoots) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
     bool ExistsTx(const uint256& nTxHash) EXCLUSIVE_LOCKS_REQUIRED(!cs_cache);
 };
 // SYSCOIN END: Retain uncommitted cache deletions until their write succeeds.
