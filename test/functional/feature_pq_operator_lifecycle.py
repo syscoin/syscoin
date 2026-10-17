@@ -161,6 +161,8 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         assert "publicKey" not in absent
         assert "keyVersion" not in absent
         assert_raises_rpc_error(-8, "no active global key", node.protx_operator_key_info, protx_hash)
+        assert_raises_rpc_error(-8, "not found at the active tip", node.protx_operator_key_info,
+                                "ff" * 32, True)
         return {
             "protx_hash": protx_hash,
             "funds_address": funds_address,
@@ -447,6 +449,21 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         for field in ("publicKey", "keyVersion", "recordVersion", "profile",
                       "activatedHeight", "childKeyCommitment"):
             assert_equal(inactive[field], retained[field])
+
+        # Once collateral is spent, the deterministic node and its key state
+        # are removed. Recovery metadata must not turn that stale identity into
+        # a registered node with an absent key.
+        info = node.protx_info(masternode["protx_hash"])
+        collateral = {"txid": info["collateralHash"], "vout": info["collateralIndex"]}
+        coin = node.gettxout(collateral["txid"], collateral["vout"])
+        spend = node.createrawtransaction([collateral],
+                                         {node.getnewaddress(): coin["value"] - Decimal("0.001")})
+        signed = node.signrawtransactionwithwallet(spend)
+        assert_equal(signed["complete"], True)
+        node.sendrawtransaction(signed["hex"])
+        mineAuxpowBlock(node, None)
+        assert_raises_rpc_error(-8, "not found at the active tip", node.protx_operator_key_info,
+                                masternode["protx_hash"], True)
 
 
 if __name__ == "__main__":

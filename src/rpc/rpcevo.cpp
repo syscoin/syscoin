@@ -300,6 +300,11 @@ static RPCHelpMan protx_operator_key_info()
                 }
                 height = tip->nHeight;
                 block_hash = tip->GetBlockHash();
+                const auto mn_list = deterministicMNManager->GetListForBlock(tip);
+                if (!mn_list.GetMN(pro_tx_hash)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "Masternode not found at the active tip");
+                }
                 std::string error;
                 if (!deterministicMNManager->GetPQRegistryReadView(
                         tip, snapshot, error)) {
