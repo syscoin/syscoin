@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
+#include <flatdatabase.h>
 #include <test/util/setup_common.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
@@ -11,6 +12,16 @@
 #include <fstream>
 #include <ios>
 #include <string>
+
+namespace {
+struct FlatFileData {
+    uint32_t value{0};
+
+    SERIALIZE_METHODS(FlatFileData, obj) { READWRITE(obj.value); }
+    void Clear() { value = 0; }
+    std::string ToString() const { return std::to_string(value); }
+};
+} // namespace
 
 BOOST_FIXTURE_TEST_SUITE(fs_tests, BasicTestingSetup)
 
@@ -100,6 +111,32 @@ BOOST_AUTO_TEST_CASE(fsbridge_fstream)
         BOOST_CHECK_EQUAL(tmpfile1, fsbridge::AbsPathJoin(tmpfile1, ""));
         BOOST_CHECK_EQUAL(tmpfile1, fsbridge::AbsPathJoin(tmpfile1, {}));
     }
+}
+
+BOOST_AUTO_TEST_CASE(flatdb_unicode_roundtrip)
+{
+    const std::string filename{"flatdb_tests_₿_🏃.dat"};
+    const fs::path file{gArgs.GetDataDirNet() / fs::u8path(filename)};
+    fs::create_directories(file.parent_path());
+    FlatFileData original;
+    original.value = 42;
+    CFlatDB<FlatFileData> db(filename, "flatdb-unicode-test");
+    BOOST_REQUIRE(db.Store(original));
+    BOOST_REQUIRE(fs::exists(file));
+    FlatFileData restored;
+    BOOST_REQUIRE(db.Load(restored));
+    BOOST_CHECK_EQUAL(restored.value, original.value);
+}
+
+BOOST_AUTO_TEST_CASE(flatdb_reports_write_failure)
+{
+    const std::string filename{"flatdb-missing-directory/test.dat"};
+    BOOST_REQUIRE(!fs::exists(gArgs.GetDataDirNet() / "flatdb-missing-directory"));
+    FlatFileData original;
+    original.value = 42;
+    CFlatDB<FlatFileData> db(filename, "flatdb-write-failure-test");
+    // A missing input file is recoverable, but an unwritable output is not.
+    BOOST_CHECK(!db.Store(original));
 }
 
 BOOST_AUTO_TEST_CASE(rename)

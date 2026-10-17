@@ -51,7 +51,7 @@ private:
         ssObj << hash;
 
         // open output file, and associate with CAutoFile
-        FILE *file = fopen(pathDB.u8string().c_str(), "wb");
+        FILE *file = fsbridge::fopen(pathDB, "wb");
         CAutoFile fileout(file, CLIENT_VERSION);
         if (fileout.IsNull())
             return error("%s: Failed to open file %s", __func__, pathDB.u8string());
@@ -77,7 +77,7 @@ private:
 
         int64_t nStart = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
         // open input file, and associate with CAutoFile
-        FILE *file = fopen(pathDB.u8string().c_str(), "rb");
+        FILE *file = fsbridge::fopen(pathDB, "rb");
         CAutoFile filein(file, CLIENT_VERSION);
         if (filein.IsNull())
         {
@@ -200,7 +200,7 @@ public:
         int64_t nStart = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
 
         LogPrintf("Writing info to %s...\n", strFilename);
-        CoreWrite(objToSave);
+        if (!CoreWrite(objToSave)) return false;
         LogPrintf("%s dump finished  %dms\n", strFilename, TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()) - nStart);
 
         return true;

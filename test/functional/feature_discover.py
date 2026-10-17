@@ -19,6 +19,11 @@ def is_valid_ipv4_address(address):
 
 
 def is_valid_ipv6_address(address):
+    # getnetworkinfo retains interface scopes for link-local IPv6 addresses.
+    # inet_pton only accepts the address bytes, not the optional zone suffix.
+    address, separator, scope = address.partition('%')
+    if separator and (not scope or '%' in scope):
+        return False
     try:
         socket.inet_pton(socket.AF_INET6, address)
     except socket.error:
