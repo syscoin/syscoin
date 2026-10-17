@@ -90,6 +90,11 @@ class PruneTest(SyscoinTestFramework):
         ]
         self.rpc_timeout = 120
 
+    def pruning_args(self, node_number, *overrides):
+        # A pruning transition must not change the chain's activation rules.
+        # Put overrides last so options such as -prune can change safely.
+        return self.extra_args[node_number] + list(overrides)
+
     def setup_network(self):
         self.setup_nodes()
 
@@ -122,23 +127,23 @@ class PruneTest(SyscoinTestFramework):
         self.stop_node(0)
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune cannot be configured with a negative value.',
-            extra_args=['-prune=-1'],
+            extra_args=self.pruning_args(0, '-prune=-1'),
         )
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune configured below the minimum of 550 MiB.  Please use a higher number.',
-            extra_args=['-prune=549'],
+            extra_args=self.pruning_args(0, '-prune=549'),
         )
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune mode is incompatible with -txindex.',
-            extra_args=['-prune=550', '-txindex'],
+            extra_args=self.pruning_args(0, '-prune=550', '-txindex'),
         )
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune mode is incompatible with -reindex-chainstate. Use full -reindex instead.',
-            extra_args=['-prune=550', '-reindex-chainstate'],
+            extra_args=self.pruning_args(0, '-prune=550', '-reindex-chainstate'),
         )
 
     def test_rescan_blockchain(self):
-        self.restart_node(0, ["-prune=550"])
+        self.restart_node(0, self.pruning_args(0, "-prune=550"))
         assert_raises_rpc_error(-1, "Can't rescan beyond pruned data. Use RPC call getblockchaininfo to determine your pruned height.", self.nodes[0].rescanblockchain)
 
     def test_height_min(self):
@@ -277,7 +282,7 @@ class PruneTest(SyscoinTestFramework):
         assert_raises_rpc_error(-1, "Cannot prune blocks because node is not in prune mode", node.pruneblockchain, 500)
 
         # now re-start in manual pruning mode
-        self.restart_node(node_number, extra_args=["-prune=1"])
+        self.restart_node(node_number, extra_args=self.pruning_args(node_number, "-prune=1"))
         node = self.nodes[node_number]
         assert_equal(node.getblockcount(), 995)
 
@@ -346,14 +351,14 @@ class PruneTest(SyscoinTestFramework):
         assert not has_block(3), "blk00003.dat is still there, should be pruned by now"
 
         # stop node, start back up with auto-prune at 550 MiB, make sure still runs
-        self.restart_node(node_number, extra_args=["-prune=550"])
+        self.restart_node(node_number, extra_args=self.pruning_args(node_number, "-prune=550"))
 
         self.log.info("Success")
 
     def wallet_test(self):
         # check that the pruning node's wallet is still in good shape
         self.log.info("Stop and start pruning node to trigger wallet rescan")
-        self.restart_node(2, extra_args=["-prune=550"])
+        self.restart_node(2, extra_args=self.pruning_args(2, "-prune=550"))
         self.log.info("Success")
 
         # check that wallet loads successfully when restarting a pruned node after IBD.
@@ -362,7 +367,7 @@ class PruneTest(SyscoinTestFramework):
         self.connect_nodes(0, 5)
         nds = [self.nodes[0], self.nodes[5]]
         self.sync_blocks(nds, wait=5, timeout=300)
-        self.restart_node(5, extra_args=["-prune=550", "-blockfilterindex=1"]) # restart to trigger rescan
+        self.restart_node(5, extra_args=self.pruning_args(5, "-prune=550", "-blockfilterindex=1")) # restart to trigger rescan
         self.log.info("Success")
 
     def run_test(self):
