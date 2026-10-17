@@ -46,27 +46,11 @@ jobs:
           fetch-depth: ${{ env.FETCH_DEPTH }}
       - name: Determine commit range
         run: |
-          # Checkout HEAD~ and find the test base commit
-          # Checkout HEAD~ because it would be wasteful to rerun tests on the PR
-          # head commit that are already run by other jobs.
-          git checkout HEAD~
-          # Figure out test base commit by listing ancestors of HEAD, excluding
-          # ancestors of the most recent merge commit, limiting the list to the
-          # newest MAX_COUNT ancestors, ordering it from oldest to newest, and
-          # taking the first one.
-          #
-          # If the branch contains up to MAX_COUNT ancestor commits after the
-          # most recent merge commit, all of those commits will be tested. If it
-          # contains more, only the most recent MAX_COUNT commits will be
-          # tested.
-          #
-          # In the command below, the ^@ suffix is used to refer to all parents
-          # of the merge commit as described in:
-          # https://git-scm.com/docs/git-rev-parse#_other_rev_parent_shorthand_notations
-          # and the ^ prefix is used to exclude these parents and all their
-          # ancestors from the rev-list output as described in:
-          # https://git-scm.com/docs/git-rev-list
-          echo "TEST_BASE=$(git rev-list -n$((${{ env.MAX_COUNT }} + 1)) --reverse HEAD ^$(git rev-list -n1 --merges HEAD)^@ | head -1)" >> "$GITHUB_ENV"
+          bash ci/test/test_each_commit_range_test.sh
+          bash ci/test/test_each_commit_range.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "$MAX_COUNT" > "$RUNNER_TEMP/test-each-commits"
       - run: |
           # SYSCOIN: Chrome is unused here; its runner-provided APT source can
           # have mismatched indexes. Remove both legacy and deb822 sources.
@@ -78,7 +62,14 @@ jobs:
         run: |
           # SYSCOIN: Historical source cannot inherit the optional-height fix;
           # validate every selected commit with the unaffected GCC compiler.
-          git rebase --exec "echo Running test-one-commit on \$( git log -1 ) && ./autogen.sh && CC=gcc-13 CXX=g++-13 ./configure && make clean && make -j $(nproc) check" ${{ env.TEST_BASE }}
+          while read -r commit; do
+            git checkout --detach "$commit"
+            git log -1 --oneline
+            ./autogen.sh
+            CC=gcc-13 CXX=g++-13 ./configure
+            make clean
+            make -j $(nproc) check
+          done < "$RUNNER_TEMP/test-each-commits"
           # SYSCOIN: Full-depth PQ setup makes six concurrent historical
           # functional matrices oversubscribe the runner, while old snapshots
           # cannot inherit later test-harness fixes. Preserve per-commit

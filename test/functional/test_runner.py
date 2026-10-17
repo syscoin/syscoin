@@ -250,6 +250,7 @@ BASE_SCRIPTS = [
     'feature_posix_fs_permissions.py',
     'rpc_decodescript.py',
     'rpc_blockchain.py',
+    'rpc_protx_capabilities.py',
     'rpc_blockchain.py --v2transport',
     'rpc_deprecated.py',
     'wallet_disable.py',
