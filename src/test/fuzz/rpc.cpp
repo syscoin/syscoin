@@ -130,6 +130,7 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
     "masternode_winners",
     "mnauth",
     "mnsync",
+    "protx_capabilities",
     "protx_info",
     "protx_info_wallet",
     "protx_list",
