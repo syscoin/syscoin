@@ -12,7 +12,9 @@ from decimal import Decimal
 class SyscoinGovernanceTest (DashTestFramework):
     def set_test_params(self):
         # using adjusted v20 deployment params to test an edge case where superblock maturity window is equal to deployment window size
-        self.set_dash_test_params(6, 5, fast_dip3_enforcement=True)
+        # The controller is not a masternode: disable its randomized privacy
+        # trickle for local test peers, while still waiting for actual relay.
+        self.set_dash_test_params(6, 5, [["-whitelist=noban@127.0.0.1"], [], [], [], [], []], fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -94,6 +96,14 @@ class SyscoinGovernanceTest (DashTestFramework):
                     count = count + 1
                     break
         return count == len(self.nodes)
+
+    def wait_for_trigger_convergence(self, expected_trigger_hashes):
+        def all_triggers_synced():
+            self._throttled_bump_mocktime("feature_governance_all_trigger_sync", step=1)
+            return all(set(node.gobject_list("valid", "triggers")) == expected_trigger_hashes
+                       for node in self.nodes)
+
+        self.wait_until(all_triggers_synced, timeout=5)
 
     def wait_for_trigger(self, sb_block_height, timeout=10):
         def check_for_trigger():
@@ -342,9 +352,11 @@ class SyscoinGovernanceTest (DashTestFramework):
             node.mnsync("next")
             self.wait_until(lambda: sync_gov(node), timeout=180)
 
-        # Should see two triggers now
-        self.wait_until(lambda: sync_gobject_list_trigger(isolated, 2), timeout=5)
-        self.wait_until(lambda: sync_gobject_list_trigger(self.nodes[0], 2), timeout=5)
+        # Every voter must have both triggers before advancing the block that
+        # makes it vote NO on the other trigger. Seeing them only on the
+        # controller and isolated node does not establish relay convergence.
+        expected_trigger_hashes = {isolated_trigger_hash, winning_trigger_hash}
+        self.wait_for_trigger_convergence(expected_trigger_hashes)
         more_triggers = wait_until_helper_internal(lambda: len(self.nodes[0].gobject_list("valid", "triggers")) > 2, timeout=5, do_assert=False)
         assert_equal(more_triggers, False)
 
