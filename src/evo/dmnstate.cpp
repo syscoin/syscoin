@@ -37,6 +37,7 @@ void CDeterministicMNState::ToJson(UniValue& obj) const
     obj.pushKV("version", nVersion);
     obj.pushKV("service", addr.ToStringAddrPort());
     obj.pushKV("registeredHeight", nRegisteredHeight);
+    obj.pushKV("confirmedHash", confirmedHash.GetHex());
     obj.pushKV("lastPaidHeight", nLastPaidHeight);
     obj.pushKV("collateralHeight", nCollateralHeight);
     obj.pushKV("PoSePenalty", nPoSePenalty);

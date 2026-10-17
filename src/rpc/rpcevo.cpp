@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/validation.h>
+#include <common/args.h>
+#include <chainparams.h>
 #include <core_io.h>
 #include <init.h>
 #include <rpc/server.h>
@@ -20,6 +22,59 @@
 #include <rpc/server_util.h>
 #include <llmq/quorums_utils.h>
 #include <index/txindex.h>
+static RPCHelpMan protx_capabilities()
+{
+    return RPCHelpMan{
+        "protx_capabilities",
+        "\nReturns public signing rules for the next block and the active-tip identity. No wallet or private keys are accessed.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "Versioned Sentry signing capabilities.",
+            {{RPCResult::Type::NUM, "version", "Response schema version"},
+             {RPCResult::Type::STR_HEX, "genesisHash", "Network genesis hash"},
+             {RPCResult::Type::STR, "network", "Core network name"},
+             {RPCResult::Type::NUM, "height", "Active tip height"},
+             {RPCResult::Type::STR_HEX, "blockHash", "Active tip hash"},
+             {RPCResult::Type::NUM, "nextBlockHeight", "Height for signing rules"},
+             {RPCResult::Type::STR, "era", "legacy-v1, legacy-v3, or pq-v4"},
+             {RPCResult::Type::NUM, "servicePayloadVersion", "Service payload version"},
+             {RPCResult::Type::STR, "requiredCollateralSatoshis", "Required node collateral in atomic units"},
+             {RPCResult::Type::ANY, "preparationHeight", "PQ preparation height or null"},
+             {RPCResult::Type::ANY, "activationHeight", "PQ activation height or null"},
+             {RPCResult::Type::BOOL, "preparationActive", "PQ preparation is active for the next block"},
+             {RPCResult::Type::BOOL, "pqActive", "PQ rules are active for the next block"}}},
+        RPCExamples{HelpExampleCli("protx_capabilities", "")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto& node = EnsureAnyNodeContext(request.context);
+            LOCK(cs_main);
+            const auto* tip = node.chainman->ActiveChain().Tip();
+            if (tip == nullptr) throw JSONRPCError(RPC_INTERNAL_ERROR, "Active chain tip is unavailable");
+            const int64_t next_height = int64_t{tip->nHeight} + 1;
+            const auto& params = node.chainman->GetParams();
+            bool pq_active{false};
+            bool preparation_active{false};
+            UniValue preparation_height;
+            UniValue activation_height;
+
+            const uint16_t payload_version = pq_active ? 4 :
+                (llmq::CLLMQUtils::IsV19Active(tip->nHeight) ? 3 : 1);
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("version", 1);
+            result.pushKV("genesisHash", params.GetConsensus().hashGenesisBlock.GetHex());
+            result.pushKV("network", params.GetChainTypeString());
+            result.pushKV("height", tip->nHeight);
+            result.pushKV("blockHash", tip->GetBlockHash().GetHex());
+            result.pushKV("nextBlockHeight", next_height);
+            result.pushKV("era", pq_active ? "pq-v4" : (payload_version == 3 ? "legacy-v3" : "legacy-v1"));
+            result.pushKV("servicePayloadVersion", payload_version);
+            result.pushKV("requiredCollateralSatoshis", std::to_string(nMNCollateralRequired));
+            result.pushKV("preparationHeight", preparation_height);
+            result.pushKV("activationHeight", activation_height);
+            result.pushKV("preparationActive", preparation_active);
+            result.pushKV("pqActive", pq_active);
+            return result;
+        }};
+}
+
 UniValue BuildDMNListEntry(const node::NodeContext& node, const CDeterministicMN& dmn, bool detailed)
 {
     if (!detailed) {
@@ -207,6 +262,7 @@ void RegisterEvoRPCCommands(CRPCTable &t)
         {"evo", &bls_fromsecret},
         {"evo", &protx_list},
         {"evo", &protx_info},
+        {"evo", &protx_capabilities},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);
