@@ -50,3 +50,26 @@ merged=$(git -C "$source_repo" rev-parse HEAD)
 expected=$(git -C "$source_repo" rev-list --topo-order --reverse --max-count=6 "$merged^@" "^$base" --)
 check merged "$merged" 6 "$expected"
 
+# Deterministic fetch-budget boundary: the missing merge base appears only
+# after the eighth deepen. Export a shell function instead of creating a large
+# history or reaching a network remote.
+(
+  git() {
+    case "$1" in
+      cat-file) return 0 ;;
+      merge-base) [[ "$RANGE_TEST_FETCHES" -ge 8 ]] ;;
+      rev-parse)
+        if [[ "$2" == --git-path ]]; then printf '/dev/null\n';
+        else printf 'true\n'; fi ;;
+      fetch) RANGE_TEST_FETCHES=$((RANGE_TEST_FETCHES + 1)) ;;
+      rev-list) printf '%040d\n' 2 ;;
+      *) echo "Unexpected fake git command: $*" >&2; return 1 ;;
+    esac
+  }
+  export -f git
+  export RANGE_TEST_FETCHES=0
+  actual=$(bash "$script" "$(printf '%040d' 1)" "$(printf '%040d' 3)" 6)
+  [[ "$actual" == "$(printf '%040d' 2)" ]]
+  printf 'last-budgeted-fetch: passed\n'
+)
+

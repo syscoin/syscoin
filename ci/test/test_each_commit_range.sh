@@ -18,7 +18,7 @@ depth=32
 if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
   git fetch --no-tags --depth="$depth" origin "$base" "$head" >&2
 fi
-for attempt in 1 2 3 4 5 6 7 8; do
+for attempt in 1 2 3 4 5 6 7 8 9; do
   incomplete=false
   git merge-base "$base" "$head" >/dev/null || incomplete=true
   shallow_file=$(git rev-parse --git-path shallow)
@@ -34,6 +34,9 @@ for attempt in 1 2 3 4 5 6 7 8; do
     echo "Base and head do not have a common ancestor" >&2
     exit 1
   fi
+  # The ninth check observes the eighth (last budgeted) fetch. Never fetch
+  # history that the loop will not inspect.
+  if [[ "$attempt" -eq 9 ]]; then break; fi
   git fetch --no-tags --deepen="$depth" origin "$base" "$head" >&2
   depth=$((depth * 2))
 done
