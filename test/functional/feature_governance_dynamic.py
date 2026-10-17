@@ -22,7 +22,9 @@ PROPOSAL_END_EPOCH = 60
 class SyscoinGovernanceTest(DashTestFramework):
     def set_test_params(self):
         # Using adjusted v20 deployment params to test an edge case where superblock maturity window is equal to deployment window size
-        self.set_dash_test_params(6, 5, fast_dip3_enforcement=True)
+        # The controller is not a masternode: disable its randomized privacy
+        # trickle for local test peers, while still waiting for actual relay.
+        self.set_dash_test_params(6, 5, [["-whitelist=noban@127.0.0.1"], [], [], [], [], []], fast_dip3_enforcement=True)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -313,6 +315,15 @@ class SyscoinGovernanceTest(DashTestFramework):
         self.sync_gobject_list(len(proposal_hashes))  # Ensure all nodes have the proposals
         for proposal_hash in proposal_hashes:
             self.nodes[0].gobject_vote_many(proposal_hash, map_vote_signals[1], map_vote_outcomes[1])
+
+        # Voting through the controller only queues relay to the masternodes.
+        # Do not enter the trigger window until every voter has the same votes.
+        def all_votes_synced():
+            self._throttled_bump_mocktime("feature_governance_dynamic_vote_sync", step=1)
+            return all(node.gobject_get(proposal_hash)["FundingResult"]["YesCount"] == self.mn_count
+                       for node in self.nodes for proposal_hash in proposal_hashes)
+
+        self.wait_until(all_votes_synced, timeout=10)
 
     def sync_gobject_list(self, expected_count=4):
         # Ensures that each node has processed all governance objects

@@ -75,6 +75,7 @@ TEST_FRAMEWORK_MODULES = [
     "address",
     "blocktools",
     "ellswift",
+    "governance_sync",
     "key",
     "messages",
     "muhash",
