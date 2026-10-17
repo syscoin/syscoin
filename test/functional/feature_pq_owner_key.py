@@ -257,7 +257,13 @@ class PQOwnerKeyTest(PQOperatorLifecycleTest):
         assert_equal(updated["pqOwnerKeyVersion"], 1)
         assert_equal(updated["pqVotingPublicKey"], voting_public)
         assert_equal(updated["payoutAddress"], payout_address)
-        assert_equal(node.protx_operator_key_info(legacy_mn["protx_hash"]), operator_before)
+        # Readback includes the tip used for its registry snapshot. Updating an
+        # unrelated owner/voting field must not mutate the operator record.
+        operator_after = node.protx_operator_key_info(legacy_mn["protx_hash"])
+        for context_field in ("height", "blockHash"):
+            operator_before.pop(context_field, None)
+            operator_after.pop(context_field, None)
+        assert_equal(operator_after, operator_before)
         self.assert_key_association(self.customer, voting_public, "voting", legacy_mn, 2)
         old_voting = {entry["public_key"]: entry for entry in self.customer.listpqkeys()}[enrolled["pqVotingPublicKey"]]
         assert_equal(old_voting["roles"], ["voting"])

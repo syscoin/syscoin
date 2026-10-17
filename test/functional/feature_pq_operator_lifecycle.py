@@ -11,6 +11,7 @@ from test_framework.test_framework import AuxPoWMiningMixin, SyscoinTestFramewor
 from test_framework.util import (
     Decimal,
     assert_equal,
+    assert_raises_rpc_error,
     force_finish_mnsync,
     get_rpc_proxy,
     p2p_port,
@@ -67,6 +68,19 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         return result
 
     @staticmethod
+    def operator_record_info(info):
+        result = dict(info)
+        result.pop("height", None)
+        result.pop("blockHash", None)
+        return result
+
+    @staticmethod
+    def assert_operator_snapshot(node, info):
+        assert_equal(info["height"], node.getblockcount())
+        assert_equal(info["blockHash"], node.getbestblockhash())
+        assert_equal(info["genesisHash"], node.getblockhash(0))
+
+    @staticmethod
     def assert_payment_audit_clear(info):
         assert_equal(info["paymentAudit"], {
             "consecutiveMisses": 0,
@@ -99,6 +113,10 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         self.ensure_controller_wallet()
         force_finish_mnsync(node)
         assert_equal(node.protx_migration_info(), anchor)
+        capabilities = node.protx_capabilities()
+        assert_equal(capabilities["preparationActive"], True)
+        assert_equal(capabilities["activationHeight"], None)
+        assert_equal(capabilities["pqActive"], False)
         # From this point onward the configured PQ registry can publish exact
         # governance readiness, so exercise the normal fail-closed path.
         node.spork("SPORK_9_SUPERBLOCKS_ENABLED", 0)
@@ -136,6 +154,13 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         ]
         assert_equal(len(listed), 1)
         self.assert_payment_audit_clear(listed[0])
+        absent = node.protx_operator_key_info(protx_hash, True)
+        self.assert_operator_snapshot(node, absent)
+        assert_equal(absent["hasGlobalKey"], False)
+        assert_equal(absent["active"], False)
+        assert "publicKey" not in absent
+        assert "keyVersion" not in absent
+        assert_raises_rpc_error(-8, "no active global key", node.protx_operator_key_info, protx_hash)
         return {
             "protx_hash": protx_hash,
             "funds_address": funds_address,
@@ -253,6 +278,13 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         self.generate(node, 1)
         initial_key = node.protx_operator_key_info(masternode["protx_hash"])
         assert_equal(initial_key["keyVersion"], 1)
+        assert_equal(initial_key["hasGlobalKey"], True)
+        assert_equal(initial_key["active"], True)
+        assert_equal(initial_key["height"], node.getblockcount())
+        assert_equal(initial_key["blockHash"], node.getbestblockhash())
+        assert_equal(initial_key["genesisHash"], node.getblockhash(0))
+        assert_equal(len(initial_key["childKeyCommitment"]), 160)
+        assert_equal(node.protx_operator_key_info(masternode["protx_hash"], True), initial_key)
         return operator_rpc, initial_key
 
     def rotate_operator_on_same_root(self, operator_rpc, masternode,
@@ -313,6 +345,12 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         assert_equal(node.getblockcount(),
                      self.ACTIVATION_PREDECESSOR_HEIGHT)
         assert_equal(node.getbestblockhash(), anchor_hash)
+        capabilities = node.protx_capabilities()
+        assert_equal(capabilities["height"], self.ACTIVATION_PREDECESSOR_HEIGHT)
+        assert_equal(capabilities["nextBlockHeight"], self.ACTIVATION_PREDECESSOR_HEIGHT + 1)
+        assert_equal(capabilities["activationHeight"], self.ACTIVATION_PREDECESSOR_HEIGHT + 1)
+        assert_equal(capabilities["pqActive"], True)
+        assert_equal(capabilities["servicePayloadVersion"], 4)
 
     def update_service(self, masternode):
         node = self.nodes[0]
@@ -328,6 +366,9 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         # BTCC candidate, so its Bitcoin prevhash must come from AuxPoW.
         mineAuxpowBlock(node, None)
         info = node.protx_info(masternode["protx_hash"])
+        capabilities = node.protx_capabilities()
+        assert_equal(capabilities["height"], self.ACTIVATION_PREDECESSOR_HEIGHT + 1)
+        assert_equal(capabilities["pqActive"], True)
         assert_equal(info["state"]["service"], masternode["service"])
         assert_equal(info["state"]["PoSeBanHeight"], -1)
         self.assert_payment_audit_clear(info)
@@ -348,10 +389,10 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
                 node.protx_info(masternode["protx_hash"])),
             expected_info,
         )
-        assert_equal(
-            node.protx_operator_key_info(masternode["protx_hash"]),
-            expected_operator_info,
-        )
+        restarted_operator = node.protx_operator_key_info(masternode["protx_hash"])
+        self.assert_operator_snapshot(node, restarted_operator)
+        assert_equal(self.operator_record_info(restarted_operator),
+                     self.operator_record_info(expected_operator_info))
 
         self.add_nodes(1, offset=1, extra_args=[self.extra_args])
         self.start_node(1)
@@ -364,10 +405,10 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
                 self.nodes[1].protx_info(masternode["protx_hash"])),
             expected_info,
         )
-        assert_equal(
-            self.nodes[1].protx_operator_key_info(masternode["protx_hash"]),
-            expected_operator_info,
-        )
+        replayed_operator = self.nodes[1].protx_operator_key_info(masternode["protx_hash"])
+        self.assert_operator_snapshot(self.nodes[1], replayed_operator)
+        assert_equal(self.operator_record_info(replayed_operator),
+                     self.operator_record_info(expected_operator_info))
         assert_equal(self.nodes[1].protx_migration_info(), expected_migration)
 
     def run_test(self):
@@ -391,6 +432,21 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         expected_info = self.update_service(masternode)
         self.check_restart_and_fresh_replay(
             masternode, expected_info, rotated_key)
+        # Recovery needs the exact retained record after operator revocation.
+        retained = node.protx_operator_key_info(masternode["protx_hash"])
+        node.protx_revoke(masternode["protx_hash"], masternode["operator_key"], 0,
+                          masternode["funds_address"])
+        mineAuxpowBlock(node, None)
+        assert_raises_rpc_error(-8, "no active global key", node.protx_operator_key_info,
+                                masternode["protx_hash"])
+        inactive = node.protx_operator_key_info(masternode["protx_hash"], True)
+        self.assert_operator_snapshot(node, inactive)
+        assert_equal(inactive["hasGlobalKey"], True)
+        assert_equal(inactive["active"], False)
+        assert_equal(inactive["revokedHeight"], node.getblockcount())
+        for field in ("publicKey", "keyVersion", "recordVersion", "profile",
+                      "activatedHeight", "childKeyCommitment"):
+            assert_equal(inactive[field], retained[field])
 
 
 if __name__ == "__main__":

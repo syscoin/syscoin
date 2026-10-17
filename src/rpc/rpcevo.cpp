@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/validation.h>
+#include <consensus/pq_migration_config.h>
+#include <common/args.h>
 #include <chainparams.h>
 #include <core_io.h>
 #include <evo/pq_registry.h>
@@ -19,9 +21,82 @@
 #include <node/context.h>
 #include <rpc/server_util.h>
 #include <index/txindex.h>
+#include <llmq/quorums_utils.h>
+#include <streams.h>
 
 // SYSCOIN: zero-copy PQ registry RPC views.
 #include <span>
+#include <limits>
+
+static RPCHelpMan protx_capabilities()
+{
+    return RPCHelpMan{
+        "protx_capabilities",
+        "\nReturns public signing rules for the next block and the active-tip identity. No wallet or private keys are accessed.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "Versioned Sentry signing capabilities.",
+            {{RPCResult::Type::NUM, "version", "Response schema version"},
+             {RPCResult::Type::STR_HEX, "genesisHash", "Network genesis hash"},
+             {RPCResult::Type::STR, "network", "Core network name"},
+             {RPCResult::Type::NUM, "height", "Active tip height"},
+             {RPCResult::Type::STR_HEX, "blockHash", "Active tip hash"},
+             {RPCResult::Type::NUM, "nextBlockHeight", "Height for signing rules"},
+             {RPCResult::Type::STR, "era", "legacy-v1, legacy-v3, or pq-v4"},
+             {RPCResult::Type::NUM, "servicePayloadVersion", "Service payload version"},
+             {RPCResult::Type::STR, "requiredCollateralSatoshis", "Required node collateral in atomic units"},
+             {RPCResult::Type::ANY, "preparationHeight", "PQ preparation height or null"},
+             {RPCResult::Type::ANY, "activationHeight", "PQ activation height or null"},
+             {RPCResult::Type::BOOL, "preparationActive", "PQ preparation is active for the next block"},
+             {RPCResult::Type::BOOL, "pqActive", "PQ rules are active for the next block"}}},
+        RPCExamples{HelpExampleCli("protx_capabilities", "")},
+        [](const RPCHelpMan&, const node::JSONRPCRequest& request) -> UniValue {
+            const auto& node = EnsureAnyNodeContext(request.context);
+            LOCK(cs_main);
+            const auto* tip = node.chainman->ActiveChain().Tip();
+            if (tip == nullptr) throw JSONRPCError(RPC_INTERNAL_ERROR, "Active chain tip is unavailable");
+            const int64_t next_height = int64_t{tip->nHeight} + 1;
+            if (next_height > std::numeric_limits<int>::max())
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Next block height is outside the consensus range");
+            const auto& params = node.chainman->GetParams();
+            bool pq_active{false};
+            bool preparation_active{false};
+            UniValue preparation_height;
+            UniValue activation_height;
+            const auto activation = Consensus::CheckPQActivationConfiguration(params.GetConsensus());
+            if (activation == Consensus::PQActivationResult::INVALID_CONFIGURATION)
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Invalid PQ activation configuration");
+            if (activation == Consensus::PQActivationResult::VALID) {
+                activation_height.setInt(params.GetConsensus().nPQActivationHeight);
+                pq_active = Consensus::CheckPQLegacyReplay(params.GetConsensus(), static_cast<int>(next_height)) ==
+                    Consensus::PQLegacyReplayResult::RETIRED;
+            }
+            llmq::pq::PQRegistryConfig config;
+            const auto deployment = llmq::pq::GetPQRegistryConfig(params.GetConsensus(), config);
+            if (deployment == llmq::pq::PQRegistryDeploymentResult::INVALID_CONFIGURATION)
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Invalid PQ registry configuration");
+            if (deployment == llmq::pq::PQRegistryDeploymentResult::VALID) {
+                preparation_height.setInt(config.preparation_height);
+                preparation_active = next_height >= config.preparation_height;
+            }
+            const uint16_t payload_version = pq_active ? 4 :
+                (llmq::CLLMQUtils::IsV19Active(tip->nHeight) ? 3 : 1);
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("version", 1);
+            result.pushKV("genesisHash", params.GetConsensus().hashGenesisBlock.GetHex());
+            result.pushKV("network", params.GetChainTypeString());
+            result.pushKV("height", tip->nHeight);
+            result.pushKV("blockHash", tip->GetBlockHash().GetHex());
+            result.pushKV("nextBlockHeight", next_height);
+            result.pushKV("era", pq_active ? "pq-v4" : (payload_version == 3 ? "legacy-v3" : "legacy-v1"));
+            result.pushKV("servicePayloadVersion", payload_version);
+            result.pushKV("requiredCollateralSatoshis", std::to_string(nMNCollateralRequired));
+            result.pushKV("preparationHeight", preparation_height);
+            result.pushKV("activationHeight", activation_height);
+            result.pushKV("preparationActive", preparation_active);
+            result.pushKV("pqActive", pq_active);
+            return result;
+        }};
+}
 
 UniValue BuildDMNListEntry(
     const node::NodeContext& node,
@@ -178,18 +253,31 @@ static RPCHelpMan protx_operator_key_info()
 {
     return RPCHelpMan{
         "protx_operator_key_info",
-        "\nReturns the active post-quantum operator public key and version for a deterministic masternode.\n",
+        "\nReturns public post-quantum operator identity and its exact registry snapshot.\n"
+        "With includeInactive, returns retained revoked records for recovery or an explicit absent-key status.\n",
         {
             {"proTxHash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
              "The hash of the initial ProRegTx."},
+            {"includeInactive", RPCArg::Type::BOOL, RPCArg::Default{false},
+             "Include revoked records or an explicit absent-key status for recovery preparation."},
         },
         RPCResult{
             RPCResult::Type::OBJ,
             "",
-            "Active PQ operator identity.",
+            "PQ operator identity at the returned active-tip snapshot.",
             {
-                {RPCResult::Type::STR_HEX, "publicKey", "32-byte SLH-DSA public key"},
-                {RPCResult::Type::NUM, "keyVersion", "Nonzero global key version"},
+                {RPCResult::Type::STR_HEX, "genesisHash", "Network genesis hash"},
+                {RPCResult::Type::NUM, "height", "Height of the captured registry snapshot"},
+                {RPCResult::Type::STR_HEX, "blockHash", "Block hash of the captured registry snapshot"},
+                {RPCResult::Type::BOOL, "hasGlobalKey", "A retained global key record exists"},
+                {RPCResult::Type::BOOL, "active", "The retained global key is currently active"},
+                {RPCResult::Type::NUM, "revokedHeight", "Revocation height, or zero if not revoked"},
+                {RPCResult::Type::STR_HEX, "publicKey", /*optional=*/true, "32-byte SLH-DSA public key; present only when hasGlobalKey is true"},
+                {RPCResult::Type::NUM, "keyVersion", /*optional=*/true, "Nonzero global key version"},
+                {RPCResult::Type::NUM, "recordVersion", /*optional=*/true, "Global key record serialization version"},
+                {RPCResult::Type::NUM, "profile", /*optional=*/true, "Global signature algorithm profile"},
+                {RPCResult::Type::NUM, "activatedHeight", /*optional=*/true, "Height where this key version activated"},
+                {RPCResult::Type::STR_HEX, "childKeyCommitment", /*optional=*/true, "Exact 80-byte canonical child-key commitment"},
             }},
         RPCExamples{HelpExampleCli("protx_operator_key_info", "<proTxHash>") +
                     HelpExampleRpc("protx_operator_key_info", "\"<proTxHash>\"")},
@@ -201,6 +289,8 @@ static RPCHelpMan protx_operator_key_info()
                 ParseHashV(request.params[0], "proTxHash");
 
             llmq::pq::PQRegistryReadView snapshot;
+            int height{-1};
+            uint256 block_hash;
             {
                 LOCK(cs_main);
                 const CBlockIndex* tip = node.chainman->ActiveChain().Tip();
@@ -208,6 +298,8 @@ static RPCHelpMan protx_operator_key_info()
                     throw JSONRPCError(RPC_INTERNAL_ERROR,
                                        "Active chain tip is unavailable");
                 }
+                height = tip->nHeight;
+                block_hash = tip->GetBlockHash();
                 std::string error;
                 if (!deterministicMNManager->GetPQRegistryReadView(
                         tip, snapshot, error)) {
@@ -218,15 +310,30 @@ static RPCHelpMan protx_operator_key_info()
                 }
             }
             const auto* state = snapshot.FindOperator(pro_tx_hash);
-            if (state == nullptr || !state->HasActiveGlobalKey()) {
+            const bool include_inactive = !request.params[1].isNull() && request.params[1].get_bool();
+            if (!include_inactive && (state == nullptr || !state->HasActiveGlobalKey())) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                                    "Masternode has no active global key");
             }
 
             UniValue result{UniValue::VOBJ};
+            result.pushKV("genesisHash", Params().GetConsensus().hashGenesisBlock.GetHex());
+            result.pushKV("height", height);
+            result.pushKV("blockHash", block_hash.GetHex());
+            const bool has_key = state != nullptr && state->has_global_key != 0;
+            result.pushKV("hasGlobalKey", has_key);
+            result.pushKV("active", state != nullptr && state->HasActiveGlobalKey());
+            result.pushKV("revokedHeight", state != nullptr ? state->revoked_height : 0);
+            if (!has_key) return result;
             result.pushKV("publicKey",
                           HexStr(state->global_key.public_key));
             result.pushKV("keyVersion", state->global_key.key_version);
+            result.pushKV("recordVersion", state->global_key.version);
+            result.pushKV("profile", state->global_key.profile);
+            result.pushKV("activatedHeight", state->global_key.activated_height);
+            CDataStream commitment{SER_NETWORK, PROTOCOL_VERSION};
+            commitment << state->global_key.child_key_commitment;
+            result.pushKV("childKeyCommitment", HexStr(commitment));
             return result;
         }};
 }
@@ -323,6 +430,7 @@ void RegisterEvoRPCCommands(CRPCTable &t)
     static const CRPCCommand commands[]{
         {"evo", &protx_list},
         {"evo", &protx_info},
+        {"evo", &protx_capabilities},
         {"evo", &protx_operator_key_info},
         {"evo", &protx_migration_info},
     };
