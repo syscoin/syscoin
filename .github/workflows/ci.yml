@@ -39,35 +39,29 @@ jobs:
           fetch-depth: ${{ env.FETCH_DEPTH }}
       - name: Determine commit range
         run: |
-          # Checkout HEAD~ and find the test base commit
-          # Checkout HEAD~ because it would be wasteful to rerun tests on the PR
-          # head commit that are already run by other jobs.
-          git checkout HEAD~
-          # Figure out test base commit by listing ancestors of HEAD, excluding
-          # ancestors of the most recent merge commit, limiting the list to the
-          # newest MAX_COUNT ancestors, ordering it from oldest to newest, and
-          # taking the first one.
-          #
-          # If the branch contains up to MAX_COUNT ancestor commits after the
-          # most recent merge commit, all of those commits will be tested. If it
-          # contains more, only the most recent MAX_COUNT commits will be
-          # tested.
-          #
-          # In the command below, the ^@ suffix is used to refer to all parents
-          # of the merge commit as described in:
-          # https://git-scm.com/docs/git-rev-parse#_other_rev_parent_shorthand_notations
-          # and the ^ prefix is used to exclude these parents and all their
-          # ancestors from the rev-list output as described in:
-          # https://git-scm.com/docs/git-rev-list
-          echo "TEST_BASE=$(git rev-list -n$((${{ env.MAX_COUNT }} + 1)) --reverse HEAD ^$(git rev-list -n1 --merges HEAD)^@ | head -1)" >> "$GITHUB_ENV"
+          bash ci/test/test_each_commit_range_test.sh
+          bash ci/test/test_each_commit_range.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "$MAX_COUNT" > "$RUNNER_TEMP/test-each-commits"
       - run: |
           sudo apt-get update
           sudo apt-get install clang ccache build-essential libtool autotools-dev automake pkg-config bsdmainutils python3-zmq libevent-dev libboost-dev libsqlite3-dev libdb++-dev systemtap-sdt-dev libminiupnpc-dev libnatpmp-dev libqt5gui5 libqt5core5a libqt5dbus5 qttools5-dev qttools5-dev-tools qtwayland5 libqrencode-dev -y
       - name: Compile and run tests
         run: |
-          # Run tests on commits after the last merge commit and before the PR head commit
+          # Test original commits in the explicit base/head range, excluding
+          # the final head covered by the other jobs.
           # Use clang++, because it is a bit faster and uses less memory than g++
-          git rebase --exec "echo Running test-one-commit on \$( git log -1 ) && ./autogen.sh && CC=clang CXX=clang++ ./configure && make clean && make -j $(nproc) check && ./test/functional/test_runner.py -j $(( $(nproc) * 2 ))" ${{ env.TEST_BASE }}
+          while read -r commit; do
+            git checkout --detach "$commit"
+            git log -1 --oneline
+            ./autogen.sh
+            CC=clang CXX=clang++ ./configure
+            make clean
+            make -j $(nproc) check
+            ./test/functional/test_runner.py -j $(( $(nproc) * 2 ))
+          done < "$RUNNER_TEMP/test-each-commits"
+          git checkout --detach "${{ github.event.pull_request.head.sha }}"
 
   macos-native-x86_64:
     name: 'macOS 15 native, x86_64, no depends, sqlite only, gui'
