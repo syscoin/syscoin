@@ -12,6 +12,55 @@ from feature_governance_dynamic import SyscoinGovernanceTest as DynamicTest
 
 
 class TestGovernanceSync(unittest.TestCase):
+    def test_superblock_barrier_waits_for_all_votes_not_local_positive_triggers(self):
+        for height in (150, 175):
+            with self.subTest(height=height):
+                self.check_superblock_barrier(height)
+
+    def check_superblock_barrier(self, height):
+        def trigger(height, yes, no):
+            return {
+                "DataString": '{"event_block_height": %d}' % height,
+                "YesCount": yes,
+                "NoCount": no,
+                "AbstainCount": 0,
+                "AbsoluteYesCount": yes - no,
+            }
+
+        # Each node initially sees its own trigger as passing. A relayed NO
+        # can remove that support before the winning trigger's YES arrives.
+        snapshots = [
+            {"winning": trigger(height, 4, 1), "losing": trigger(height, 1, 4)},
+            {"winning": trigger(height, 1, 0), "losing": trigger(height, 0, 0)},
+            {"losing": trigger(height, 1, 0)},
+        ]
+        case = object.__new__(TriggerTest)
+        case.mn_count = 5
+        case.nodes = [SimpleNamespace(gobject_list=lambda *_, i=i: snapshots[i])
+                      for i in range(len(snapshots))]
+        self.assertFalse(case.have_trigger_for_height(height),
+                         "local positive votes do not establish shared funding")
+
+        snapshots[2] = dict(snapshots[0])
+        snapshots[1] = {
+            "winning": trigger(height, 4, 0),
+            "losing": trigger(height, 1, 4),
+        }
+        self.assertFalse(case.have_trigger_for_height(height),
+                         "the last voter's relay must complete before mining")
+
+        snapshots[1] = dict(snapshots[0])
+        self.assertTrue(case.have_trigger_for_height(height))
+        self.assertFalse(case.have_trigger_for_height(height + 25),
+                         "older triggers cannot satisfy the next cycle's barrier")
+
+        snapshots[2] = {
+            "other": trigger(height, 4, 1),
+            "losing": trigger(height, 1, 4),
+        }
+        self.assertFalse(case.have_trigger_for_height(height),
+                         "matching counts on different triggers are not convergence")
+
     def test_trigger_barrier_checks_every_voter_and_exact_hashes(self):
         expected = {"isolated", "winning"}
         late_hashes = {"other", "winning"}
