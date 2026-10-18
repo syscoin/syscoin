@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <random.h>
+#include <scheduler.h>
 
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
@@ -12,12 +13,31 @@
 
 #include <algorithm>
 #include <random>
+#include <thread>
 
 BOOST_FIXTURE_TEST_SUITE(random_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(osrandom_tests)
 {
     BOOST_CHECK(Random_SanityCheck());
+}
+
+BOOST_AUTO_TEST_CASE(periodic_entropy_scheduler)
+{
+    // Exercise periodic entropy on the same scheduler as validation callbacks,
+    // including after the former Windows performance-provider sampling interval.
+    for (int i = 0; i < 2; ++i) {
+        SetMockTime(GetTime<std::chrono::seconds>() + 11min);
+        CScheduler scheduler;
+        bool callback_ran{false};
+        scheduler.scheduleFromNow(RandAddPeriodic, 0ms);
+        scheduler.scheduleFromNow([&callback_ran] { callback_ran = true; }, 0ms);
+        std::thread thread([&scheduler] { scheduler.serviceQueue(); });
+        scheduler.StopWhenDrained();
+        thread.join();
+        BOOST_CHECK(callback_ran);
+        BOOST_CHECK(Random_SanityCheck());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(fastrandom_tests)

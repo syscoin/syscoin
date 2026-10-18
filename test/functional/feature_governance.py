@@ -86,16 +86,24 @@ class SyscoinGovernanceTest (DashTestFramework):
         assert_equal(payments_found, 1 + p1p2_found)
 
     def have_trigger_for_height(self, sb_block_height):
-        count = 0
+        expected_votes = None
         for node in self.nodes:
             valid_triggers = node.gobject_list("valid", "triggers")
-            for trigger in list(valid_triggers.values()):
-                if json.loads(trigger["DataString"])["event_block_height"] != sb_block_height:
-                    continue
-                if trigger['AbsoluteYesCount'] > 0:
-                    count = count + 1
-                    break
-        return count == len(self.nodes)
+            votes = {
+                trigger_hash: (trigger["YesCount"], trigger["NoCount"], trigger["AbstainCount"])
+                for trigger_hash, trigger in valid_triggers.items()
+                if json.loads(trigger["DataString"])["event_block_height"] == sb_block_height
+            }
+            # A local YES is not a relay barrier: an in-flight NO may cancel
+            # it before the other trigger's YES arrives. Finish every voter's
+            # decision on every trigger before mining the superblock.
+            if not votes or any(sum(counts) != self.mn_count for counts in votes.values()):
+                return False
+            if expected_votes is None:
+                expected_votes = votes
+            elif votes != expected_votes:
+                return False
+        return expected_votes is not None and any(yes > no for yes, no, _ in expected_votes.values())
 
     def wait_for_trigger_convergence(self, expected_trigger_hashes):
         def all_triggers_synced():
@@ -107,6 +115,7 @@ class SyscoinGovernanceTest (DashTestFramework):
 
     def wait_for_trigger(self, sb_block_height, timeout=10):
         def check_for_trigger():
+            self._throttled_bump_mocktime("feature_governance_funding_sync", step=1)
             if((self.nodes[0].getblockcount()+1) >= sb_block_height):
                 return self.have_trigger_for_height(sb_block_height)
             self.bump_mocktime(6)
@@ -372,6 +381,9 @@ class SyscoinGovernanceTest (DashTestFramework):
         # Should see NO votes on both triggers now
         self.wait_until(lambda: sync_gobject_list3(self.nodes[0], winning_trigger_hash, 1), timeout=5)
         self.wait_until(lambda: sync_gobject_list3(self.nodes[0], isolated_trigger_hash, self.mn_count - 1), timeout=5)
+        # The controller's NO counts do not establish that each validating
+        # node has received every vote before the first superblock either.
+        self.wait_for_trigger(150)
 
         block_count = self.nodes[0].getblockcount()
         n = sb_cycle - block_count % sb_cycle
