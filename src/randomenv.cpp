@@ -29,7 +29,6 @@
 
 #ifdef WIN32
 #include <windows.h>
-#include <winreg.h>
 #else
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -62,45 +61,6 @@
 extern char** environ; // NOLINT(readability-redundant-declaration): Necessary on some platforms
 
 namespace {
-
-void RandAddSeedPerfmon(CSHA512& hasher)
-{
-#ifdef WIN32
-    // Seed with the entire set of perfmon data
-
-    // This can take up to 2 seconds, so only do it every 10 minutes.
-    // Initialize last_perfmon to 0 seconds, we don't skip the first call.
-    static std::atomic<std::chrono::seconds> last_perfmon{0s};
-    auto last_time = last_perfmon.load();
-    auto current_time = GetTime<std::chrono::seconds>();
-    if (current_time < last_time + std::chrono::minutes{10}) return;
-    last_perfmon = current_time;
-
-    std::vector<unsigned char> vData(250000, 0);
-    long ret = 0;
-    unsigned long nSize = 0;
-    const size_t nMaxSize = 10000000; // Bail out at more than 10MB of performance data
-    while (true) {
-        nSize = vData.size();
-        ret = RegQueryValueExA(HKEY_PERFORMANCE_DATA, "Global", nullptr, nullptr, vData.data(), &nSize);
-        if (ret != ERROR_MORE_DATA || vData.size() >= nMaxSize)
-            break;
-        vData.resize(std::min((vData.size() * 3) / 2, nMaxSize)); // Grow size of buffer exponentially
-    }
-    RegCloseKey(HKEY_PERFORMANCE_DATA);
-    if (ret == ERROR_SUCCESS) {
-        hasher.Write(vData.data(), nSize);
-        memory_cleanse(vData.data(), nSize);
-    } else {
-        // Performance data is only a best-effort attempt at improving the
-        // situation when the OS randomness (and other sources) aren't
-        // adequate. As a result, failure to read it is isn't considered critical,
-        // so we don't call RandFailure().
-        // TODO: Add logging when the logger is made functional before global
-        // constructors have been invoked.
-    }
-#endif
-}
 
 /** Helper to easily feed data into a CSHA512.
  *
@@ -226,8 +186,6 @@ void AddAllCPUID(CSHA512& hasher)
 
 void RandAddDynamicEnv(CSHA512& hasher)
 {
-    RandAddSeedPerfmon(hasher);
-
     // Various clocks
 #ifdef WIN32
     FILETIME ftime;
