@@ -62,14 +62,12 @@ class LLMQSimplePoSeTest(DashTestFramework):
             self.test_no_banning(self.close_mn_port, 3)
 
 
-        self.deaf_mns.clear()
         self.repair_masternodes(True)
+        self.deaf_mns.clear()
 
-        if not self.options.disable_spork23:
-            self.test_banning(self.force_old_mn_proto, 3)
-        else:
-            # With PoSe off there should be no punishing for outdated nodes
-            self.test_no_banning(self.force_old_mn_proto, 3)
+        # Obsolete peers cannot exchange DKG contributions at all. Missing
+        # contributions are penalized independently of connection PoSe checks.
+        self.test_banning(self.force_old_mn_proto, 3)
 
     def isolate_mn(self, mn):
         mn.node.setnetworkactive(False)
@@ -91,9 +89,13 @@ class LLMQSimplePoSeTest(DashTestFramework):
     def force_old_mn_proto(self, mn):
         self.stop_node(mn.node.index)
         self.start_masternode(mn, extra_args=["-mocktime=" + str(self.mocktime), "-pushversion=70015"])
-        self.connect_nodes(mn.node.index, 0)
+        # The general protocol floor now rejects this node before MNAUTH or
+        # block relay. Verify the rejection instead of waiting for a handshake.
+        with self.nodes[0].assert_debug_log(["using obsolete version 70015; disconnecting"]):
+            self.connect_nodes(mn.node.index, 0, wait_for_connect=False)
+        self.wait_until(lambda: mn.node.getconnectioncount() == 0)
         self.reset_probe_timeouts()
-        return False, True
+        return True, True
 
     def test_no_banning(self, invalidate_proc, expected_connections=None):
         invalidate_proc(self.mninfo[0])
@@ -122,14 +124,15 @@ class LLMQSimplePoSeTest(DashTestFramework):
             # so nodes are PoSe-banned in the same DKG they misbehave without being PoSe-punished first.
             if instant_ban:
                 assert expected_connections is not None
+                live_connections = min(expected_connections, len(mninfos_online) - 1)
                 self.log.info("Expecting instant PoSe banning")
                 self.reset_probe_timeouts()
-                self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
+                self.mine_quorum(expected_connections=live_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
 
                 if not check_banned(self.nodes[0], mn):
                     self.log.info("Instant ban still requires 2 missing DKG round. If it is not banned yet, mine 2nd one")
                     self.reset_probe_timeouts()
-                    self.mine_quorum(expected_connections=expected_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
+                    self.mine_quorum(expected_connections=live_connections, expected_members=expected_contributors, expected_contributions=expected_contributors, expected_complaints=expected_complaints, expected_commitments=expected_contributors, mninfos_online=mninfos_online, mninfos_valid=mninfos_valid)
             else:
                 # It's ok to miss probes/quorum connections up to 6 times.
                 # 7th time is when it should be banned for sure.
@@ -171,15 +174,20 @@ class LLMQSimplePoSeTest(DashTestFramework):
     def repair_masternodes(self, restart):
         # Repair all nodes
         for mn in self.mninfo:
-            if check_banned(self.nodes[0], mn) or check_punished(self.nodes[0], mn):
+            needs_repair = check_banned(self.nodes[0], mn) or check_punished(self.nodes[0], mn)
+            needs_restart = restart and (needs_repair or mn in self.deaf_mns)
+            if needs_repair:
                 addr = self.nodes[0].getnewaddress()
                 self.nodes[0].sendtoaddress(addr, 0.1)
                 self.nodes[0].protx_update_service(mn.proTxHash, '127.0.0.1:%d' % p2p_port(mn.node.index), mn.keyOperator, "", addr)
-                if restart:
-                    self.stop_node(mn.node.index)
-                    self.start_masternode(mn, extra_args=["-mocktime=" + str(self.mocktime)])
-                else:
-                    mn.node.setnetworkactive(True)
+            # PoSe-disabled nodes with closed ports are not punished, but their
+            # listeners still need restoring before the next scenario.
+            if needs_restart:
+                self.stop_node(mn.node.index)
+                self.start_masternode(mn, extra_args=["-mocktime=" + str(self.mocktime)])
+            elif needs_repair:
+                mn.node.setnetworkactive(True)
+            if needs_repair or needs_restart:
                 self.connect_controller(mn)
         self.sync_blocks()
 

@@ -18,7 +18,8 @@ static const int SIZE_HEADERS_LIMIT_VERSION = 70015;
 static const int INIT_PROTO_VERSION = 209;
 
 //! disconnect from peers older than this proto version
-static const int MIN_PEER_PROTO_VERSION = 31800;
+// SYSCOIN: Require the 5.1 protocol, including nonce-based ping timeouts.
+static const int MIN_PEER_PROTO_VERSION = 70017;
 
 // SYSCOIN
 //! minimum proto version of masternode to accept in DKGs

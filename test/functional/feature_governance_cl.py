@@ -55,6 +55,29 @@ class SyscoinGovernanceTest (DashTestFramework):
                     break
         return count == len(nodes)
 
+    def ensure_controller_connection(self, node):
+        controller_subver = self.nodes[0].getnetworkinfo()['subversion']
+
+        def outbound_ready():
+            return any(peer['subver'] == controller_subver
+                       and not peer['inbound'] and not peer['masternode']
+                       and peer['bytesrecv_per_msg'].get('pong', 0) >= 29
+                       for peer in node.getpeerinfo())
+
+        if not outbound_ready():
+            if any(peer['subver'] == controller_subver for peer in node.getpeerinfo()):
+                self.disconnect_nodes(node.index, 0)
+            self.connect_nodes(node.index, 0)
+        self.wait_until(outbound_ready, timeout=5)
+
+    def wait_for_chainlock_hash(self, node, block_hash):
+        def has_chainlock():
+            # Keep scheduled inventory requests progressing while waiting for the target CLSIG.
+            self._throttled_bump_mocktime("feature_governance_cl_hash_sync", step=1)
+            return node.getbestchainlock()["blockhash"] == block_hash
+
+        self.wait_until(has_chainlock, timeout=60)
+
     def run_test(self):
         sb_cycle = 25
         for i in range(len(self.nodes)):
@@ -147,9 +170,12 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.wait_for_chainlocked_block(chainlock_source, cl)
 
         self.log.info("Reconnect isolated node and confirm the next ChainLock will let it sync")
-        self.reconnect_isolated_node(self.nodes[5], chainlock_source.index)
+        # Keep the bootstrap request on a normal relay link to the non-MN
+        # controller; a reconnect to an MN can be replaced during MNAUTH setup.
+        self.reconnect_isolated_node(self.nodes[5], 0)
         # Force isolated node to be fully synced so that it will request gov objects when reconnected
         assert_equal(self.nodes[5].mnsync("status")["IsSynced"], False)
+        self.ensure_controller_connection(self.nodes[5])
         self.sync_all_helper(self.nodes)
 
         # re-sync helper
@@ -159,9 +185,7 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         # make sure isolated node is fully synced at this point
         self.wait_until(lambda: sync_gov(self.nodes[5]))
-        self.wait_until(
-            lambda: self.nodes[5].getbestchainlock()["blockhash"] == cl,
-            timeout=60)
+        self.wait_for_chainlock_hash(self.nodes[5], cl)
         self.wait_for_chainlocked_block(self.nodes[5], cl)
         # let all fulfilled requests expire for re-sync to work correctly
         self.bump_mocktime(5 * 60)

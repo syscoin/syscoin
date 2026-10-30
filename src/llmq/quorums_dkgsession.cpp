@@ -963,13 +963,14 @@ void CDKGSession::SendCommitment(CDKGPendingMessages& pendingMessages)
         k.MakeNewKey();
         qc.quorumPublicKey = k.GetPublicKey();
     } else if (lieType == 1) {
-        (*qc.quorumVvecHash.begin())++;
+        // Flip a bit so even a 0xff byte changes without an out-of-range conversion.
+        (*qc.quorumVvecHash.begin()) ^= 1;
     }
 
     uint256 commitmentHash = BuildCommitmentHash(qc.quorumHash, qc.validMembers, qc.quorumPublicKey, qc.quorumVvecHash);
 
     if (lieType == 2) {
-        (*commitmentHash.begin())++;
+        (*commitmentHash.begin()) ^= 1;
     }
 
     qc.sig = WITH_LOCK(activeMasternodeInfoCs, return activeMasternodeInfo.blsKeyOperator->Sign(commitmentHash, m_use_legacy_bls));
@@ -977,11 +978,11 @@ void CDKGSession::SendCommitment(CDKGPendingMessages& pendingMessages)
 
     if (lieType == 3) {
         auto buf = qc.sig.ToBytes(m_use_legacy_bls);
-        buf[5]++;
+        buf[5] ^= 1;
         qc.sig.SetBytes(buf, m_use_legacy_bls);
     } else if (lieType == 4) {
         auto buf = qc.quorumSig.ToBytes(m_use_legacy_bls);
-        buf[5]++;
+        buf[5] ^= 1;
         qc.quorumSig.SetBytes(buf, m_use_legacy_bls);
     }
 
