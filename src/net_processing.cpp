@@ -4695,13 +4695,13 @@ bool PeerManagerImpl::MaybePunishNodeForTx(NodeId nodeid, const TxValidationStat
     switch (state.GetResult()) {
     case TxValidationResult::TX_RESULT_UNSET:
         break;
-    // The node is providing invalid data:
-    case TxValidationResult::TX_CONSENSUS:
-    // SYSCOIN
+    // Preserve the Syscoin-specific duplicate-mint penalty.
     case TxValidationResult::TX_MINT_DUPLICATE:
         if (peer) Misbehaving(*peer, 100, "");
         return true;
-    // Conflicting (but not necessarily invalid) data or different policy:
+    // Invalid ordinary transactions do not establish peer misbehavior.
+    case TxValidationResult::TX_CONSENSUS:
+    // Conflicting data or different policy:
     case TxValidationResult::TX_RECENT_CONSENSUS_CHANGE:
     case TxValidationResult::TX_INPUTS_NOT_STANDARD:
     case TxValidationResult::TX_NOT_STANDARD:

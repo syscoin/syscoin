@@ -2641,4 +2641,47 @@ BOOST_AUTO_TEST_CASE(getnevmdata_rejects_short_suffix_after_witness_commitment_p
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "nevm-block-data-short");
 }
 
+BOOST_AUTO_TEST_CASE(spends_witness_program)
+{
+    CCoinsView dummy;
+    CCoinsViewCache coins{&dummy};
+    CMutableTransaction funding;
+    funding.vout.emplace_back(1, CScript{});
+    CMutableTransaction spending;
+    spending.vin.emplace_back(uint256::ONEV, 0);
+    const auto check_spend = [&](const CScript& output, const CScript& script_sig, bool expected) {
+        funding.vout[0].scriptPubKey = output;
+        spending.vin[0].prevout.hash = funding.GetHash();
+        spending.vin[0].scriptSig = script_sig;
+        AddCoins(coins, CTransaction{funding}, 0, true);
+        BOOST_CHECK_EQUAL(SpendsWitnessProgram(CTransaction{spending}, coins), expected);
+    };
+
+    check_spend(CScript{} << OP_TRUE, {}, false);
+    check_spend(GetScriptForDestination(PKHash{uint160{}}), {}, false);
+    const CScript legacy_redeem{CScript{} << OP_TRUE};
+    check_spend(GetScriptForDestination(ScriptHash{legacy_redeem}), CScript{} << ToByteVector(legacy_redeem), false);
+
+    // Include undefined witness versions and program sizes, which must not poison
+    // rejection caches when their witness has been stripped.
+    for (int version = 0; version <= 16; ++version) {
+        for (const size_t size : {2U, 20U, 32U, 40U}) {
+            const std::vector<unsigned char> program(size, 0x42);
+            const CScript witness{CScript{} << CScript::EncodeOP_N(version) << program};
+            check_spend(witness, {}, true);
+            const CScript wrapped{GetScriptForDestination(ScriptHash{witness})};
+            check_spend(wrapped, CScript{} << ToByteVector(witness), true);
+            check_spend(wrapped, {}, false);
+            // Non-push scriptSigs never execute signature checks in this detector.
+            check_spend(wrapped, CScript{} << OP_CHECKSIG << ToByteVector(witness), false);
+        }
+    }
+    for (const size_t size : {1U, 41U}) {
+        check_spend(CScript{} << OP_0 << std::vector<unsigned char>(size, 0x42), {}, false);
+    }
+
+    spending.vin[0].prevout.SetNull();
+    BOOST_CHECK(!SpendsWitnessProgram(CTransaction{spending}, coins));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

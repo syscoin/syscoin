@@ -84,8 +84,7 @@ static constexpr unsigned int EXTRA_DESCENDANT_TX_SIZE_LIMIT{10000};
 
 /**
  * Mandatory script verification flags that all new transactions must comply with for
- * them to be valid. Failing one of these tests may trigger a DoS ban;
- * see CheckInputScripts() for details.
+ * them to be valid for relay.
  *
  * Note that this does not affect consensus validity; see GetBlockScriptFlags()
  * for that.
@@ -99,10 +98,8 @@ static constexpr unsigned int MANDATORY_SCRIPT_VERIFY_FLAGS{SCRIPT_VERIFY_P2SH |
                                                              SCRIPT_VERIFY_TAPROOT};
 
 /**
- * Standard script verification flags that standard transactions will comply
- * with. However we do not ban/disconnect nodes that forward txs violating
- * the additional (non-mandatory) rules here, to improve forwards and
- * backwards compatibility.
+ * Standard script verification flags, including additional relay-only rules.
+ * Invalid transaction relay does not itself disconnect or discourage a peer.
  */
 static constexpr unsigned int STANDARD_SCRIPT_VERIFY_FLAGS{MANDATORY_SCRIPT_VERIFY_FLAGS |
                                                              SCRIPT_VERIFY_STRICTENC |
@@ -159,6 +156,10 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
 * Also enforce a maximum stack item size limit and no annexes for tapscript spends.
 */
 bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs);
+
+/** Whether an input spends a native or P2SH-wrapped witness program, including
+ * undefined versions. May return false for consensus-invalid transactions. */
+bool SpendsWitnessProgram(const CTransaction& tx, const CCoinsViewCache& prevouts);
 
 /** Compute the virtual transaction size (weight reinterpreted as bytes). */
 int64_t GetVirtualTransactionSize(int64_t nWeight, int64_t nSigOpCost, unsigned int bytes_per_sigop);

@@ -1562,11 +1562,46 @@ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, cons
     return true;
 }
 
+int SigHashCache::CacheIndex(int hash_type) noexcept
+{
+    return 3 * !!(hash_type & SIGHASH_ANYONECANPAY) +
+           2 * ((hash_type & 0x1f) == SIGHASH_SINGLE) +
+           1 * ((hash_type & 0x1f) == SIGHASH_NONE);
+}
+
+std::optional<HashWriter> SigHashCache::Load(int hash_type, const CScript& script_code, SigVersion sigversion) const noexcept
+{
+    const auto& entry{m_cache_entries[CacheIndex(hash_type)]};
+    if (entry && entry->script_code == script_code && entry->sigversion == sigversion) {
+        return entry->writer;
+    }
+    return std::nullopt;
+}
+
+void SigHashCache::Store(int hash_type, const CScript& script_code, SigVersion sigversion, const HashWriter& writer)
+{
+    m_cache_entries[CacheIndex(hash_type)].emplace(Entry{script_code, writer, sigversion});
+}
+
 template <class T>
-uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache)
+uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache, SigHashCache* sighash_cache)
 {
     assert(nIn < txTo.vin.size());
 
+    // The historical legacy SIGHASH_SINGLE result must bypass the cache.
+    if (sigversion != SigVersion::WITNESS_V0 &&
+        (nHashType & 0x1f) == SIGHASH_SINGLE && nIn >= txTo.vout.size()) {
+        return uint256::ONEV;
+    }
+
+    if (sighash_cache) {
+        if (auto writer{sighash_cache->Load(nHashType, scriptCode, sigversion)}) {
+            *writer << nHashType;
+            return writer->GetHash();
+        }
+    }
+
+    HashWriter ss{};
     if (sigversion == SigVersion::WITNESS_V0) {
         uint256 hashPrevouts;
         uint256 hashSequence;
@@ -1581,52 +1616,32 @@ uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn
             hashSequence = cacheready ? cache->hashSequence : SHA256Uint256(GetSequencesSHA256(txTo));
         }
 
-
         if ((nHashType & 0x1f) != SIGHASH_SINGLE && (nHashType & 0x1f) != SIGHASH_NONE) {
             hashOutputs = cacheready ? cache->hashOutputs : SHA256Uint256(GetOutputsSHA256(txTo));
         } else if ((nHashType & 0x1f) == SIGHASH_SINGLE && nIn < txTo.vout.size()) {
-            HashWriter ss{};
-            ss << txTo.vout[nIn];
-            hashOutputs = ss.GetHash();
+            HashWriter output_writer{};
+            output_writer << txTo.vout[nIn];
+            hashOutputs = output_writer.GetHash();
         }
 
-        HashWriter ss{};
-        // Version
         ss << txTo.nVersion;
-        // Input prevouts/nSequence (none/all, depending on flags)
         ss << hashPrevouts;
         ss << hashSequence;
-        // The input being signed (replacing the scriptSig with scriptCode + amount)
-        // The prevout may already be contained in hashPrevout, and the nSequence
-        // may already be contain in hashSequence.
         ss << txTo.vin[nIn].prevout;
         ss << scriptCode;
         ss << amount;
         ss << txTo.vin[nIn].nSequence;
-        // Outputs (none/one/all, depending on flags)
         ss << hashOutputs;
-        // Locktime
         ss << txTo.nLockTime;
-        // Sighash type
-        ss << nHashType;
-
-        return ss.GetHash();
+    } else {
+        CTransactionSignatureSerializer<T> txTmp(txTo, scriptCode, nIn, nHashType);
+        ss << txTmp;
     }
 
-    // Check for invalid use of SIGHASH_SINGLE
-    if ((nHashType & 0x1f) == SIGHASH_SINGLE) {
-        if (nIn >= txTo.vout.size()) {
-            //  nOut out of range
-            return uint256::ONEV;
-        }
+    if (sighash_cache) {
+        sighash_cache->Store(nHashType, scriptCode, sigversion, ss);
     }
-
-    // Wrapper to serialize only the necessary parts of the transaction being signed
-    CTransactionSignatureSerializer<T> txTmp(txTo, scriptCode, nIn, nHashType);
-
-    // Serialize and hash
-    HashWriter ss{};
-    ss << txTmp << nHashType;
+    ss << nHashType;
     return ss.GetHash();
 }
 
@@ -1659,7 +1674,7 @@ bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vecto
     // Witness sighashes need the amount.
     if (sigversion == SigVersion::WITNESS_V0 && amount < 0) return HandleMissingData(m_mdb);
 
-    uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion, this->txdata);
+    uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion, this->txdata, &m_sighash_cache);
 
     if (!VerifyECDSASignature(vchSig, pubkey, sighash))
         return false;
