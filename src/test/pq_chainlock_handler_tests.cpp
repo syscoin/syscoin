@@ -10,7 +10,9 @@
 #include <consensus/merkle.h>
 #include <consensus/params.h>
 #include <crypto/scheduled_wots/scheduled_wots.h>
+#include <dsnotificationinterface.h>
 #include <evo/deterministicmns.h>
+#include <evo/mnauth.h>
 #include <governance/governanceclasses.h>
 #include <key_io.h>
 #include <kernel/context.h>
@@ -19,6 +21,7 @@
 #include <net.h>
 #include <netbase.h>
 #include <net_processing.h>
+#include <netmessagemaker.h>
 #include <node/miner.h>
 #include <node/kernel_notifications.h>
 #include <node/blockstorage.h>
@@ -32,6 +35,7 @@
 #include <script/script.h>
 #include <services/assetconsensus.h>
 #include <shutdown.h>
+#include <spork.h>
 #include <streams.h>
 #include <test/pq_test_util.h>
 #include <test/util/net.h>
@@ -497,6 +501,36 @@ public:
         const auto contexts{handler.BuildCurrentSigningContexts(handler.GetShareAdmissionGeneration())};
         if (!contexts) return {};
         return {contexts->prepared_contexts.begin(), contexts->prepared_contexts.begin() + contexts->count};
+    }
+
+    static bool RefreshLiveSigningContexts(CChainLocksHandler& handler)
+    {
+        // Match the existing live-builder fixture's start/readiness seam;
+        // publication and source validation still run in production code.
+        if (handler.GetShareAdmissionGeneration() == 0) {
+            handler.m_share_admission_gate.SetReady(true);
+            if (!handler.m_share_admission_gate.TryPublishEnabled(
+                    handler.m_share_admission_gate.Observe(), true)) return false;
+        }
+        return handler.RefreshCurrentSigningContexts(handler.GetShareAdmissionGeneration());
+    }
+
+    static auto PublishedRelayIdentity(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_collector_mutex);
+        return std::pair{handler.m_current_signing_contexts.get(), handler.m_collector_generation};
+    }
+
+    static pq::PreparedChainLockContextPtr PublishedPreparedContext(CChainLocksHandler& handler)
+    {
+        const auto published{handler.GetPublishedCurrentSigningContexts(handler.GetShareAdmissionGeneration())};
+        return published ? published->prepared_contexts[0] : pq::PreparedChainLockContextPtr{};
+    }
+
+    static PQQuorumConnectionSet RelayFallbackMembers(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_collector_mutex);
+        return handler.m_share_relay_fallback.Members();
     }
 
     static bool CheckBTCHeaderSigningPolicy(
@@ -11466,6 +11500,684 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
     BOOST_CHECK(!clear_during_source_validation);
     BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
 }
+
+#if defined(HAVE_BOOST_PROCESS) && !defined(WIN32)
+BOOST_FIXTURE_TEST_CASE(published_rotate_fallback_survives_real_mnauth_and_tip_callbacks,
+                        PQAuthorizationBasePathSetup)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+    constexpr int32_t BASE_HEIGHT{2'575};
+    constexpr int32_t CARRIER_HEIGHT{2'585};
+    constexpr int32_t PARENT_HEIGHT{2'590};
+    constexpr int32_t TARGET_HEIGHT{2'595};
+    constexpr int32_t TIP_HEIGHT{2'600};
+    constexpr int32_t END_HEIGHT{2'605};
+    constexpr int32_t PREPARATION_HEIGHT{1'000};
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& peerman{*Assert(m_node.peerman)};
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    const auto original_consensus{consensus};
+    auto* original_tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    auto original_manager{std::move(deterministicMNManager)};
+    auto original_sporks{std::move(sporkManager)};
+    CActiveMasternodeInfo original_identity;
+    {
+        LOCK(activeMasternodeInfoCs);
+        std::swap(activeMasternodeInfo, original_identity);
+    }
+    const bool original_mode{fMasternodeMode};
+    const int original_sync{masternodeSync.GetAssetID()};
+    auto* original_handler{llmq::chainLocksHandler};
+    auto* original_overlay{llmq::pqQuorumConnectionOverlay};
+    decltype(common::Settings{}.forced_settings) original_args;
+    gArgs.LockSettings([&](const common::Settings& settings) { original_args = settings.forced_settings; });
+    std::vector<CNode*> registered_peers;
+    struct Restore {
+        ChainstateManager& chainman;
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        Consensus::Params& consensus;
+        Consensus::Params saved_consensus;
+        CBlockIndex* tip;
+        std::unique_ptr<CDeterministicMNManager>& manager;
+        std::unique_ptr<CSporkManager>& sporks;
+        CActiveMasternodeInfo& identity;
+        std::vector<CNode*>& peers;
+        decltype(common::Settings{}.forced_settings)& args;
+        bool mode;
+        int sync_mode;
+        llmq::CChainLocksHandler* handler;
+        llmq::CPQQuorumConnectionOverlay* overlay;
+        ~Restore() {
+            SyncWithValidationInterfaceQueue();
+            for (auto* peer : peers) peerman.FinalizeNode(*peer);
+            connman.ClearTestNodes();
+            llmq::chainLocksHandler = handler;
+            llmq::pqQuorumConnectionOverlay = overlay;
+            WITH_LOCK(::cs_main, chainman.ActiveChainstate().m_chain.SetTip(*tip));
+            deterministicMNManager = std::move(manager);
+            sporkManager = std::move(sporks);
+            consensus = saved_consensus;
+            masternodeSync.SetSyncMode(sync_mode);
+            gArgs.LockSettings([&](common::Settings& settings) { settings.forced_settings = std::move(args); });
+            LOCK(activeMasternodeInfoCs);
+            std::swap(activeMasternodeInfo, identity);
+            fMasternodeMode = mode;
+        }
+    } restore{chainman, connman, peerman, consensus, original_consensus, original_tip,
+              original_manager, original_sporks, original_identity, registered_peers,
+              original_args, original_mode, original_sync, original_handler, original_overlay};
+
+    consensus.DIP0003Height = PREPARATION_HEIGHT - 1;
+    consensus.DIP0003EnforcementHeight = PREPARATION_HEIGHT - 1;
+    consensus.nPQActivationHeight = 2'305;
+    consensus.nPQPreparationHeight = PREPARATION_HEIGHT;
+    consensus.nPQChainLockEpochOrigin = 1'440;
+    consensus.nPQRegistrationCutoffBlocks = 288;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQRosterSnapshotLag = 288;
+    consensus.nPQBTCCCandidateOrigin = 2'305;
+    consensus.nPQBTCCNEVMInjectionLag = PQ_BTCC_NEVM_LAG;
+    consensus.nPQBTCCReceiptAnchorHeight = PREPARATION_HEIGHT;
+    consensus.nDefaultAssumeValidHeight = -1;
+    const int64_t first_time{GetTime() - END_HEIGHT};
+    std::vector<CBlockIndex*> chain(END_HEIGHT + 1);
+    {
+        LOCK(::cs_main);
+        chain[0] = chainman.ActiveTip();
+        for (int32_t height{1}; height <= END_HEIGHT; ++height) {
+            CBlockHeader header;
+            header.nVersion = 4;
+            header.hashPrevBlock = chain[height - 1]->GetBlockHash();
+            header.hashMerkleRoot = NonNullHash(2'100'000 + height);
+            header.nTime = static_cast<uint32_t>(first_time + height);
+            header.nBits = chain[height - 1]->nBits;
+            header.nNonce = height;
+            chain[height] = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            chain[height]->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                BLOCK_PQ_BTCC_INDEX_VALIDATED | BLOCK_PQ_RECEIPT_INDEX_VALIDATED |
+                BLOCK_GOVERNANCE_VALIDATED;
+            chain[height]->nTx = 1;
+            chain[height]->nChainTx = height + 1;
+            chain[height]->pqPaymentProbationStateHash = NonNullHash(2'110'000);
+        }
+        chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+        BOOST_REQUIRE(chainman.IsBaseBlockSyncComplete());
+    }
+    consensus.hashPQBTCCReceiptAnchorBlock = chain[PREPARATION_HEIGHT]->GetBlockHash();
+    consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
+    consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    const uint256 genesis{consensus.hashGenesisBlock};
+    const uint256 local{NonNullHash(1)};
+    uint256 remote;
+    const CService local_service{LookupNumeric("192.0.2.10", 8369)};
+    const CService remote_service{LookupNumeric("192.0.2.11", 8369)};
+    slhdsa::KeyGenerationSeed seed{};
+    seed[0] = 121;
+    auto local_secret{slhdsa::GenerateSecretKey(seed)};
+    seed[0] = 122;
+    auto remote_secret{slhdsa::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(local_secret && remote_secret);
+    GlobalPublicKey local_public{}, remote_public{};
+    BOOST_REQUIRE(local_secret->GetPublicKey(local_public));
+    BOOST_REQUIRE(remote_secret->GetPublicKey(remote_public));
+    const auto key_for = [&](const uint256& identity) {
+        GlobalKeyRecord key;
+        key.key_version = 1;
+        key.activated_height = 1;
+        if (identity == local) key.public_key = local_public;
+        else if (!remote.IsNull() && identity == remote) key.public_key = remote_public;
+        else {
+            const auto material{NonNullHash(2'120'000 + identity.GetUint64(0))};
+            std::copy(material.begin(), material.end(), key.public_key.begin());
+        }
+        key.child_key_commitment.generation = 1;
+        key.child_key_commitment.tree_id = *GetChildKeyTreeId(genesis, identity, 1, 0);
+        key.child_key_commitment.root = NonNullHash(2'130'000 + identity.GetUint64(0));
+        return key;
+    };
+    const auto quorum_config{llmq::MakePQQuorumBuildConfig(consensus)};
+    BOOST_REQUIRE(quorum_config);
+    const auto snapshot = [&](const CBlockIndex& index) -> std::optional<QuorumSnapshotState> {
+        QuorumSnapshotState result;
+        result.deterministic_mns = CDeterministicMNList{index.GetBlockHash(), index.nHeight, QUORUM_SIZE};
+        const auto view{DeriveOperatorKeyScheduleView(quorum_config->schedule, index.nHeight,
+            quorum_config->registration_cutoff_blocks, quorum_config->future_horizon_epochs)};
+        if (!view) return std::nullopt;
+        std::vector<OperatorKeyState> operators;
+        for (uint32_t i{1}; i <= QUORUM_SIZE; ++i) {
+            const uint256 identity{NonNullHash(i)};
+            auto dmn{std::make_shared<CDeterministicMN>(i)};
+            dmn->proTxHash = identity;
+            dmn->collateralOutpoint = COutPoint{NonNullHash(2'140'000 + i), i};
+            auto state{std::make_shared<CDeterministicMNState>()};
+            const auto owner{NonNullHash(2'141'000 + i)};
+            std::copy_n(owner.begin(), state->keyIDOwner.size(), state->keyIDOwner.begin());
+            state->nRegisteredHeight = 1;
+            state->UpdateConfirmedHash(identity, NonNullHash(2'150'000 + i));
+            if (identity == local) state->addr = local_service;
+            else if (identity == remote) state->addr = remote_service;
+            dmn->pdmnState = state;
+            result.deterministic_mns.AddMN(dmn, false);
+            auto key{OperatorKeyState::ForOperator(identity)};
+            key.has_global_key = key.global_key_active = 1;
+            key.global_key = key_for(identity);
+            key.schedule_initialized = 1;
+            key.schedule = OperatorKeyScheduleState::FromView(*view);
+            for (uint32_t epoch{key.schedule.first_retained_frozen_epoch}; epoch < key.schedule.first_mutable_epoch; ++epoch) {
+                key.frozen_child_roots.push_back(FrozenChildRootRecord{identity, 1, epoch, key.global_key.child_key_commitment});
+            }
+            operators.push_back(std::move(key));
+        }
+        std::sort(operators.begin(), operators.end(), [](const auto& a, const auto& b) { return a.pro_tx_hash < b.pro_tx_hash; });
+        result.operator_key_states = std::make_shared<const std::vector<OperatorKeyState>>(std::move(operators));
+        return result;
+    };
+    const uint256 old_btc{NonNullHash(2'160'000)}, anchor_btc{NonNullHash(2'160'001)};
+    const uint256 future_btc{NonNullHash(2'160'002)}, tip_btc{NonNullHash(2'160'003)};
+    chain[2'305]->btcpPrevCommitment = old_btc;
+    chain[2'535]->btcpPrevCommitment = anchor_btc;
+    chain[BASE_HEIGHT]->btcpPrevCommitment = anchor_btc;
+    chain[TARGET_HEIGHT]->btcpPrevCommitment = tip_btc;
+    RosterBeaconWindow parent_window;
+    for (uint32_t epoch{0}; epoch < ACTIVE_QUORUMS; ++epoch) {
+        auto& beacon{parent_window.active.seeds[epoch]};
+        beacon = SubjectBeacon(epoch);
+        beacon.anchor_cursor = {2'305, chain[2'305]->GetBlockHash(), old_btc};
+        beacon.anchor_btc_height = 10;
+        beacon.future_btc_hash = NonNullHash(2'160'010);
+    }
+    parent_window.active.recovery_authority_source.normal_beacon = parent_window.active.seeds.back();
+    parent_window.next = SubjectBeacon(4);
+    parent_window.next.anchor_cursor = {2'535, chain[2'535]->GetBlockHash(), anchor_btc};
+    parent_window.next.anchor_btc_height = 100;
+    parent_window.next.future_btc_hash = future_btc;
+    RosterBeaconWindow rotated_window{parent_window};
+    for (std::size_t i{0}; i + 1 < ACTIVE_QUORUMS; ++i) rotated_window.active.seeds[i] = parent_window.active.seeds[i + 1];
+    rotated_window.active.seeds.back() = parent_window.next;
+    rotated_window.next = {};
+    rotated_window.next.epoch = 5;
+    rotated_window.active.recovery_authority_source.normal_beacon = parent_window.next;
+
+    // Choose an actual frozen-union candidate before installing the live
+    // cache. Global keys do not affect deterministic roster ordering.
+    {
+        const auto preview{FrozenQuorumRosterCache::Create(genesis, *quorum_config, snapshot)};
+        const auto rosters{preview->GetVerifiedActive(TARGET_HEIGHT, *chain[TARGET_HEIGHT], rotated_window.active)};
+        BOOST_REQUIRE(rosters);
+        const auto candidates{llmq::BuildPQShareRelayFallbackCandidates(rosters->Rosters(), local)};
+        BOOST_REQUIRE(!candidates.empty());
+        remote = candidates.front();
+    }
+    const auto cache{FrozenQuorumRosterCache::Create(genesis, *quorum_config, snapshot)};
+    BOOST_REQUIRE(cache);
+    const DBParams dmn_params{.path = m_path_root / "published-rotate-dmn",
+        .cache_bytes = 1 << 20, .memory_only = false, .wipe_data = false};
+    DBParams registry_params{dmn_params};
+    registry_params.path += "_pq_registry";
+    registry_params.cache_bytes /= 2;
+    PQRegistryConfig registry_config;
+    BOOST_REQUIRE(GetPQRegistryConfig(consensus, registry_config) == PQRegistryDeploymentResult::VALID);
+    {
+        PQRegistryManager writer{registry_params, genesis, registry_config,
+            evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id};
+        uint256 previous_root{*PQRegistrySnapshot{}.RecomputeConsensusStateRoot(genesis)};
+        std::vector<OperatorKeyState> previous;
+        for (int32_t height{PREPARATION_HEIGHT}; height <= END_HEIGHT; ++height) {
+            const auto view{DeriveOperatorKeyScheduleView(registry_config.schedule, height,
+                registry_config.registration_cutoff_blocks, registry_config.future_horizon_epochs)};
+            BOOST_REQUIRE(view);
+            PQRegistrySnapshot state;
+            for (const uint256& identity : {local, remote}) {
+                auto op{OperatorKeyState::ForOperator(identity)};
+                op.has_global_key = op.global_key_active = 1;
+                op.global_key = key_for(identity);
+                op.schedule_initialized = 1;
+                op.schedule = OperatorKeyScheduleState::FromView(*view);
+                state.operator_states.push_back(std::move(op));
+            }
+            std::sort(state.operator_states.begin(), state.operator_states.end(), [](const auto& a, const auto& b) { return a.pro_tx_hash < b.pro_tx_hash; });
+            PQRegistryDiskSnapshot disk;
+            disk.is_checkpoint = (height - PREPARATION_HEIGHT) % PQ_REGISTRY_CHECKPOINT_INTERVAL == 0;
+            disk.height = height;
+            disk.block_hash = chain[height]->GetBlockHash();
+            disk.previous_block_hash = chain[height - 1]->GetBlockHash();
+            disk.previous_consensus_state_root = previous_root;
+            for (const auto& op : state.operator_states) if (std::find(previous.begin(), previous.end(), op) == previous.end()) disk.operator_states.push_back(op);
+            if (disk.is_checkpoint) disk.checkpoint_operator_states = state.operator_states;
+            disk.consensus_state_root = *state.RecomputeConsensusStateRoot(genesis);
+            BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(disk.block_hash, disk));
+            previous_root = disk.consensus_state_root;
+            previous = std::move(state.operator_states);
+        }
+    }
+    deterministicMNManager = std::make_unique<CDeterministicMNManager>(dmn_params);
+    for (int32_t height{TIP_HEIGHT}; height <= END_HEIGHT; ++height) {
+        deterministicMNManager->m_evoDb->WriteCache(chain[height]->GetBlockHash(), snapshot(*chain[height])->deterministic_mns);
+    }
+    {
+        ChainLockMasterSeed child_seed{};
+        child_seed[0] = 123;
+        LOCK(activeMasternodeInfoCs);
+        activeMasternodeInfo.operatorKeyManager = std::make_shared<LocalOperatorKeyManager>(std::move(*local_secret), std::move(child_seed));
+        activeMasternodeInfo.proTxHash = local;
+        activeMasternodeInfo.globalKeyVersion = 1;
+        activeMasternodeInfo.service = local_service;
+        fMasternodeMode = true;
+    }
+
+    // The external header backend is fixture data; the normal production
+    // command parser and active-range policy still authorize the ROTATE.
+    const fs::path backend_path{m_path_root / "published-rotate-bitcoin.sh"};
+    {
+        std::ofstream backend{backend_path};
+        backend << "case \"$1:$2\" in\n"
+            << "getblockchaininfo:) echo '{\"chain\":\"regtest\",\"initialblockdownload\":false,\"headers\":142,\"blocks\":142,\"bestblockhash\":\"" << tip_btc.GetHex() << "\"}';;\n"
+            << "getchaintips:) echo '[{\"height\":142,\"hash\":\"" << tip_btc.GetHex() << "\",\"status\":\"active\"}]';;\n";
+        for (const auto& [hash, height] : std::array<std::pair<uint256, int>, 3>{{{anchor_btc, 100}, {future_btc, 137}, {tip_btc, 142}}}) {
+            backend << "getblockheader:" << hash.GetHex() << ") echo '{\"hash\":\"" << hash.GetHex()
+                << "\",\"height\":" << height << ",\"confirmations\":" << 143 - height << ",\"time\":" << GetTime() << "}';;\n"
+                << "getblockhash:" << height << ") echo '" << hash.GetHex() << "';;\n";
+        }
+        backend << "*) exit 1;;\nesac\n";
+    }
+    gArgs.ForceSetArg("-btcheaderpolicyondemand", "1");
+    gArgs.ForceSetArg("-btcheadermanaged", "0");
+    gArgs.ForceSetArg("-btcheaderwatchdog", "0");
+    gArgs.ForceSetArg("-btcheadercmd", "/bin/sh");
+    gArgs.ForceSetArg("-btcheaderarg", fs::PathToString(backend_path));
+    gArgs.ForceSetArg("-btcheadercmdtimeout", "2");
+    gArgs.ForceSetArg("-btcheadertipmaxage", "0");
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+    WITH_LOCK(::cs_main, handler = std::make_unique<llmq::CChainLocksHandler>(connman, peerman, chainman));
+    handler->SetQuorumRosterCache(cache);
+    llmq::chainLocksHandler = handler.get();
+    const auto* config{Access::Config(*handler)};
+    BOOST_REQUIRE(config);
+    FullReceiptCatchupContext store_context;
+    store_context.full_receipt_history = true;
+    Access::ResetFinalityStoreWithContext(*handler, store_context);
+    const auto bind_authorization = [&](FinalChainLock& value, const FinalChainLock* prior) {
+        RosterAuthorizationTransition transition;
+        transition.kind = value.statement.roster_transition;
+        transition.target_height = value.statement.height;
+        transition.target_block_hash = value.statement.block_hash;
+        transition.predecessor_height = value.statement.previous_chainlock_height;
+        transition.predecessor_block_hash = value.statement.previous_chainlock_hash;
+        if (prior) {
+            value.statement.roster_authorization_base = {
+                prior->statement.height, prior->statement.block_hash, prior->GetLogicalId(genesis)};
+            transition.previous = RosterAuthorizationPriorState{
+                prior->statement.roster_authorization_state_hash, prior->statement.roster_beacons};
+        }
+        transition.authorization_base = value.statement.roster_authorization_base;
+        transition.new_window = value.statement.roster_beacons;
+        const auto state_hash{GetRosterAuthorizationStateHash(genesis, transition)};
+        BOOST_REQUIRE_MESSAGE(state_hash, "authorization transition at height " << value.statement.height);
+        value.statement.roster_authorization_state_hash = *state_hash;
+        BOOST_REQUIRE(value.IsStructurallyValid());
+    };
+    auto base{MakeCatchupChainLock(BASE_HEIGHT, BASE_HEIGHT - 5, chain[BASE_HEIGHT - 5]->GetBlockHash(), 2'170'000)};
+    base.statement.block_hash = chain[BASE_HEIGHT]->GetBlockHash();
+    base.statement.roster_beacons = parent_window;
+    base.statement.accepted_btcc_cursor = {BASE_HEIGHT, base.statement.block_hash, anchor_btc};
+    base.statement.btcc_advance = BTCCAdvance::ADVANCE;
+    base.statement.payment_probation_state_hash = chain[BASE_HEIGHT]->pqPaymentProbationStateHash;
+    const auto parent_rosters{cache->GetVerifiedActive(BASE_HEIGHT, *chain[BASE_HEIGHT], parent_window.active)};
+    BOOST_REQUIRE(parent_rosters);
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t i{0}; i < ACTIVE_QUORUMS; ++i) descriptors[i] = parent_rosters->Rosters()[i].descriptor;
+    base.statement.quorum_context_hash = GetQuorumContextHash(genesis, BASE_HEIGHT, base.statement.block_hash, descriptors);
+    RosterAuthorizationVerificationContext trusted;
+    trusted.admission = RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+    auto initialization{base};
+    initialization.statement.height = 2'305;
+    initialization.statement.block_hash = chain[2'305]->GetBlockHash();
+    initialization.statement.previous_chainlock_height = 2'304;
+    initialization.statement.previous_chainlock_hash = chain[2'304]->GetBlockHash();
+    initialization.statement.previous_btcc_cursor = {};
+    initialization.statement.accepted_btcc_cursor = {2'305, chain[2'305]->GetBlockHash(), old_btc};
+    initialization.statement.btcc_receipt_state = {};
+    initialization.statement.roster_transition = RosterAuthorizationTransitionKind::INITIALIZE;
+    initialization.statement.roster_authorization_base = {};
+    initialization.statement.roster_beacons.next = {};
+    initialization.statement.roster_beacons.next.epoch = 4;
+    initialization.statement.quorum_context_hash = GetQuorumContextHash(genesis, 2'305,
+        initialization.statement.block_hash, descriptors);
+    bind_authorization(initialization, nullptr);
+    const auto initialization_context{ChainLockStoreTestContextFactory::Create(config->chainlock_schedule,
+        initialization.statement, parent_rosters, 0b1111, trusted)};
+    BOOST_REQUIRE(initialization_context);
+    BTCCReceipt initial_receipt;
+    initial_receipt.chainlock_target_height = 2'305;
+    initial_receipt.chainlock_target_hash = initialization.statement.block_hash;
+    initial_receipt.chainlock_logical_id = initialization.GetLogicalId(genesis);
+    initial_receipt.accepted_cursor = initialization.statement.accepted_btcc_cursor;
+    const auto initial_state{ApplyBTCCReceiptState(genesis, config->chainlock_schedule, config->btcc_schedule,
+        config->activation_predecessor_height, 2'315, chain[2'315]->GetBlockHash(), {}, initial_receipt)};
+    BOOST_REQUIRE(initial_state);
+    for (int32_t height{2'315}; height <= END_HEIGHT; ++height) {
+        auto& index{*chain[height]};
+        index.pqBTCCReceiptCursorHeight = initial_state->cursor.sys_height;
+        index.pqBTCCReceiptCursorSysHash = initial_state->cursor.sys_hash;
+        index.pqBTCCReceiptCursorBTCHash = initial_state->cursor.btc_hash;
+        index.pqBTCCReceiptStateHash = initial_state->cumulative_hash;
+        index.pqBTCCReceiptLatestTargetHeight = initial_state->latest_chainlock_target_height;
+        index.pqBTCCReceiptLatestCarrierHeight = initial_state->latest_receipt_carrier_height;
+    }
+    chain[2'315]->pqBTCCReceiptLogicalId = initial_receipt.chainlock_logical_id;
+    base.statement.previous_btcc_cursor = initial_state->cursor;
+    base.statement.btcc_receipt_state = *initial_state;
+    // Bind the synthetic accepted prefix through valid transition shapes.
+    // Its receipts and logical IDs are computed only after this binding.
+    auto observation{base};
+    observation.statement.height = BASE_HEIGHT - 5;
+    observation.statement.block_hash = chain[BASE_HEIGHT - 5]->GetBlockHash();
+    observation.statement.previous_chainlock_height = BASE_HEIGHT - 10;
+    observation.statement.previous_chainlock_hash = chain[BASE_HEIGHT - 10]->GetBlockHash();
+    observation.statement.accepted_btcc_cursor = initial_state->cursor;
+    observation.statement.btcc_advance = BTCCAdvance::KEEP;
+    observation.statement.roster_transition = RosterAuthorizationTransitionKind::OBSERVE;
+    observation.statement.roster_beacons.next.state = RosterBeaconState::PENDING;
+    observation.statement.roster_beacons.next.future_btc_hash.SetNull();
+    observation.statement.quorum_context_hash = GetQuorumContextHash(genesis, BASE_HEIGHT - 5,
+        observation.statement.block_hash, descriptors);
+    bind_authorization(observation, &initialization);
+    base.statement.roster_transition = RosterAuthorizationTransitionKind::REVEAL;
+    bind_authorization(base, &observation);
+    const auto base_context{ChainLockStoreTestContextFactory::Create(config->chainlock_schedule, base.statement, parent_rosters, 0b1111, trusted)};
+    BOOST_REQUIRE(base_context);
+    BTCCReceipt receipt;
+    receipt.chainlock_target_height = BASE_HEIGHT;
+    receipt.chainlock_target_hash = base.statement.block_hash;
+    receipt.chainlock_logical_id = base.GetLogicalId(genesis);
+    receipt.accepted_cursor = base.statement.accepted_btcc_cursor;
+    const auto receipt_state{ApplyBTCCReceiptState(genesis, config->chainlock_schedule, config->btcc_schedule,
+        config->activation_predecessor_height, CARRIER_HEIGHT, chain[CARRIER_HEIGHT]->GetBlockHash(), *initial_state, receipt)};
+    BOOST_REQUIRE(receipt_state);
+    for (int32_t height{CARRIER_HEIGHT}; height <= END_HEIGHT; ++height) {
+        auto& index{*chain[height]};
+        index.pqBTCCReceiptCursorHeight = receipt_state->cursor.sys_height;
+        index.pqBTCCReceiptCursorSysHash = receipt_state->cursor.sys_hash;
+        index.pqBTCCReceiptCursorBTCHash = receipt_state->cursor.btc_hash;
+        index.pqBTCCReceiptStateHash = receipt_state->cumulative_hash;
+        index.pqBTCCReceiptLatestTargetHeight = receipt_state->latest_chainlock_target_height;
+        index.pqBTCCReceiptLatestCarrierHeight = receipt_state->latest_receipt_carrier_height;
+    }
+    chain[CARRIER_HEIGHT]->pqBTCCReceiptLogicalId = receipt.chainlock_logical_id;
+    auto parent{base};
+    parent.statement.height = PARENT_HEIGHT;
+    parent.statement.block_hash = chain[PARENT_HEIGHT]->GetBlockHash();
+    parent.statement.previous_chainlock_height = PARENT_HEIGHT - 5;
+    parent.statement.previous_chainlock_hash = chain[PARENT_HEIGHT - 5]->GetBlockHash();
+    parent.statement.previous_btcc_cursor = base.statement.accepted_btcc_cursor;
+    parent.statement.btcc_advance = BTCCAdvance::KEEP;
+    parent.statement.btcc_receipt_state = *receipt_state;
+    parent.statement.roster_transition = RosterAuthorizationTransitionKind::KEEP;
+    parent.statement.quorum_context_hash = GetQuorumContextHash(genesis, PARENT_HEIGHT, parent.statement.block_hash, descriptors);
+    bind_authorization(parent, &base);
+    const auto parent_context{ChainLockStoreTestContextFactory::Create(config->chainlock_schedule, parent.statement, parent_rosters, 0b1111, trusted)};
+    BOOST_REQUIRE(parent_context);
+    auto* store{Access::Store(*handler)};
+    const auto parent_candidate{store->PreparePersistedCandidate(parent)};
+    BOOST_REQUIRE(parent_candidate);
+    ChainLockFinalityError admission_error{ChainLockFinalityError::NONE};
+    BOOST_REQUIRE_MESSAGE(store->AcceptPersistedVerified(*parent_candidate, parent, true, &admission_error, parent_context),
+        "parent admission error=" << static_cast<int>(admission_error));
+    BOOST_REQUIRE_MESSAGE(store->AcceptPersistedRosterAuthorizationBase(initialization, true, initialization_context, &admission_error),
+        "initialization authorization-base admission error=" << static_cast<int>(admission_error));
+    BOOST_REQUIRE_MESSAGE(store->AcceptPersistedRosterAuthorizationBase(base, true, base_context, &admission_error),
+        "base authorization-base admission error=" << static_cast<int>(admission_error));
+    auto* durable{&Access::Persistence(*handler)};
+    const auto universe{cache->GetOrCaptureRecoveryUniverse(parent_window.active.recovery_authority_source, *chain[TARGET_HEIGHT])};
+    BOOST_REQUIRE(universe);
+    const auto persistence_error_name = [](ChainLockPersistenceError error) {
+        switch (error) {
+        case ChainLockPersistenceError::NONE: return "NONE";
+        case ChainLockPersistenceError::INVALID_CHAINLOCK: return "INVALID_CHAINLOCK";
+        case ChainLockPersistenceError::STALE_HEIGHT: return "STALE_HEIGHT";
+        case ChainLockPersistenceError::HEIGHT_CONFLICT: return "HEIGHT_CONFLICT";
+        case ChainLockPersistenceError::NON_MONOTONIC_BTCC: return "NON_MONOTONIC_BTCC";
+        case ChainLockPersistenceError::NON_MONOTONIC_RECEIPT_STATE: return "NON_MONOTONIC_RECEIPT_STATE";
+        case ChainLockPersistenceError::IO_FAILURE: return "IO_FAILURE";
+        }
+        return "UNKNOWN";
+    };
+    ChainLockPersistenceError persistence_error{ChainLockPersistenceError::NONE};
+    BOOST_REQUIRE_MESSAGE(durable->PersistVerifiedAuthorizationBase(initialization, initialization_context, &persistence_error, universe),
+        "initialization authorization-base persistence error=" << persistence_error_name(persistence_error));
+    BOOST_REQUIRE_MESSAGE(durable->PersistVerifiedAuthorizationBase(base, base_context, &persistence_error, universe),
+        "base authorization-base persistence error=" << persistence_error_name(persistence_error));
+    BOOST_REQUIRE_MESSAGE(durable->PersistBest(parent, parent_context, &persistence_error, std::nullopt, universe),
+        "parent persistence error=" << persistence_error_name(persistence_error));
+    BOOST_REQUIRE(durable->GetFinalityState().best == store->GetBestRecord()->metadata);
+    llmq::CPQQuorumConnectionOverlay overlay{connman, cache, [&] { return handler->GetBestChainLock()->statement.height; },
+        config->btcc_schedule, [&](const llmq::PQShareRelayFallbackKey& key) { return handler->IsCurrentChainLockRelaySource(key); }};
+    llmq::pqQuorumConnectionOverlay = &overlay;
+    sporkManager = std::make_unique<CSporkManager>();
+    const std::string spork_secret{"cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"};
+    const auto spork_key{DecodeSecret(spork_secret)};
+    BOOST_REQUIRE(spork_key.IsValid());
+    BOOST_REQUIRE(sporkManager->SetSporkAddress(EncodeDestination(PKHash(spork_key.GetPubKey().GetID()))));
+    BOOST_REQUIRE(sporkManager->SetMinSporkKeys(1));
+    BOOST_REQUIRE(sporkManager->SetPrivKey(spork_secret));
+    BOOST_REQUIRE(sporkManager->UpdateSpork(SPORK_19_CHAINLOCKS_ENABLED, 0, peerman));
+    masternodeSync.SetSyncMode(MASTERNODE_SYNC_GOVERNANCE);
+    BOOST_REQUIRE(!gArgs.IsArgSet("-pqchainlocktestfixture"));
+    BOOST_REQUIRE(Access::RefreshLiveSigningContexts(*handler));
+    const auto prepared{Access::PublishedPreparedContext(*handler)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(prepared->Statement().roster_transition == RosterAuthorizationTransitionKind::ROTATE);
+    BOOST_REQUIRE_EQUAL(prepared->Statement().height, TARGET_HEIGHT);
+    BOOST_REQUIRE_EQUAL(prepared->Rosters().back().descriptor.epoch, 4U);
+    const auto normal_members{llmq::GetPQQuorumUnionRelayConnections(prepared->Rosters(), local)};
+    BOOST_REQUIRE(!normal_members.contains(remote));
+    auto candidates{llmq::BuildPQShareRelayFallbackCandidates(prepared->Rosters(), local)};
+    const auto remote_position{std::find(candidates.begin(), candidates.end(), remote)};
+    BOOST_REQUIRE(remote_position != candidates.end());
+    std::iter_swap(candidates.begin(), remote_position);
+    // The only local-share seam is a cached journal result. This test does
+    // not claim local WOTS/journal coverage. Candidate order and elapsed grace
+    // are fixed for determinism; membership/advance/source checks are real.
+    const auto& local_roster{prepared->Rosters()[0]};
+    const auto local_member{std::find_if(local_roster.members.begin(), local_roster.members.end(),
+        [&](const auto& member) { return member.pro_tx_hash == local; })};
+    BOOST_REQUIRE(local_member != local_roster.members.end());
+    FinalChainLock local_candidate;
+    local_candidate.statement = prepared->Statement();
+    ChainLockShare own;
+    own.transcript = BuildChainLockShareTranscript(local_candidate, local_roster.descriptor,
+        static_cast<uint16_t>(std::distance(local_roster.members.begin(), local_member)), local);
+    own.authenticated_signature.key_proof.public_key[0] = 1;
+    own.authenticated_signature.signature[0] = 1;
+    Access::CacheLocalRelayShare(*handler, own);
+    Access::StartRelayFallback(*handler, candidates, 0);
+    Access::RelayLocalShares(*handler);
+    const auto source_key{Access::RelayFallbackKey(*handler)};
+    BOOST_REQUIRE(source_key && handler->IsCurrentChainLockRelaySource(*source_key));
+    BOOST_REQUIRE(Access::RelayFallbackMembers(*handler).contains(remote));
+
+    const auto stable_identity{Access::PublishedRelayIdentity(*handler)};
+    const auto stable_members{Access::RelayFallbackMembers(*handler)};
+    BOOST_REQUIRE(stable_identity.first);
+    BOOST_REQUIRE_EQUAL(stable_members.size(), 1U);
+
+    // There is no TCP socket in this fixture. Both VERSION and MNAUTH are
+    // serialized wire messages handled by PeerManager; its default worker
+    // performs the real local SLH signature and remote SLH verification.
+    auto* peer{new CNode{2'180'000, nullptr, CAddress{remote_service, NODE_NETWORK},
+        1, 1, CAddress{}, std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
+    peer->m_masternode_connection = true;
+    peer->m_masternode_fallback_identity = remote;
+    connman.AddTestNode(*peer);
+    peerman.InitializeNode(*peer, ServiceFlags(NODE_NETWORK | NODE_WITNESS));
+    registered_peers.push_back(peer);
+    connman.FlushSendBuffer(*peer);
+    CMNAuthVersionData version_identity;
+    version_identity.pro_tx_hash = remote;
+    version_identity.global_key_version = 1;
+    version_identity.cookie = NonNullHash(2'180'001);
+    const ServiceFlags remote_services{NODE_NETWORK | NODE_WITNESS};
+    const CNetMsgMaker maker{0};
+    auto version_message{maker.Make(NetMsgType::VERSION, int32_t{PQ_MNAUTH_PROTO_VERSION},
+        Using<CustomUintFormatter<8>>(remote_services),
+        int64_t{GetTime()}, int64_t{0}, CNetAddr::V1(CService{}), int64_t{0}, CNetAddr::V1(CService{}),
+        uint64_t{2'180'002}, std::string{"/real-rotate-fallback/"}, TIP_HEIGHT, true,
+        NonNullHash(2'180'003), true, version_identity)};
+    CDataStream version{version_message.data, SER_NETWORK, PROTOCOL_VERSION};
+    const std::atomic_bool interrupt{false};
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        peerman.ProcessMessage(*peer, NetMsgType::VERSION, version, GetTime<std::chrono::microseconds>(), interrupt);
+        peerman.SendMessages(peer);
+    }
+    BOOST_REQUIRE(!peer->fDisconnect);
+    BOOST_REQUIRE_EQUAL(peer->GetCommonVersion(), PQ_MNAUTH_PROTO_VERSION);
+    connman.FlushSendBuffer(*peer);
+    const auto auth_before{peerman.GetMNAuthAsyncStats()};
+    CDataStream verack{SER_NETWORK, PROTOCOL_VERSION};
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        peerman.ProcessMessage(*peer, NetMsgType::VERACK, verack, GetTime<std::chrono::microseconds>(), interrupt);
+    }
+    const auto wait_until = [](const auto& predicate, std::chrono::microseconds timeout) {
+        const auto deadline{std::chrono::steady_clock::now() + timeout};
+        while (!predicate()) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return true;
+    };
+    BOOST_REQUIRE(wait_until([&] {
+        const auto stats{peerman.GetMNAuthAsyncStats()};
+        return stats.sign_completed == auth_before.sign_completed + 1 && stats.completion_queue_depth == 1;
+    }, CMNAuth::AsyncConfig{}.sign_timeout));
+    BOOST_REQUIRE_EQUAL(peerman.GetMNAuthAsyncStats().sign_failed, auth_before.sign_failed);
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        peerman.ProcessAsyncCompletions();
+    }
+    BOOST_REQUIRE(peer->GetMNAuthPending().phase == CMNAuthPendingPhase::AWAITING_REMOTE);
+    V1Transport receiver{peer->GetId(), SER_NETWORK, peer->GetCommonVersion()};
+    std::optional<PQMNAUTHMessage> local_auth;
+    {
+        LOCK(peer->cs_vSend);
+        for (unsigned part{0}; part < 32; ++part) {
+            if (!peer->vSendMsg.empty()) {
+                const auto usage{peer->vSendMsg.front().GetMemoryUsage()};
+                if (peer->m_transport->SetMessageToSend(peer->vSendMsg.front())) {
+                    peer->vSendMsg.pop_front();
+                    peer->m_send_memusage -= usage;
+                }
+            }
+            auto bytes{std::get<0>(peer->m_transport->GetBytesToSend(!peer->vSendMsg.empty()))};
+            if (bytes.empty()) break;
+            const auto count{bytes.size()};
+            while (!bytes.empty()) BOOST_REQUIRE(receiver.ReceivedBytes(bytes));
+            peer->m_transport->MarkBytesSent(count);
+            if (receiver.ReceivedMessageComplete()) {
+                bool reject{false};
+                auto message{receiver.GetReceivedMessage({}, reject)};
+                BOOST_REQUIRE(!reject);
+                if (message.m_type == NetMsgType::MNAUTH) {
+                    BOOST_REQUIRE(!local_auth);
+                    PQMNAUTHMessage auth;
+                    BOOST_REQUIRE(DecodePQMNAUTHMessage(message.m_recv, auth));
+                    local_auth = auth;
+                }
+            }
+        }
+    }
+    BOOST_REQUIRE(local_auth);
+    BOOST_CHECK(local_auth->signer_role == MNAUTHSignerRole::INITIATOR);
+    BOOST_CHECK(local_auth->signer_pro_tx_hash == local);
+    BOOST_CHECK_EQUAL(local_auth->signer_global_key_version, 1U);
+    const auto connection{peer->GetMNAuthConnectionData()};
+    const auto local_endpoint{MakeNetworkEndpoint(local_service)};
+    const auto remote_endpoint{MakeNetworkEndpoint(remote_service)};
+    BOOST_REQUIRE(local_endpoint && remote_endpoint);
+    const auto local_transcript{BuildMNAUTHTranscript(connection, true, *local_endpoint, *remote_endpoint,
+        MNAUTHSignerRole::INITIATOR, Params().MessageStart(), NODE_NETWORK)};
+    BOOST_REQUIRE(local_transcript);
+    const auto local_record{key_for(local)}, remote_record{key_for(remote)};
+    const auto local_digest{GetMNAUTHAuthorizationHash(genesis, local_record, remote_record, *local_transcript, NODE_NETWORK)};
+    BOOST_REQUIRE(local_digest);
+    BOOST_REQUIRE(slhdsa::Verify(local_public, std::span<const uint8_t>{local_digest->begin(), local_digest->size()},
+        GetGlobalAuthContext(GlobalAuthPurpose::MNAUTH), local_auth->signature));
+    const auto remote_transcript{BuildMNAUTHTranscript(connection, true, *local_endpoint, *remote_endpoint,
+        MNAUTHSignerRole::RESPONDER, Params().MessageStart(), NODE_NETWORK)};
+    BOOST_REQUIRE(remote_transcript);
+    const auto remote_digest{GetMNAUTHAuthorizationHash(genesis, local_record, remote_record, *remote_transcript, NODE_NETWORK)};
+    BOOST_REQUIRE(remote_digest);
+    PQMNAUTHMessage reply;
+    reply.signer_role = MNAUTHSignerRole::RESPONDER;
+    reply.signer_pro_tx_hash = remote;
+    reply.signer_global_key_version = 1;
+    BOOST_REQUIRE(slhdsa::SignDeterministic(*remote_secret, std::span<const uint8_t>{remote_digest->begin(), remote_digest->size()},
+        GetGlobalAuthContext(GlobalAuthPurpose::MNAUTH), reply.signature));
+    CDataStream reply_wire{SER_NETWORK, PROTOCOL_VERSION};
+    reply_wire << reply;
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        peerman.ProcessMessage(*peer, NetMsgType::MNAUTH, reply_wire, GetTime<std::chrono::microseconds>(), interrupt);
+    }
+    BOOST_REQUIRE(wait_until([&] {
+        const auto stats{peerman.GetMNAuthAsyncStats()};
+        return stats.verify_completed == auth_before.verify_completed + 1 && stats.completion_queue_depth == 1;
+    }, CMNAuth::AsyncConfig{}.verify_timeout));
+    BOOST_REQUIRE_EQUAL(peerman.GetMNAuthAsyncStats().verify_failed, auth_before.verify_failed);
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        peerman.ProcessAsyncCompletions();
+    }
+    BOOST_REQUIRE(peer->GetVerifiedProRegTxHash() == remote);
+    BOOST_REQUIRE(peer->GetMNAuthPending().phase == CMNAuthPendingPhase::COMPLETE);
+    BOOST_REQUIRE(!peer->fDisconnect);
+
+    auto notifications{std::make_shared<CDSNotificationInterface>(connman, peerman)};
+    RegisterSharedValidationInterface(notifications);
+    struct UnregisterNotifications {
+        std::shared_ptr<CDSNotificationInterface> notifications;
+        ~UnregisterNotifications() {
+            UnregisterValidationInterface(notifications.get());
+            SyncWithValidationInterfaceQueue();
+        }
+    } unregister{notifications};
+    const auto update_tip = [&](int32_t height) {
+        CBlockIndex* previous;
+        {
+            LOCK(::cs_main);
+            previous = chainman.ActiveTip();
+            chainman.ActiveChainstate().m_chain.SetTip(*chain[height]);
+            deterministicMNManager->UpdatedBlockTip(chain[height]);
+        }
+        GetMainSignals().UpdatedBlockTip(chain[height], previous, chainman, false);
+        SyncWithValidationInterfaceQueue();
+    };
+    for (const int32_t height : {TIP_HEIGHT + 1, TIP_HEIGHT + 2, END_HEIGHT - 1}) {
+        update_tip(height);
+        BOOST_REQUIRE(!peer->fDisconnect);
+        BOOST_CHECK(peer->GetVerifiedProRegTxHash() == remote);
+        BOOST_CHECK(peer->GetMNAuthPending().phase == CMNAuthPendingPhase::COMPLETE);
+        BOOST_CHECK(connman.IsMasternodeQuorumRelayMember(remote));
+        BOOST_CHECK(handler->IsCurrentChainLockRelaySource(*source_key));
+        BOOST_REQUIRE(Access::RefreshLiveSigningContexts(*handler));
+        BOOST_CHECK(Access::PublishedRelayIdentity(*handler) == stable_identity);
+        BOOST_CHECK(Access::RelayFallbackKey(*handler) == source_key);
+        BOOST_CHECK(Access::RelayFallbackMembers(*handler) == stable_members);
+    }
+    update_tip(END_HEIGHT);
+    BOOST_CHECK(!handler->IsCurrentChainLockRelaySource(*source_key));
+    BOOST_CHECK(peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(remote));
+    (void)Access::RefreshLiveSigningContexts(*handler);
+    BOOST_CHECK(Access::PublishedRelayIdentity(*handler) != stable_identity);
+}
+#endif
 
 BOOST_FIXTURE_TEST_CASE(chainlock_fallback_relays_only_local_cached_shares_after_outbound_auth,
                         PQAuthorizationBasePathSetup)

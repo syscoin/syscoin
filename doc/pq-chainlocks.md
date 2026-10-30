@@ -2903,6 +2903,13 @@ Expected failures are fail-closed:
   roster and creates the unique current view;
   accepting its winner clears stale statement variants while preserving any
   concurrently created exact-successor view.
+- In-process ROTATE/fallback lifecycle coverage publishes the signing context
+  through production refresh, completes outbound VERSION/VERACK and real
+  global-SLH MNAUTH, and delivers queued tip callbacks. Check stable collector
+  and fallback state within the window, the fallback connection marked for
+  retirement at expiry, and retirement of the old published context on refresh.
+  The fixture supplies prevalidated chain/registry/parent state, a cached local
+  share, and controlled fallback timing.
 - Reorg before signing lag, during parallel verification, after witness receipt,
   and after accepted finality.
 - Ordinary catch-up accepts exactly the latest signable active target or a
