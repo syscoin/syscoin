@@ -7443,10 +7443,11 @@ static void UpdateTipLog(
         if (tip->nHeight % BACKGROUND_LOG_INTERVAL != 0) {
             LogPrintLevel(BCLog::VALIDATION, BCLog::Level::Debug, "%s\n", msg);
         } else {
-            LogPrintf("%s",msg);
+            // Preserve block-tip diagnostics independently of the disk-log quota.
+            LogPrintLevel_(BCLog::NONE, BCLog::Level::None, false, "%s", msg);
         }
     } else {
-        LogPrintf("%s",msg);
+        LogPrintLevel_(BCLog::NONE, BCLog::Level::None, false, "%s", msg);
     }
 }
 

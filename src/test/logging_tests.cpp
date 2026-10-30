@@ -5,12 +5,15 @@
 #include <init/common.h>
 #include <logging.h>
 #include <logging/timer.h>
+#include <scheduler.h>
 #include <test/util/setup_common.h>
 #include <util/string.h>
 
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <iostream>
+#include <limits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -61,6 +64,7 @@ struct LogSetup : public BasicTestingSetup {
 
     ~LogSetup()
     {
+        LogInstance().SetRateLimiting(nullptr);
         LogInstance().m_file_path = prev_log_path;
         LogPrintf("Sentinel log to reopen log file\n");
         LogInstance().m_print_to_file = prev_print_to_file;
@@ -249,6 +253,94 @@ BOOST_FIXTURE_TEST_CASE(logging_Conf, LogSetup)
         BOOST_CHECK(http_it != category_levels.end());
         BOOST_CHECK_EQUAL(http_it->second, BCLog::Level::Info);
     }
+}
+
+BOOST_AUTO_TEST_CASE(logging_rate_limiter_boundaries)
+{
+    BCLog::LogRateLimiter limiter{1024, std::chrono::seconds{60}};
+    using Status = BCLog::LogRateLimiter::Status;
+    BOOST_CHECK(!limiter.SuppressionsActive());
+    limiter.Reset();
+    BOOST_CHECK(limiter.Consume("one", "source.cpp", 1, 1023) == Status::UNSUPPRESSED);
+    BOOST_CHECK(limiter.Consume("one", "source.cpp", 1, 1) == Status::UNSUPPRESSED);
+    BOOST_CHECK(limiter.Consume("one", "source.cpp", 1, 1) == Status::NEWLY_SUPPRESSED);
+    BOOST_CHECK(limiter.SuppressionsActive());
+    BOOST_CHECK(limiter.Consume("one", "source.cpp", 1, 1) == Status::STILL_SUPPRESSED);
+    // File and line identify independent quotas, including calls through helpers.
+    BOOST_CHECK(limiter.Consume("two", "source.cpp", 2, 1024) == Status::UNSUPPRESSED);
+    BOOST_CHECK(limiter.Consume("one", "other.cpp", 1, 1024) == Status::UNSUPPRESSED);
+    BOOST_CHECK(limiter.Consume("one", "source.cpp", 1, std::numeric_limits<uint64_t>::max()) == Status::STILL_SUPPRESSED);
+    limiter.Reset();
+    BOOST_CHECK(!limiter.SuppressionsActive());
+    BOOST_CHECK(limiter.Consume("one", "source.cpp", 1, 1024) == Status::UNSUPPRESSED);
+}
+
+static std::string ReadLog(const fs::path& path)
+{
+    std::ifstream file{path};
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
+BOOST_FIXTURE_TEST_CASE(logging_disk_quota_and_reset, LogSetup)
+{
+    auto limiter = std::make_shared<BCLog::LogRateLimiter>(64, std::chrono::seconds{20});
+    LogInstance().SetRateLimiting(limiter);
+    const std::string message(31, 'a');
+    auto log = [&] {
+        LogInstance().LogPrintStr(message + "\n", "one", "quota.cpp", 1, BCLog::NONE, BCLog::Level::None);
+    };
+    log();
+    log();
+    BOOST_CHECK_EQUAL(ReadLog(tmp_log_path), message + "\n" + message + "\n");
+    log();
+    const auto suppressed = ReadLog(tmp_log_path);
+    BOOST_CHECK(suppressed.find("Excessive logging from quota.cpp:1") != std::string::npos);
+    for (int i = 0; i < 100; ++i) log();
+    BOOST_CHECK_EQUAL(ReadLog(tmp_log_path), suppressed);
+
+    // Another source still reaches disk, and a dropped entry still reaches callbacks.
+    std::string callback_message;
+    auto callback = LogInstance().PushBackCallback([&](const std::string& str) { callback_message = str; });
+    log();
+    LogInstance().DeleteCallback(callback);
+    BOOST_CHECK(callback_message.find(message) != std::string::npos);
+    BOOST_CHECK_EQUAL(ReadLog(tmp_log_path), suppressed);
+    LogInstance().LogPrintStr("unrelated\n", "two", "quota.cpp", 2, BCLog::NONE, BCLog::Level::None);
+    BOOST_CHECK(ReadLog(tmp_log_path).find("unrelated\n") != std::string::npos);
+
+    // Exercise the same scheduler reset as production without a wall-clock sleep.
+    CScheduler scheduler;
+    scheduler.scheduleEvery([weak = std::weak_ptr{limiter}] {
+        if (auto locked = weak.lock()) locked->Reset();
+    }, limiter->m_reset_window);
+    scheduler.MockForward(limiter->m_reset_window);
+    std::promise<void> synced;
+    scheduler.scheduleFromNow([&] { synced.set_value(); }, std::chrono::milliseconds{0});
+    scheduler.m_service_thread = std::thread([&] { scheduler.serviceQueue(); });
+    synced.get_future().wait();
+    scheduler.stop();
+    BOOST_CHECK(!limiter->SuppressionsActive());
+    BOOST_CHECK(ReadLog(tmp_log_path).find("Restarting disk logging from quota.cpp:1") != std::string::npos);
+    const auto reset_size = ReadLog(tmp_log_path).size();
+    log();
+    BOOST_CHECK_EQUAL(ReadLog(tmp_log_path).size(), reset_size + message.size() + 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(logging_debug_exempt_and_error_callers, LogSetup)
+{
+    LogInstance().SetRateLimiting(std::make_shared<BCLog::LogRateLimiter>(128));
+    auto debug = [] { LogPrint(BCLog::NET, "debug exempt\n"); };
+    for (int i = 0; i < 100; ++i) debug();
+    BOOST_CHECK(ReadLog(tmp_log_path).find("Excessive logging") == std::string::npos);
+
+    auto error_one = [] { return error("source one"); };
+    auto error_two = [] { return error("source two"); };
+    for (int i = 0; i < 100; ++i) BOOST_CHECK(!error_one());
+    const auto suppressed = ReadLog(tmp_log_path);
+    BOOST_CHECK(suppressed.find("Excessive logging") != std::string::npos);
+    BOOST_CHECK(!error_two());
+    BOOST_CHECK(ReadLog(tmp_log_path).find("ERROR: source two") != std::string::npos);
+    BOOST_CHECK_GT(ReadLog(tmp_log_path).size(), suppressed.size());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
