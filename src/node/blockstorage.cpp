@@ -22,6 +22,7 @@
 #include <undo.h>
 #include <util/batchpriority.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <util/signalinterrupt.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
@@ -35,6 +36,7 @@
 #include <masternode/activemasternode.h>
 #include <algorithm>
 #include <map>
+#include <limits>
 #include <unordered_map>
 
 namespace kernel {
@@ -807,15 +809,19 @@ bool BlockManager::UndoWriteToDisk(const CBlockUndo& blockundo, FlatFilePos& pos
     }
 
     // Write index header
-    unsigned int nSize = GetSerializeSize(blockundo, CLIENT_VERSION);
+    const auto serialized_size{GetSerializeSize(blockundo, CLIENT_VERSION)};
+    if (serialized_size > std::numeric_limits<uint32_t>::max()) {
+        return error("%s: undo record size exceeds its framing limit", __func__);
+    }
+    const uint32_t nSize{static_cast<uint32_t>(serialized_size)};
     fileout << GetParams().MessageStart() << nSize;
 
     // Write undo data
-    long fileOutPos = ftell(fileout.Get());
+    const int64_t fileOutPos{FileTell64(fileout.Get())};
     if (fileOutPos < 0) {
         return error("%s: ftell failed", __func__);
     }
-    pos.nPos = (unsigned int)fileOutPos;
+    pos.nPos = static_cast<uint64_t>(fileOutPos);
     fileout << blockundo;
 
     // calculate & write checksum
@@ -1013,9 +1019,13 @@ fs::path BlockManager::GetBlockPosFilename(const FlatFilePos& pos) const
     return BlockFileSeq().FileName(pos);
 }
 
-bool BlockManager::FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown)
+bool BlockManager::FindBlockPos(FlatFilePos& pos, uint64_t nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown)
 {
     LOCK(cs_LastBlockFile);
+    const auto max_position{static_cast<uint64_t>(std::numeric_limits<int64_t>::max())};
+    if (nAddSize > max_position || (fKnown && pos.nPos > max_position - nAddSize)) {
+        return error("%s: block file position overflow", __func__);
+    }
 
     const BlockfileType chain_type = BlockfileTypeForHeight(nHeight);
 
@@ -1035,7 +1045,7 @@ bool BlockManager::FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigne
 
     bool finalize_undo = false;
     if (!fKnown) {
-        unsigned int max_blockfile_size{MAX_BLOCKFILE_SIZE};
+        uint64_t max_blockfile_size{MAX_BLOCKFILE_SIZE};
         // Use smaller blockfiles in test-only -fastprune mode - but avoid
         // the possibility of having a block not fit into the block file.
         if (m_opts.fast_prune) {
@@ -1047,7 +1057,7 @@ bool BlockManager::FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigne
         }
         assert(nAddSize < max_blockfile_size);
 
-        while (m_blockfile_info[nFile].nSize + nAddSize >= max_blockfile_size) {
+        while (m_blockfile_info[nFile].nSize >= max_blockfile_size - nAddSize) {
             // when the undo file is keeping up with the block file, we want to flush it explicitly
             // when it is lagging behind (more blocks arrive than are being connected), we let the
             // undo block write case handle it
@@ -1112,12 +1122,17 @@ bool BlockManager::FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigne
     return true;
 }
 
-bool BlockManager::FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize)
+bool BlockManager::FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, uint64_t nAddSize)
 {
     pos.nFile = nFile;
 
     LOCK(cs_LastBlockFile);
 
+    const auto max_position{static_cast<uint64_t>(std::numeric_limits<int64_t>::max())};
+    if (m_blockfile_info[nFile].nUndoSize > max_position ||
+        nAddSize > max_position - m_blockfile_info[nFile].nUndoSize) {
+        return FatalError(m_opts.notifications, state, "Undo file position overflow");
+    }
     pos.nPos = m_blockfile_info[nFile].nUndoSize;
     m_blockfile_info[nFile].nUndoSize += nAddSize;
     m_dirty_fileinfo.insert(nFile);
@@ -1143,15 +1158,19 @@ bool BlockManager::WriteBlockToDisk(const CBlock& block, FlatFilePos& pos) const
     }
 
     // SYSCOIN Write index header
-    unsigned int nSize = GetSerializeSize(block, fileout.GetVersion(), SER_DISK);
+    const auto serialized_size{GetSerializeSize(block, fileout.GetVersion(), SER_DISK)};
+    if (serialized_size > std::numeric_limits<uint32_t>::max()) {
+        return error("%s: block record size exceeds its framing limit", __func__);
+    }
+    const uint32_t nSize{static_cast<uint32_t>(serialized_size)};
     fileout << GetParams().MessageStart() << nSize;
 
     // Write block
-    long fileOutPos = ftell(fileout.Get());
+    const int64_t fileOutPos{FileTell64(fileout.Get())};
     if (fileOutPos < 0) {
         return error("WriteBlockToDisk: ftell failed");
     }
-    pos.nPos = (unsigned int)fileOutPos;
+    pos.nPos = static_cast<uint64_t>(fileOutPos);
     fileout << block;
 
     return true;
@@ -1313,7 +1332,7 @@ bool BlockManager::ReadRawBlockFromDisk(std::vector<uint8_t>& block, const FlatF
 
 FlatFilePos BlockManager::SaveBlockToDisk(const CBlock& block, int nHeight, const FlatFilePos* dbp)
 {
-    unsigned int nBlockSize = ::GetSerializeSize(block, CLIENT_VERSION, SER_DISK);
+    uint64_t nBlockSize{::GetSerializeSize(block, CLIENT_VERSION, SER_DISK)};
     FlatFilePos blockPos;
     const auto position_known {dbp != nullptr};
     if (position_known) {

@@ -159,6 +159,7 @@ class BlockManager
     friend ChainstateManager;
     // SYSCOIN: Exercise the pruning durability boundary without a public test API.
     friend class test::BlockManagerPruningTestAccess;
+    friend struct BlockManagerTestAccess;
 
 private:
     const CChainParams& GetParams() const { return m_opts.chainparams; }
@@ -177,8 +178,8 @@ private:
     /** Return false if undo file flushing fails. */
     [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false);
 
-    [[nodiscard]] bool FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown);
-    bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize);
+    [[nodiscard]] bool FindBlockPos(FlatFilePos& pos, uint64_t nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown);
+    bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, uint64_t nAddSize);
 
     FlatFileSeq BlockFileSeq() const;
     FlatFileSeq UndoFileSeq() const;

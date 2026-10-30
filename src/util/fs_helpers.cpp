@@ -148,12 +148,20 @@ void DirectoryCommit(const fs::path& dirname)
 #endif
 }
 
-bool TruncateFile(FILE* file, unsigned int length)
+bool TruncateFile(FILE* file, uint64_t length)
 {
+    if (length > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        errno = EOVERFLOW;
+        return false;
+    }
 #if defined(WIN32)
-    return _chsize(_fileno(file), length) == 0;
+    return _chsize_s(_fileno(file), static_cast<int64_t>(length)) == 0;
 #else
-    return ftruncate(fileno(file), length) == 0;
+    if (length > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+        errno = EOVERFLOW;
+        return false;
+    }
+    return ftruncate(fileno(file), static_cast<off_t>(length)) == 0;
 #endif
 }
 
@@ -185,13 +193,18 @@ int RaiseFileDescriptorLimit(int nMinFD)
  * this function tries to make a particular range of a file allocated (corresponding to disk space)
  * it is advisory, and the range specified in the arguments will never contain live data
  */
-void AllocateFileRange(FILE* file, unsigned int offset, unsigned int length)
+void AllocateFileRange(FILE* file, uint64_t offset, uint64_t length)
 {
+    const auto max_position{static_cast<uint64_t>(std::numeric_limits<int64_t>::max())};
+    if (offset > max_position || length > max_position - offset) {
+        errno = EOVERFLOW;
+        return;
+    }
 #if defined(WIN32)
     // Windows-specific version
     HANDLE hFile = (HANDLE)_get_osfhandle(_fileno(file));
     LARGE_INTEGER nFileSize;
-    int64_t nEndPos = (int64_t)offset + length;
+    int64_t nEndPos = static_cast<int64_t>(offset + length);
     nFileSize.u.LowPart = nEndPos & 0xFFFFFFFF;
     nFileSize.u.HighPart = nEndPos >> 32;
     SetFilePointerEx(hFile, nFileSize, 0, FILE_BEGIN);
@@ -210,17 +223,21 @@ void AllocateFileRange(FILE* file, unsigned int offset, unsigned int length)
         fst.fst_flags = F_ALLOCATEALL;
         fcntl(fileno(file), F_PREALLOCATE, &fst);
     }
-    ftruncate(fileno(file), static_cast<off_t>(offset) + length);
+    ftruncate(fileno(file), static_cast<off_t>(offset + length));
 #else
+    if (offset + length > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+        errno = EOVERFLOW;
+        return;
+    }
 #if defined(HAVE_POSIX_FALLOCATE)
     // Version using posix_fallocate
-    off_t nEndPos = (off_t)offset + length;
+    off_t nEndPos = static_cast<off_t>(offset + length);
     if (0 == posix_fallocate(fileno(file), 0, nEndPos)) return;
 #endif
     // Fallback version
     // TODO: just write one byte per block
     static const char buf[65536] = {};
-    if (fseek(file, offset, SEEK_SET)) {
+    if (FileSeek64(file, static_cast<int64_t>(offset), SEEK_SET)) {
         return;
     }
     while (length > 0) {
