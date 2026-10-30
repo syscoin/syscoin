@@ -6942,6 +6942,79 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     return CoinsCacheSizeState::OK;
 }
 
+// A normal Geth connect acknowledgement can leave only an in-memory applied
+// prefix. Before removing its replay inputs, authenticate and durably fence an
+// active endpoint that includes every selected active-chain NEVM block.
+static std::optional<int> GetNEVMPruneHeight(
+    ChainstateManager& chainman, const std::set<int>& files)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    const auto* tip{chainman.ActiveTip()};
+    const int64_t start{chainman.GetConsensus().nNEVMStartBlock};
+    if (tip == nullptr || tip->nHeight < start) return std::nullopt;
+
+    // File heights include side branches. Use them only to bound this scan;
+    // require actual active-chain bodies before contacting the engine.
+    unsigned int highest_file_height{0};
+    unsigned int lowest_file_height{std::numeric_limits<unsigned int>::max()};
+    for (const int file : files) {
+        const auto* info{chainman.m_blockman.GetBlockFileInfo(file)};
+        lowest_file_height = std::min(lowest_file_height,
+            info->nHeightFirst);
+        highest_file_height = std::max(highest_file_height,
+            info->nHeightLast);
+    }
+    const int64_t first_height{std::max<int64_t>(start, lowest_file_height)};
+    const auto* required{tip->GetAncestor(
+        static_cast<int>(std::min<int64_t>(tip->nHeight, highest_file_height)))};
+    while (required && required->nHeight >= first_height &&
+           (!(required->nStatus & BLOCK_HAVE_DATA) || !files.count(required->nFile))) {
+        required = required->pprev;
+    }
+    if (required == nullptr || required->nHeight < first_height) return std::nullopt;
+    return required->nHeight;
+}
+
+static bool MakeNEVMPruneInputsDurable(
+    ChainstateManager& chainman, int required_height, std::string& error)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    const int64_t start{chainman.GetConsensus().nNEVMStartBlock};
+
+    // Offline Core operation remains available, but cannot discard the inputs
+    // needed to recover a subsequently reattached execution engine.
+    if (!fNEVMConnection || chainman.m_interrupt) {
+        error = "nevm-prune-engine-unavailable";
+        return false;
+    }
+    uint64_t count{0};
+    uint256 hash;
+    std::optional<NEVMBlockReject> rejection;
+    if (!FlushAndGetNEVMBlockInfo(count, hash, error, &rejection)) {
+        chainman.RequestNEVMBlockProductionRecovery(rejection);
+        return false;
+    }
+    if (!MatchesNEVMActivePrefix(start, count, hash, chainman.ActiveTip())) {
+        chainman.RequestNEVMBlockProductionRecovery(std::nullopt);
+        error = "nevm-prune-applied-branch-mismatch";
+        return false;
+    }
+    if (count < static_cast<uint64_t>(int64_t{chainman.ActiveHeight()} - start + 1)) {
+        chainman.RequestNEVMBlockProductionRecovery(std::nullopt);
+    }
+    if (count < static_cast<uint64_t>(int64_t{required_height} - start + 1)) {
+        error = "nevm-prune-applied-prefix-behind";
+        return false;
+    }
+    if (!MakeNEVMPairDurable(chainman, count, hash)) {
+        error = "nevm-prune-durability-unavailable";
+        return false;
+    }
+    return true;
+}
+
 bool Chainstate::FlushStateToDisk(
     BlockValidationState &state,
     FlushStateMode mode,
@@ -6960,7 +7033,9 @@ bool Chainstate::FlushStateToDisk(
         bool fDoFullFlush = false;
 
         CoinsCacheSizeState cache_state = GetCoinsCacheSizeState();
-        LOCK(m_blockman.cs_LastBlockFile);
+        WAIT_LOCK(m_blockman.cs_LastBlockFile, blockfile_lock);
+        std::optional<int> nevm_prune_height;
+        const bool previous_prune_request{m_blockman.m_check_for_pruning};
         if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && !fReindex) {
             // make sure we don't prune above any of the prune locks bestblocks
             // pruning is height-based
@@ -6992,10 +7067,21 @@ bool Chainstate::FlushStateToDisk(
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCHMARK);
 
                 m_blockman.FindFilesToPrune(setFilesToPrune, last_prune, *this, m_chainman);
-                m_blockman.m_check_for_pruning = false;
+            }
+            // ConnectTip flushes its coins view before publishing m_chain's
+            // new tip. Wait for that publication before binding a pruning
+            // fence to the active branch; the normal post-activation flush
+            // will retry with the same retained files.
+            const bool defer_pruning{!setFilesToPrune.empty() && m_chain.Tip() &&
+                CoinsTip().GetBestBlock() != m_chain.Tip()->GetBlockHash()};
+            if (defer_pruning) {
+                setFilesToPrune.clear();
+                m_blockman.m_check_for_pruning = true;
             }
             if (!setFilesToPrune.empty()) {
+                nevm_prune_height = GetNEVMPruneHeight(m_chainman, setFilesToPrune);
                 fFlushForPrune = true;
+                m_blockman.m_check_for_pruning = true;
                 // SYSCOIN BEGIN: Publish Bitcoin's pruned flag after the coins barrier below.
                 // if (!m_blockman.m_have_pruned) {
                 //     m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
@@ -7003,6 +7089,7 @@ bool Chainstate::FlushStateToDisk(
                 // }
                 // SYSCOIN END: Publish Bitcoin's pruned flag after the coins barrier below.
             }
+            else if (!defer_pruning && nManualPruneHeight <= 0) m_blockman.m_check_for_pruning = false;
         }
         const auto nNow{SteadyClock::now()};
         // Avoid writing/flushing immediately after startup.
@@ -7228,6 +7315,24 @@ bool Chainstate::FlushStateToDisk(
             if (!(fFlushForPrune ? CoinsDB().FlushWithSync(CoinsTip()) : CoinsTip().Flush()))
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to write to coin database");
 
+            if (fFlushForPrune && nevm_prune_height) {
+                // Core's recovery dependencies are now durable. Hold its active
+                // branch fixed, but do not keep the block-file mutex across IPC.
+                std::string error;
+                bool durable;
+                {
+                    REVERSE_LOCK(blockfile_lock);
+                    durable = MakeNEVMPruneInputsDurable(m_chainman, *nevm_prune_height, error);
+                }
+                if (!durable) {
+                    // Pruning is optional: a temporary engine fault must not
+                    // turn an otherwise successful block connection into an
+                    // error. Keep all files, indexes and the retry request.
+                    LogPrint(BCLog::PRUNE, "Deferring block pruning: %s\n", error);
+                    if (nManualPruneHeight > 0) return state.Error(error);
+                    fFlushForPrune = false;
+                }
+            }
             if (fFlushForPrune) {
                 // Selection above is read-only. Publish pruning tombstones
                 // only after the recovery suffix has retired, then unlink.
@@ -7247,6 +7352,7 @@ bool Chainstate::FlushStateToDisk(
                 }
                 LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCHMARK);
                 m_blockman.UnlinkPrunedFiles(setFilesToPrune);
+                m_blockman.m_check_for_pruning = nManualPruneHeight > 0 && previous_prune_request;
             }
             // SYSCOIN END: Synchronize coins before applying Bitcoin's pruning mutations.
 

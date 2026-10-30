@@ -183,6 +183,25 @@ public:
 
 // SYSCOIN: Substitute process management without bypassing NEVM recovery.
 namespace node::test {
+class BlockManagerPruningTestAccess {
+public:
+    static void Request(BlockManager& blockman) { blockman.m_check_for_pruning = true; }
+    static bool Requested(const BlockManager& blockman) { return blockman.m_check_for_pruning; }
+    static void AssertFileLockNotHeld(BlockManager& blockman)
+    {
+        AssertLockNotHeld(blockman.cs_LastBlockFile);
+    }
+    static std::set<int> Select(BlockManager& blockman, bool automatic,
+                                const Chainstate& chainstate, ChainstateManager& chainman,
+                                int height = 500)
+    {
+        std::set<int> selected;
+        if (automatic) blockman.FindFilesToPrune(selected, height, chainstate, chainman);
+        else blockman.FindFilesToPruneManual(selected, height, chainstate, chainman);
+        return selected;
+    }
+};
+
 class NEVMRestartTestAccess {
 public:
     static void SetRestart(Chainstate& chainstate, std::function<bool()> restart)
@@ -9417,7 +9436,7 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
         return MineNEVMBlock();
     }
 
-    void PreparePruningGap()
+    void PreparePruningGap(bool require_victim_prunable = true)
     {
         auto& chainman{*m_node.chainman};
         auto& chainstate{chainman.ActiveChainstate()};
@@ -9432,6 +9451,7 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
             BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS));
             BOOST_REQUIRE(chainstate.CoinsDB().FlushWithSync(chainstate.CoinsTip()));
             BOOST_REQUIRE(GetNEVMData(state, *durable_block, durable_header));
+            nevm->PersistAppliedPair();
         }
         for (int height{102}; height <= 250; ++height) published_block = MinePruningBlock();
         SyncWithValidationInterfaceQueue();
@@ -9466,8 +9486,10 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
         BOOST_REQUIRE_EQUAL(victim_status & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO),
                             BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
         BOOST_REQUIRE(victim_block_pos.nFile != chainman.ActiveTip()->GetBlockPos().nFile);
-        BOOST_REQUIRE_LE(blockman.GetBlockFileInfo(victim_block_pos.nFile)->nHeightLast,
-                         500U - MIN_BLOCKS_TO_KEEP);
+        if (require_victim_prunable) {
+            BOOST_REQUIRE_LE(blockman.GetBlockFileInfo(victim_block_pos.nFile)->nHeightLast,
+                             500U - MIN_BLOCKS_TO_KEEP);
+        }
         victim_block_path = m_args.GetBlocksDirPath() /
             fs::PathFromString(strprintf("blk%05u.dat", victim_block_pos.nFile));
         victim_undo_path = m_args.GetBlocksDirPath() /
@@ -9487,6 +9509,19 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
         BOOST_CHECK(index.GetUndoPos() == victim_undo_pos);
         BOOST_CHECK(fs::exists(victim_block_path));
         BOOST_CHECK(fs::exists(victim_undo_path));
+    }
+
+    void AddPrunePressure()
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        auto& blockman{m_node.chainman->m_blockman};
+        const int current_file{m_node.chainman->ActiveTip()->GetBlockPos().nFile};
+        const auto path{m_args.GetBlocksDirPath() /
+            fs::PathFromString(strprintf("blk%05u.dat", current_file))};
+        const auto target{blockman.GetPruneTarget()};
+        BOOST_REQUIRE_LE(target, std::numeric_limits<unsigned int>::max());
+        fs::resize_file(path, target);
+        blockman.GetBlockFileInfo(current_file)->nSize = static_cast<unsigned int>(target);
     }
 
     void CheckColdRecovery(bool pruned, const uint256& physical_coins,
@@ -9612,13 +9647,7 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
                 // Apply real target pressure without allocating hundreds of
                 // MiB of payload. This sparse extension is matched by actual
                 // file metadata, so all flat-file durability checks still run.
-                const int current_file{chainman.ActiveTip()->GetBlockPos().nFile};
-                const auto path{m_args.GetBlocksDirPath() /
-                    fs::PathFromString(strprintf("blk%05u.dat", current_file))};
-                const auto target{blockman.GetPruneTarget()};
-                BOOST_REQUIRE_LE(target, std::numeric_limits<unsigned int>::max());
-                fs::resize_file(path, target);
-                blockman.GetBlockFileInfo(current_file)->nSize = static_cast<unsigned int>(target);
+                AddPrunePressure();
             }
             RootsDB().before_write = [&] {
                 LOCK(::cs_main);
@@ -9666,7 +9695,11 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
                               failure == Failure::NONE || failure == Failure::COINS_SYNC ? 1U : 0U);
             BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == cached_block->GetHash());
             BOOST_CHECK_EQUAL(victim->nStatus & BLOCK_FAILED_MASK, 0U);
-            BOOST_CHECK(nevm->command_trace.empty());
+            const std::vector<std::string> expected_commands{failure == Failure::NONE
+                ? std::vector<std::string>{"flush", "blockinfo",
+                    "durable-pair-v1:400:" + cached_block->GetHash().GetHex()}
+                : std::vector<std::string>{}};
+            BOOST_CHECK(nevm->command_trace == expected_commands);
             if (failure == Failure::NONE) {
                 BOOST_CHECK(blockman.IsBlockPruned(victim));
                 BOOST_CHECK_EQUAL(victim->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO), 0U);
@@ -9675,6 +9708,9 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
                 BOOST_CHECK(!fs::exists(victim_block_path));
                 BOOST_CHECK(!fs::exists(victim_undo_path));
                 BOOST_CHECK(blockman.m_have_pruned);
+                nevm->RestartFromDurablePair();
+                BOOST_CHECK_EQUAL(nevm->applied_count, 400U);
+                BOOST_CHECK(nevm->applied_hash == cached_block->GetHash());
             } else {
                 if (!automatic) BOOST_CHECK(state.IsError());
                 CheckRetainedFiles(*victim);
@@ -9689,7 +9725,198 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
         }
         // A failed Sync callback follows the real asynchronous write; clean
         // reopen can therefore see its new coins. It is not a power-loss model.
+        nevm->command_trace.clear();
         CheckColdRecovery(failure == Failure::NONE, physical_coins, physical_roots);
+    }
+
+    void CheckPruneCheckpoint(bool automatic)
+    {
+        PreparePruningGap();
+        auto& chainman{*m_node.chainman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        auto& blockman{chainman.m_blockman};
+        LOCK(::cs_main);
+        if (automatic) AddPrunePressure();
+
+        enum class EngineFault { OFFLINE, FLUSH, STATUS, COUNT, COUNT_OVERFLOW, BRANCH, BEHIND, FENCE };
+        const auto original_pair{StartupNEVMSubscriber::AppliedPair{
+            nevm->applied_count, nevm->applied_hash}};
+        const auto file_info{*blockman.GetBlockFileInfo(victim_block_pos.nFile)};
+        for (const auto fault : {EngineFault::OFFLINE, EngineFault::FLUSH,
+             EngineFault::STATUS, EngineFault::COUNT, EngineFault::COUNT_OVERFLOW,
+             EngineFault::BRANCH, EngineFault::BEHIND, EngineFault::FENCE}) {
+            nevm->command_trace.clear();
+            nevm->reported_pair_override.reset();
+            nevm->flush_available = fault != EngineFault::FLUSH;
+            nevm->block_info_error = fault == EngineFault::STATUS ? "status unavailable" : "";
+            if (fault == EngineFault::COUNT) {
+                nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{original_pair.count - 1, original_pair.hash};
+            } else if (fault == EngineFault::COUNT_OVERFLOW) {
+                nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{std::numeric_limits<uint64_t>::max(), original_pair.hash};
+            } else if (fault == EngineFault::BRANCH) {
+                nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{original_pair.count, GetRandHash()};
+            } else if (fault == EngineFault::BEHIND) {
+                nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{1, durable_block->GetHash()};
+            }
+            nevm->durable_pair_response = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                node::test::BlockManagerPruningTestAccess::AssertFileLockNotHeld(blockman);
+                CheckRetainedFiles(*victim);
+                BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == cached_block->GetHash());
+                return fault != EngineFault::FENCE;
+            };
+            fNEVMConnection = fault != EngineFault::OFFLINE;
+            node::test::BlockManagerPruningTestAccess::Request(blockman);
+            BlockValidationState state;
+            const bool flushed{chainstate.FlushStateToDisk(state,
+                FlushStateMode::IF_NEEDED, automatic ? 0 : 500)};
+            fNEVMConnection = true;
+            BOOST_CHECK_EQUAL(flushed, automatic);
+            BOOST_CHECK_EQUAL(state.IsError(), !automatic);
+            BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+            CheckRetainedFiles(*victim);
+            BOOST_CHECK(node::test::BlockManagerPruningTestAccess::Requested(blockman));
+            BOOST_CHECK(!blockman.m_have_pruned);
+            BOOST_CHECK_EQUAL(blockman.GetBlockFileInfo(victim_block_pos.nFile)->nSize, file_info.nSize);
+            BOOST_CHECK_EQUAL(blockman.GetBlockFileInfo(victim_block_pos.nFile)->nUndoSize, file_info.nUndoSize);
+            CDiskBlockIndex disk_index;
+            BOOST_REQUIRE(blockman.m_block_tree_db->Read(
+                std::make_pair(uint8_t{'b'}, victim->GetBlockHash()), disk_index));
+            BOOST_CHECK_EQUAL(disk_index.nStatus, victim_status);
+            BOOST_CHECK_EQUAL(disk_index.nFile, victim_block_pos.nFile);
+            BOOST_CHECK_EQUAL(disk_index.nDataPos, victim_block_pos.nPos);
+            BOOST_CHECK_EQUAL(disk_index.nUndoPos, victim_undo_pos.nPos);
+            CBlockFileInfo disk_file;
+            BOOST_REQUIRE(blockman.m_block_tree_db->ReadBlockFileInfo(victim_block_pos.nFile, disk_file));
+            BOOST_CHECK_EQUAL(disk_file.nSize, file_info.nSize);
+            BOOST_CHECK_EQUAL(disk_file.nUndoSize, file_info.nUndoSize);
+            BOOST_REQUIRE(nevm->durable_pair);
+            BOOST_CHECK_EQUAL(nevm->durable_pair->count, 1U);
+            BOOST_CHECK(nevm->durable_pair->hash == durable_block->GetHash());
+            std::vector<std::string> expected;
+            if (fault != EngineFault::OFFLINE) expected.push_back("flush");
+            if (fault != EngineFault::OFFLINE && fault != EngineFault::FLUSH) expected.push_back("blockinfo");
+            if (fault == EngineFault::FENCE) {
+                expected.push_back("durable-pair-v1:400:" + cached_block->GetHash().GetHex());
+            }
+            BOOST_CHECK(nevm->command_trace == expected);
+        }
+        nevm->flush_available = true;
+        nevm->block_info_error.clear();
+        nevm->reported_pair_override.reset();
+        nevm->durable_pair_response = {};
+
+        // An authenticated engine endpoint may lag the tip, but must include
+        // the last active NEVM body in every selected file.
+        const auto selected{node::test::BlockManagerPruningTestAccess::Select(
+            blockman, automatic, chainstate, chainman)};
+        const CBlockIndex* last_removed{chainman.ActiveTip()};
+        while (last_removed && !selected.count(last_removed->nFile)) last_removed = last_removed->pprev;
+        BOOST_REQUIRE(last_removed && last_removed->nHeight >= 102);
+        nevm->applied_count = last_removed->nHeight - nevm->first_nevm_height + 1;
+        nevm->applied_hash = last_removed->GetBlockHash();
+        nevm->command_trace.clear();
+        BlockValidationState retry;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(retry,
+            FlushStateMode::IF_NEEDED, automatic ? 0 : 500));
+        BOOST_CHECK(blockman.IsBlockPruned(victim));
+        BOOST_CHECK(!fs::exists(victim_block_path));
+        BOOST_CHECK(!fs::exists(victim_undo_path));
+        BOOST_CHECK(blockman.m_have_pruned);
+        if (automatic) BOOST_CHECK(!node::test::BlockManagerPruningTestAccess::Requested(blockman));
+        const auto fenced_count{nevm->applied_count};
+        nevm->RestartFromDurablePair();
+        BOOST_CHECK_EQUAL(nevm->applied_count, fenced_count);
+        BOOST_CHECK(nevm->applied_hash == last_removed->GetBlockHash());
+        const auto* next{chainman.ActiveChain()[last_removed->nHeight + 1]};
+        BOOST_REQUIRE(next);
+        BOOST_CHECK(next->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK(blockman.ReadBlockFromDisk(carrier, *next));
+    }
+
+    void CheckPruneConnectPublication()
+    {
+        PreparePruningGap();
+        auto& chainman{*m_node.chainman};
+        auto& blockman{chainman.m_blockman};
+        {
+            LOCK(::cs_main);
+            AddPrunePressure();
+            node::test::BlockManagerPruningTestAccess::Request(blockman);
+        }
+        nevm->durable_pair_response = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            node::test::BlockManagerPruningTestAccess::AssertFileLockNotHeld(blockman);
+            // AcceptBlock may prune the existing B500 prefix before applying
+            // B501. The in-flight ConnectTip flush must defer; its B501 fence
+            // is permitted only after the active tip is published.
+            BOOST_CHECK(chainman.ActiveHeight() == 500 || chainman.ActiveHeight() == 501);
+            BOOST_CHECK(chainman.ActiveChainstate().CoinsTip().GetBestBlock() ==
+                        chainman.ActiveTip()->GetBlockHash());
+            CheckRetainedFiles(*victim);
+            return false;
+        };
+        const auto connected{MinePruningBlock()};
+        SyncWithValidationInterfaceQueue();
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainman.ActiveHeight(), 501);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == connected->GetHash());
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        CheckRetainedFiles(*victim);
+        BOOST_CHECK(node::test::BlockManagerPruningTestAccess::Requested(blockman));
+        const std::vector<std::string> connect_expected{"flush", "blockinfo",
+            "durable-pair-v1:400:" + cached_block->GetHash().GetHex(),
+            "connect:" + connected->GetHash().GetHex(),
+            "flush", "blockinfo", "durable-pair-v1:401:" + connected->GetHash().GetHex()};
+        BOOST_CHECK_EQUAL_COLLECTIONS(nevm->command_trace.begin(), nevm->command_trace.end(),
+                                      connect_expected.begin(), connect_expected.end());
+        nevm->durable_pair_response = {};
+        nevm->command_trace.clear();
+        chainman.ActiveChainstate().PruneAndFlush();
+        BOOST_CHECK(blockman.IsBlockPruned(victim));
+        const std::vector<std::string> expected{"flush", "blockinfo",
+            "durable-pair-v1:401:" + connected->GetHash().GetHex()};
+        BOOST_CHECK(nevm->command_trace == expected);
+        nevm->RestartFromDurablePair();
+        BOOST_CHECK_EQUAL(nevm->applied_count, 401U);
+        BOOST_CHECK(nevm->applied_hash == connected->GetHash());
+    }
+
+    void CheckPrunePreNEVMFiles()
+    {
+        {
+            // Roll over the real B100 file before storing any NEVM block.
+            // Without this boundary, small blocks share one pre/post-NEVM file.
+            LOCK(::cs_main);
+            auto& blockman{m_node.chainman->m_blockman};
+            const int file{m_node.chainman->ActiveTip()->GetBlockPos().nFile};
+            const auto path{m_args.GetBlocksDirPath() /
+                fs::PathFromString(strprintf("blk%05u.dat", file))};
+            blockman.GetBlockFileInfo(file)->nSize = 0x10000;
+            fs::resize_file(path, 0x10000);
+        }
+        PreparePruningGap(/*require_victim_prunable=*/false);
+        auto& chainman{*m_node.chainman};
+        auto& blockman{chainman.m_blockman};
+        auto& chainstate{chainman.ActiveChainstate()};
+        LOCK(::cs_main);
+        const auto selected{node::test::BlockManagerPruningTestAccess::Select(
+            blockman, false, chainstate, chainman, 100)};
+        BOOST_REQUIRE(!selected.empty());
+        auto* before_nevm{chainman.ActiveChain()[100]};
+        while (before_nevm && !selected.count(before_nevm->nFile)) before_nevm = before_nevm->pprev;
+        BOOST_REQUIRE(before_nevm);
+        BOOST_REQUIRE(before_nevm->nStatus & BLOCK_HAVE_DATA);
+        struct RestoreConnection {
+            bool original{fNEVMConnection};
+            ~RestoreConnection() { fNEVMConnection = original; }
+        } restore;
+        fNEVMConnection = false;
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::NONE, 100));
+        BOOST_CHECK(blockman.IsBlockPruned(before_nevm));
+        CheckRetainedFiles(*victim);
+        BOOST_CHECK(nevm->command_trace.empty());
+        BOOST_REQUIRE(nevm->durable_pair);
+        BOOST_CHECK_EQUAL(nevm->durable_pair->count, 1U);
     }
 };
 // SYSCOIN END: Pruning must retain a metadata-published recovery suffix until coins are durable.
@@ -15364,6 +15591,30 @@ BOOST_FIXTURE_TEST_CASE(nevm_prune_automatic_retires_files_after_coins_sync,
                         PruningNEVMRootPublicationSetup)
 {
     CheckPrunePublication(true, Failure::NONE);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_manual_requires_durable_active_engine_prefix,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPruneCheckpoint(false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_automatic_requires_durable_active_engine_prefix,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPruneCheckpoint(true);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_automatic_waits_for_connect_publication,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPruneConnectPublication();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_pre_activation_files_need_no_engine,
+                        PruningNEVMRootPublicationSetup)
+{
+    CheckPrunePreNEVMFiles();
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,

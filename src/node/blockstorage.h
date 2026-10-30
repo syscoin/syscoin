@@ -78,6 +78,9 @@ public:
 } // namespace kernel
 
 namespace node {
+namespace test {
+class BlockManagerPruningTestAccess;
+}
 // SYSCOIN
 struct NodeContext;
 using kernel::BlockTreeDB;
@@ -153,6 +156,7 @@ class BlockManager
 {
     friend Chainstate;
     friend ChainstateManager;
+    friend class test::BlockManagerPruningTestAccess;
 
 private:
     const CChainParams& GetParams() const { return m_opts.chainparams; }
