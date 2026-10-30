@@ -370,6 +370,22 @@ BOOST_FIXTURE_TEST_CASE(
 }
 
 BOOST_FIXTURE_TEST_CASE(
+    prepared_fallback_rejects_a_missing_local_owner, TestingSetup)
+{
+    const uint256 group{NonNullHash(85)};
+    const uint256 normal{NonNullHash(86)};
+    const uint256 extra{NonNullHash(87)};
+    CPQQuorumConnectionOverlay overlay{
+        *Assert(m_node.connman), {}, [] { return std::nullopt; }};
+
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(group, {normal}, std::nullopt));
+    BOOST_CHECK(!overlay.ApplyPreparedContext(
+        group, {normal, extra}, std::nullopt, {extra}));
+    BOOST_CHECK(!m_node.connman->IsMasternodeQuorumRelayMember(extra));
+    BOOST_CHECK(m_node.connman->IsMasternodeQuorumRelayMember(normal));
+}
+
+BOOST_FIXTURE_TEST_CASE(
     payment_audit_plan_is_bounded_and_independent, TestingSetup)
 {
     const uint256 chainlock_group_a{NonNullHash(90)};

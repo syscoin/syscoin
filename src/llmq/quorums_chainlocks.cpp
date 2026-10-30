@@ -21302,7 +21302,14 @@ void CChainLocksHandler::ApplyCurrentChainLockRelayPlan(
                   contexts->source.durable_predecessor.block_hash}}
             : std::nullopt};
     (void)pqQuorumConnectionOverlay->ApplyPreparedContext(
-        contexts->statements[0].quorum_context_hash, members, predecessor, fallback);
+        contexts->statements[0].quorum_context_hash, members, predecessor, fallback,
+        contexts->relay_plan->local_pro_tx_hash,
+        PQQuorumOverlayTarget{contexts->statements[0].height, contexts->statements[0].block_hash,
+            contexts->source.staged_recovery ||
+                    (!contexts->source.has_durable_chainlock &&
+                     contexts->source.historical_coverage_token.IsNull())
+                ? PQQuorumOverlayTargetMode::ROSTER_INITIALIZATION
+                : PQQuorumOverlayTargetMode::ORDINARY});
 }
 
 void CChainLocksHandler::RememberLocalChainLockShare(

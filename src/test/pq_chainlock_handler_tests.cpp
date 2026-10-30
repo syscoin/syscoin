@@ -10938,6 +10938,398 @@ BOOST_FIXTURE_TEST_CASE(
     // it exercises the real local handler gate, not a completed WOTS signature.
 }
 
+BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
+                        PQAuthorizationBasePathSetup)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+    constexpr int32_t ACCEPTED_HEIGHT{2'305};
+    constexpr int32_t TARGET_HEIGHT{ACCEPTED_HEIGHT + PQ_CL_PERIOD};
+    constexpr int32_t TIP_HEIGHT{TARGET_HEIGHT + PQ_CL_SIGN_LAG};
+    constexpr int32_t LAST_HEIGHT{TIP_HEIGHT + PQ_CL_PERIOD};
+    constexpr int32_t PREPARATION_HEIGHT{1'000};
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    const auto original_consensus{consensus};
+    auto* original_tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    auto original_manager{std::move(deterministicMNManager)};
+    CActiveMasternodeInfo original_identity;
+    {
+        LOCK(activeMasternodeInfoCs);
+        std::swap(activeMasternodeInfo, original_identity);
+    }
+    const bool original_mode{fMasternodeMode};
+    auto* original_handler{llmq::chainLocksHandler};
+    struct Restore {
+        ChainstateManager& chainman;
+        ConnmanTestMsg& connman;
+        Consensus::Params& consensus;
+        Consensus::Params saved_consensus;
+        CBlockIndex* tip;
+        std::unique_ptr<CDeterministicMNManager>& manager;
+        CActiveMasternodeInfo& identity;
+        bool mode;
+        llmq::CChainLocksHandler* handler;
+        ~Restore() {
+            connman.ClearTestNodes();
+            llmq::chainLocksHandler = handler;
+            {
+                LOCK(::cs_main);
+                chainman.ActiveChainstate().m_chain.SetTip(*tip);
+            }
+            deterministicMNManager = std::move(manager);
+            consensus = saved_consensus;
+            LOCK(activeMasternodeInfoCs);
+            std::swap(activeMasternodeInfo, identity);
+            fMasternodeMode = mode;
+        }
+    } restore{chainman, connman, consensus, original_consensus, original_tip,
+              original_manager, original_identity, original_mode, original_handler};
+
+    consensus.DIP0003Height = PREPARATION_HEIGHT - 1;
+    consensus.DIP0003EnforcementHeight = PREPARATION_HEIGHT - 1;
+    consensus.nPQActivationHeight = ACCEPTED_HEIGHT;
+    consensus.nPQPreparationHeight = PREPARATION_HEIGHT;
+    consensus.nPQChainLockEpochOrigin = 1'440;
+    consensus.nPQRegistrationCutoffBlocks = 288;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQRosterSnapshotLag = 288;
+    consensus.nPQBTCCCandidateOrigin = ACCEPTED_HEIGHT;
+    consensus.nPQBTCCNEVMInjectionLag = PQ_BTCC_NEVM_LAG;
+    consensus.nPQBTCCReceiptAnchorHeight = PREPARATION_HEIGHT;
+    consensus.nDefaultAssumeValidHeight = -1;
+    const auto schedule{MakeChainLockScheduleConfig(consensus.nPQChainLockEpochOrigin)};
+    BOOST_REQUIRE(schedule);
+    const auto btcc_schedule{GetBTCCScheduleConfig(consensus)};
+    const auto initial_target{CurrentRosterInitializationTargetHeight(
+        *schedule, btcc_schedule, ACCEPTED_HEIGHT - 1, TIP_HEIGHT)};
+    BOOST_REQUIRE(initial_target && *initial_target == ACCEPTED_HEIGHT);
+    int32_t bootstrap_expiry{TIP_HEIGHT};
+    while (CurrentRosterInitializationTargetHeight(*schedule, btcc_schedule,
+               ACCEPTED_HEIGHT - 1, bootstrap_expiry) == initial_target) {
+        ++bootstrap_expiry;
+        BOOST_REQUIRE_LE(bootstrap_expiry,
+            TIP_HEIGHT + static_cast<int32_t>(ACTIVE_QUORUMS * schedule->epoch_blocks + PQ_CL_SIGN_LAG));
+    }
+    const int32_t chain_height{std::max(LAST_HEIGHT, bootstrap_expiry)};
+    std::vector<CBlockIndex*> chain(chain_height + 1);
+    {
+        LOCK(::cs_main);
+        chain[0] = chainman.ActiveTip();
+        for (int32_t height{1}; height <= chain_height; ++height) {
+            CBlockHeader header;
+            header.nVersion = 4;
+            header.hashPrevBlock = chain[height - 1]->GetBlockHash();
+            header.hashMerkleRoot = NonNullHash(1'910'000 + height);
+            header.nTime = chain[height - 1]->nTime + 1;
+            header.nBits = 0x207fffff;
+            header.nNonce = height;
+            chain[height] = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            chain[height]->nStatus = BLOCK_VALID_SCRIPTS;
+        }
+        chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+    }
+    consensus.hashPQBTCCReceiptAnchorBlock = chain[PREPARATION_HEIGHT]->GetBlockHash();
+    consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
+    consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    const uint256 genesis{consensus.hashGenesisBlock};
+    const uint256 local{NonNullHash(1)};
+    const uint256 replacement{NonNullHash(2)};
+    slhdsa::KeyGenerationSeed key_seed{};
+    key_seed[0] = 117;
+    auto local_key{slhdsa::GenerateSecretKey(key_seed)};
+    key_seed[0] = 118;
+    auto replacement_key{slhdsa::GenerateSecretKey(key_seed)};
+    BOOST_REQUIRE(local_key && replacement_key);
+    std::array<GlobalKeyRecord, 2> global_keys;
+    for (std::size_t member{0}; member < global_keys.size(); ++member) {
+        auto& key{global_keys[member]};
+        key.key_version = 1;
+        key.activated_height = PREPARATION_HEIGHT;
+        BOOST_REQUIRE((member == 0 ? local_key : replacement_key)->GetPublicKey(key.public_key));
+        key.child_key_commitment.generation = 1;
+        key.child_key_commitment.tree_id = *GetChildKeyTreeId(genesis,
+            member == 0 ? local : replacement, 1, 0);
+        key.child_key_commitment.root = NonNullHash(1'920'000 + member);
+    }
+    PQRegistryConfig registry_config;
+    BOOST_REQUIRE(GetPQRegistryConfig(consensus, registry_config) == PQRegistryDeploymentResult::VALID);
+    const DBParams dmn_params{.path = m_path_root / "fallback-tip-dmn",
+        .cache_bytes = 1 << 20, .memory_only = false, .wipe_data = false};
+    DBParams registry_params{dmn_params};
+    registry_params.path += "_pq_registry";
+    registry_params.cache_bytes /= 2;
+    {
+        PQRegistryManager writer{registry_params, genesis, registry_config,
+            evo::MakeAuxiliaryHistoryGCDeployment(consensus).configuration_id};
+        uint256 previous_root{*PQRegistrySnapshot{}.RecomputeConsensusStateRoot(genesis)};
+        std::vector<OperatorKeyState> previous_states;
+        for (int32_t height{PREPARATION_HEIGHT}; height <= chain_height; ++height) {
+            const auto schedule{DeriveOperatorKeyScheduleView(registry_config.schedule,
+                height, registry_config.registration_cutoff_blocks, registry_config.future_horizon_epochs)};
+            BOOST_REQUIRE(schedule);
+            PQRegistrySnapshot snapshot;
+            for (std::size_t member{0}; member < global_keys.size(); ++member) {
+                auto state{OperatorKeyState::ForOperator(member == 0 ? local : replacement)};
+                state.schedule_initialized = 1;
+                state.schedule = OperatorKeyScheduleState::FromView(*schedule);
+                state.has_global_key = state.global_key_active = 1;
+                state.global_key = global_keys[member];
+                snapshot.operator_states.push_back(std::move(state));
+            }
+            std::sort(snapshot.operator_states.begin(), snapshot.operator_states.end(),
+                [](const auto& lhs, const auto& rhs) { return lhs.pro_tx_hash < rhs.pro_tx_hash; });
+            PQRegistryDiskSnapshot disk;
+            disk.is_checkpoint = (height - PREPARATION_HEIGHT) % PQ_REGISTRY_CHECKPOINT_INTERVAL == 0;
+            disk.height = height;
+            disk.block_hash = chain[height]->GetBlockHash();
+            disk.previous_block_hash = chain[height - 1]->GetBlockHash();
+            disk.previous_consensus_state_root = previous_root;
+            for (const auto& state : snapshot.operator_states) {
+                if (std::find(previous_states.begin(), previous_states.end(), state) == previous_states.end()) {
+                    disk.operator_states.push_back(state);
+                }
+            }
+            if (disk.is_checkpoint) disk.checkpoint_operator_states = snapshot.operator_states;
+            disk.consensus_state_root = *snapshot.RecomputeConsensusStateRoot(genesis);
+            BOOST_REQUIRE(writer.WriteExactSnapshotForTesting(disk.block_hash, disk));
+            previous_root = disk.consensus_state_root;
+            previous_states = std::move(snapshot.operator_states);
+        }
+    }
+    deterministicMNManager = std::make_unique<CDeterministicMNManager>(dmn_params);
+    const auto set_identity = [&](const uint256& identity, slhdsa::SecretKey key) {
+        ChainLockMasterSeed child_seed{};
+        child_seed[0] = 119;
+        LOCK(activeMasternodeInfoCs);
+        activeMasternodeInfo.operatorKeyManager = std::make_shared<LocalOperatorKeyManager>(
+            std::move(key), std::move(child_seed));
+        BOOST_REQUIRE(activeMasternodeInfo.operatorKeyManager->IsValid());
+        activeMasternodeInfo.proTxHash = identity;
+        activeMasternodeInfo.globalKeyVersion = 1;
+        fMasternodeMode = true;
+    };
+    set_identity(local, std::move(*local_key));
+    FullReceiptCatchupContext store_context;
+    store_context.full_receipt_history = true;
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+    {
+        LOCK(::cs_main);
+        handler = std::make_unique<llmq::CChainLocksHandler>(connman, *m_node.peerman, chainman);
+    }
+    Access::ResetFinalityStoreWithContext(*handler, store_context);
+    llmq::chainLocksHandler = handler.get();
+    const auto* config{Access::Config(*handler)};
+    const auto* quorum_config{Access::QuorumConfig(*handler)};
+    BOOST_REQUIRE(config && quorum_config);
+    BOOST_REQUIRE(config->btcc_schedule == btcc_schedule);
+    auto accepted{MakeCatchupChainLock(ACCEPTED_HEIGHT, ACCEPTED_HEIGHT - 1,
+        chain[ACCEPTED_HEIGHT - 1]->GetBlockHash(), 1'930'000)};
+    accepted.statement.block_hash = chain[ACCEPTED_HEIGHT]->GetBlockHash();
+    const auto epochs{ActiveEpochsAtHeight(config->chainlock_schedule, ACCEPTED_HEIGHT)};
+    BOOST_REQUIRE(epochs);
+    auto rosters{std::make_shared<FrozenQuorumRosters>()};
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        auto& roster{(*rosters)[slot]};
+        auto& descriptor{roster.descriptor};
+        descriptor.epoch = (*epochs)[slot].epoch;
+        descriptor.base_height = (*epochs)[slot].base_height;
+        descriptor.snapshot_height = descriptor.base_height - 288;
+        descriptor.base_hash = chain[descriptor.base_height]->GetBlockHash();
+        descriptor.snapshot_hash = chain[descriptor.snapshot_height]->GetBlockHash();
+        descriptor.roster_beacon_hash = NonNullHash(1'940'000 + slot);
+        descriptor.valid_count = QUORUM_SIZE;
+        SetFirstMembers(descriptor.valid_members, QUORUM_SIZE);
+        for (std::size_t member{0}; member < QUORUM_SIZE; ++member) {
+            auto& frozen{roster.members[member]};
+            frozen.pro_tx_hash = NonNullHash(member + 1);
+            frozen.eligible = true;
+            ChildKeyTreeCommitment commitment;
+            commitment.generation = 1;
+            commitment.tree_id = *GetChildKeyTreeId(genesis, frozen.pro_tx_hash, 1, 0);
+            commitment.root = NonNullHash(1'950'000 + member);
+            frozen.child_root = FrozenChildRootRecord{frozen.pro_tx_hash, 1, descriptor.epoch, commitment};
+        }
+        descriptor.member_root = ComputeQuorumMemberRoot(genesis, roster);
+        descriptor.child_key_root = ComputeQuorumChildKeyRoot(genesis, roster);
+        descriptors[slot] = descriptor;
+        accepted.statement.roster_beacons.active.seeds[slot] = SubjectBeacon(descriptor.epoch);
+    }
+    accepted.statement.roster_beacons.active.recovery_authority_source.normal_beacon =
+        accepted.statement.roster_beacons.active.seeds.back();
+    accepted.statement.roster_beacons.next.epoch = epochs->back().epoch + 1;
+    accepted.statement.quorum_context_hash = GetQuorumContextHash(genesis, ACCEPTED_HEIGHT,
+        accepted.statement.block_hash, descriptors);
+    ChainLockVerificationError roster_error;
+    const auto roster_set{ChainLockStoreTestContextFactory::CreateCanonicalRosterSet(genesis, rosters, &roster_error)};
+    BOOST_REQUIRE_MESSAGE(roster_set, static_cast<unsigned>(roster_error));
+    RosterAuthorizationVerificationContext authorization;
+    authorization.admission = RosterAuthorizationAdmission::TRUSTED_PERSISTENCE;
+    const auto context{ChainLockStoreTestContextFactory::Create(config->chainlock_schedule,
+        accepted.statement, roster_set, 0b1111, authorization)};
+    auto* store{Access::Store(*handler)};
+    const auto prepared{store->PreparePersistedCandidate(accepted)};
+    BOOST_REQUIRE(prepared);
+    BOOST_REQUIRE(store->AcceptPersistedVerified(*prepared, accepted, true, nullptr, context));
+    BOOST_REQUIRE(handler->GetBestChainLock());
+    BOOST_REQUIRE(handler->GetVerifiedRosterSetForAccepted(accepted, TARGET_HEIGHT, *chain[TARGET_HEIGHT]));
+    const auto cache{FrozenQuorumRosterCache::Create(genesis, *quorum_config,
+        [](const CBlockIndex&) { return std::optional<QuorumSnapshotState>{}; })};
+    BOOST_REQUIRE(cache);
+    llmq::CPQQuorumConnectionOverlay overlay{connman, cache, [&] {
+        const auto best{handler->GetBestChainLock()};
+        return best ? best->statement.height : config->activation_predecessor_height;
+    }, config->btcc_schedule};
+    const llmq::PQQuorumOverlayPredecessor predecessor{ACCEPTED_HEIGHT, accepted.statement.block_hash};
+    const auto group{GetQuorumContextHash(genesis, TARGET_HEIGHT, chain[TARGET_HEIGHT]->GetBlockHash(), descriptors)};
+    auto members{llmq::GetPQQuorumUnionRelayConnections(*rosters, local)};
+    const auto candidates{llmq::BuildPQShareRelayFallbackCandidates(*rosters, local)};
+    BOOST_REQUIRE(!candidates.empty());
+    const auto replacement_normal{llmq::GetPQQuorumUnionRelayConnections(*rosters, replacement)};
+    const auto selected{std::find_if(candidates.begin(), candidates.end(),
+        [&](const uint256& member) { return !replacement_normal.contains(member); })};
+    BOOST_REQUIRE(selected != candidates.end());
+    const uint256 extra{*selected};
+    members.insert(extra);
+    const llmq::PQQuorumOverlayTarget prepared_target{TARGET_HEIGHT, chain[TARGET_HEIGHT]->GetBlockHash()};
+    BOOST_CHECK(!overlay.ApplyPreparedContext(group, members, predecessor, {extra}, {}, prepared_target));
+    BOOST_CHECK(!overlay.ApplyPreparedContext(group, members, predecessor, {extra}, local));
+    const auto install = [&] {
+        BOOST_REQUIRE(overlay.ApplyPreparedContext(group, members, predecessor, {extra}, local, prepared_target));
+        auto* peer{new CNode{1'960'000, nullptr,
+            CAddress{LookupNumeric("192.0.2.1", 8369), NODE_NETWORK}, 1, 1, CAddress{},
+            std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
+        peer->m_masternode_fallback_identity = extra;
+        connman.AddTestNode(*peer);
+        return peer;
+    };
+    auto* peer{install()};
+    const auto update_tip = [&](int32_t height) {
+        {
+            LOCK(::cs_main);
+            chainman.ActiveChainstate().m_chain.SetTip(*chain[height]);
+        }
+        overlay.UpdatedBlockTip(chain[height], false);
+    };
+    for (int32_t height{TIP_HEIGHT}; height < LAST_HEIGHT; ++height) {
+        update_tip(height);
+        BOOST_CHECK(connman.IsMasternodeQuorumRelayMember(extra));
+        BOOST_CHECK(!peer->fDisconnect);
+    }
+    // An identity-only mutation must not be hidden by resolving the old key
+    // back to its previous registry owner or by the warmed tip cache.
+    {
+        LOCK(activeMasternodeInfoCs);
+        activeMasternodeInfo.proTxHash = replacement;
+    }
+    update_tip(LAST_HEIGHT - 1);
+    BOOST_CHECK(peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+    {
+        LOCK(activeMasternodeInfoCs);
+        activeMasternodeInfo.proTxHash = local;
+    }
+    connman.ClearTestNodes();
+    peer = install();
+    update_tip(LAST_HEIGHT - 1);
+    BOOST_CHECK(!peer->fDisconnect);
+    // Advancing to the next target retires the old extra even though the
+    // accepted certificate, epoch and beacon bundle have not changed.
+    update_tip(LAST_HEIGHT);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+    BOOST_CHECK(peer->fDisconnect);
+    connman.ClearTestNodes();
+    peer = install();
+    update_tip(TIP_HEIGHT);
+    BOOST_CHECK(!peer->fDisconnect);
+    set_identity(replacement, std::move(*replacement_key));
+    update_tip(TIP_HEIGHT);
+    BOOST_CHECK(peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+
+    // During catch-up the accepted predecessor can advance while the latest
+    // signing target stays fixed. That is a different fallback lease too.
+    key_seed[0] = 117;
+    auto restored_key{slhdsa::GenerateSecretKey(key_seed)};
+    BOOST_REQUIRE(restored_key);
+    set_identity(local, std::move(*restored_key));
+    connman.ClearTestNodes();
+    const auto later_group{GetQuorumContextHash(genesis, TARGET_HEIGHT + PQ_CL_PERIOD,
+        chain[TARGET_HEIGHT + PQ_CL_PERIOD]->GetBlockHash(), descriptors)};
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(later_group, members, predecessor, {extra}, local,
+        llmq::PQQuorumOverlayTarget{TARGET_HEIGHT + PQ_CL_PERIOD,
+            chain[TARGET_HEIGHT + PQ_CL_PERIOD]->GetBlockHash()}));
+    auto* predecessor_peer{new CNode{1'960'001, nullptr,
+        CAddress{LookupNumeric("192.0.2.2", 8369), NODE_NETWORK}, 1, 1, CAddress{},
+        std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
+    predecessor_peer->m_masternode_fallback_identity = extra;
+    connman.AddTestNode(*predecessor_peer);
+    update_tip(LAST_HEIGHT);
+    BOOST_CHECK(!predecessor_peer->fDisconnect);
+    auto successor{accepted};
+    successor.statement.height = TARGET_HEIGHT;
+    successor.statement.block_hash = chain[TARGET_HEIGHT]->GetBlockHash();
+    successor.statement.previous_chainlock_height = ACCEPTED_HEIGHT;
+    successor.statement.previous_chainlock_hash = accepted.statement.block_hash;
+    successor.statement.quorum_context_hash = group;
+    successor.statement.roster_authorization_base = {
+        ACCEPTED_HEIGHT, accepted.statement.block_hash, accepted.GetLogicalId(genesis)};
+    const auto successor_context{ChainLockStoreTestContextFactory::Create(config->chainlock_schedule,
+        successor.statement, roster_set, 0b1111, authorization)};
+    const auto prepared_successor{store->PrepareCandidate(successor)};
+    BOOST_REQUIRE(prepared_successor);
+    BOOST_REQUIRE(store->AcceptVerified(
+        *prepared_successor, successor, true, nullptr, successor_context));
+    update_tip(LAST_HEIGHT);
+    BOOST_CHECK(predecessor_peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+
+    // Bootstrap has no accepted certificate yet. Its verified prepared plan
+    // remains valid across ordinary signing windows, then expires at the
+    // next canonical initialization round even if no winner has appeared.
+    Access::ResetFinalityStoreWithContext(*handler, store_context);
+    BOOST_REQUIRE(!handler->GetBestChainLock());
+    connman.ClearTestNodes();
+    const auto bootstrap_group{GetQuorumContextHash(genesis, ACCEPTED_HEIGHT,
+        chain[ACCEPTED_HEIGHT]->GetBlockHash(), descriptors)};
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(bootstrap_group, members, std::nullopt, {extra}, local,
+        llmq::PQQuorumOverlayTarget{ACCEPTED_HEIGHT, chain[ACCEPTED_HEIGHT]->GetBlockHash(),
+            llmq::PQQuorumOverlayTargetMode::ROSTER_INITIALIZATION}));
+    auto* bootstrap_peer{new CNode{1'960'002, nullptr,
+        CAddress{LookupNumeric("192.0.2.3", 8369), NODE_NETWORK}, 1, 1, CAddress{},
+        std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
+    bootstrap_peer->m_masternode_fallback_identity = extra;
+    connman.AddTestNode(*bootstrap_peer);
+    for (const int32_t height : {ACCEPTED_HEIGHT + static_cast<int32_t>(PQ_CL_SIGN_LAG),
+                                TIP_HEIGHT, LAST_HEIGHT, bootstrap_expiry - 1}) {
+        update_tip(height);
+        BOOST_CHECK(!bootstrap_peer->fDisconnect);
+        BOOST_CHECK(connman.IsMasternodeQuorumRelayMember(extra));
+    }
+    update_tip(bootstrap_expiry);
+    BOOST_CHECK(bootstrap_peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+
+    // A no-best context authorized by historical coverage still uses the
+    // ordinary target cadence; it must not inherit initialization's lifetime.
+    connman.ClearTestNodes();
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(group, members, std::nullopt, {extra}, local, prepared_target));
+    auto* historical_peer{new CNode{1'960'003, nullptr,
+        CAddress{LookupNumeric("192.0.2.4", 8369), NODE_NETWORK}, 1, 1, CAddress{},
+        std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
+    historical_peer->m_masternode_fallback_identity = extra;
+    connman.AddTestNode(*historical_peer);
+    update_tip(TIP_HEIGHT);
+    BOOST_CHECK(!historical_peer->fDisconnect);
+    update_tip(LAST_HEIGHT);
+    BOOST_CHECK(historical_peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+}
+
 BOOST_FIXTURE_TEST_CASE(chainlock_fallback_relays_only_local_cached_shares_after_outbound_auth,
                         PQAuthorizationBasePathSetup)
 {

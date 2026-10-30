@@ -35,14 +35,19 @@ std::optional<int32_t> GetPQQuorumOverlayTargetHeight(
 
 namespace {
 
-std::optional<pq::GlobalPublicKey> GetLocalGlobalPublicKey()
+struct LocalOperatorIdentity {
+    uint256 pro_tx_hash;
+    uint32_t key_version{0};
+    pq::GlobalPublicKey public_key{};
+};
+
+std::optional<LocalOperatorIdentity> GetLocalOperatorIdentity()
 {
-    LOCK(activeMasternodeInfoCs);
-    if (!fMasternodeMode || !activeMasternodeInfo.operatorKeyManager ||
-        !activeMasternodeInfo.operatorKeyManager->IsValid()) {
-        return std::nullopt;
-    }
-    return activeMasternodeInfo.operatorKeyManager->GetGlobalPublicKey();
+    LocalOperatorIdentity identity;
+    CService service;
+    if (!GetActiveMasternodeIdentity(identity.pro_tx_hash, identity.key_version,
+                                    identity.public_key, service)) return std::nullopt;
+    return identity;
 }
 
 PQQuorumConnectionSet GetRelayConnections(
@@ -266,9 +271,11 @@ void PQQuorumOverlayReconciler::Clear()
 CPQQuorumConnectionOverlay::CPQQuorumConnectionOverlay(
     CConnman& connman,
     pq::FrozenQuorumRosterCachePtr roster_cache,
-    PQChainLockPredecessorHeight predecessor_height)
+    PQChainLockPredecessorHeight predecessor_height,
+    pq::BTCCScheduleConfig btcc_schedule)
     : m_roster_cache{std::move(roster_cache)},
       m_predecessor_height{std::move(predecessor_height)},
+      m_btcc_schedule{btcc_schedule},
       m_reconciler{
           [this, &connman](const uint256& group,
                      const PQQuorumConnectionSet& connections) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) {
@@ -314,6 +321,7 @@ void CPQQuorumConnectionOverlay::ClearLocked()
     m_context.reset();
     m_chainlock_plan.clear();
     m_chainlock_fallback.clear();
+    m_fallback_context.reset();
     m_payment_audit_plan.reset();
     m_reconciler.Clear();
 }
@@ -328,9 +336,18 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
     const uint256& quorum_context_hash,
     const PQQuorumConnectionSet& relay_members,
     const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor,
-    const PQQuorumConnectionSet& fallback_members)
+    const PQQuorumConnectionSet& fallback_members,
+    const uint256& local_pro_tx_hash,
+    const std::optional<PQQuorumOverlayTarget>& prepared_target)
 {
-    if (fallback_members.size() > PQShareRelayFallback::MAX_EXTRA_CONNECTIONS ||
+    const auto local_identity{fallback_members.empty()
+        ? std::optional<LocalOperatorIdentity>{} : GetLocalOperatorIdentity()};
+    if ((!fallback_members.empty() && local_pro_tx_hash.IsNull()) ||
+        (!fallback_members.empty() &&
+         (!local_identity || local_identity->pro_tx_hash != local_pro_tx_hash)) ||
+        (!fallback_members.empty() &&
+         (!prepared_target || prepared_target->height < 0 || prepared_target->block_hash.IsNull())) ||
+        fallback_members.size() > PQShareRelayFallback::MAX_EXTRA_CONNECTIONS ||
         !std::all_of(fallback_members.begin(), fallback_members.end(),
                      [&](const auto& member) { return relay_members.contains(member); })) return false;
     const auto plan{BuildPreparedPQQuorumOverlayPlan(
@@ -359,7 +376,12 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
     if (m_revision != observed_revision) return false;
     const PQQuorumOverlayPlan fallback{fallback_members.empty()
         ? PQQuorumOverlayPlan{} : PQQuorumOverlayPlan{{quorum_context_hash, fallback_members}}};
-    if (m_chainlock_plan == plan && m_chainlock_fallback == fallback) return true;
+    const std::optional<FallbackContext> fallback_context{fallback_members.empty()
+        ? std::nullopt : std::optional<FallbackContext>{FallbackContext{
+            quorum_context_hash, local_pro_tx_hash, local_identity->key_version,
+            local_identity->public_key, *prepared_target, accepted_predecessor}}};
+    if (m_chainlock_plan == plan && m_chainlock_fallback == fallback &&
+        m_fallback_context == fallback_context) return true;
     if (m_payment_audit_plan &&
         plan.count(m_payment_audit_plan->group) != 0) {
         return false;
@@ -367,6 +389,7 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
     const bool fallback_changed{m_chainlock_fallback != fallback};
     m_chainlock_plan = plan;
     m_chainlock_fallback = fallback;
+    m_fallback_context = fallback_context;
     ReconcileLocked(fallback_changed);
     // A later tip callback must compare its accepted context against the
     // prepared plan instead of skipping on an older accepted-context cache.
@@ -378,6 +401,12 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
 void CPQQuorumConnectionOverlay::ClearChainLockFallback()
 {
     LOCK(m_mutex);
+    ClearChainLockFallbackLocked();
+}
+
+void CPQQuorumConnectionOverlay::ClearChainLockFallbackLocked()
+{
+    m_fallback_context.reset();
     if (m_chainlock_fallback.empty()) return;
     for (const auto& [group, members] : m_chainlock_fallback) {
         const auto plan{m_chainlock_plan.find(group)};
@@ -467,10 +496,16 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     }
     const auto& quorum_config{m_roster_cache->Config()};
     const auto& genesis_hash{m_roster_cache->GenesisHash()};
+    const auto accepted_chainlock{
+        chainLocksHandler ? chainLocksHandler->GetBestChainLock() : nullptr};
+    const bool initialization_fallback{!accepted_chainlock && m_fallback_context &&
+        m_fallback_context->target.mode == PQQuorumOverlayTargetMode::ROSTER_INITIALIZATION};
 
-    const auto target_height{GetPQQuorumOverlayTargetHeight(
-        quorum_config.schedule, *predecessor_height,
-        new_tip->nHeight)};
+    const auto target_height{initialization_fallback
+        ? pq::CurrentRosterInitializationTargetHeight(quorum_config.schedule,
+              m_btcc_schedule, *predecessor_height, new_tip->nHeight)
+        : GetPQQuorumOverlayTargetHeight(quorum_config.schedule,
+              *predecessor_height, new_tip->nHeight)};
     const CBlockIndex* target{
         target_height ? new_tip->GetAncestor(*target_height) : nullptr};
     const auto active_epochs{
@@ -483,8 +518,8 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
         return;
     }
 
-    const auto public_key{GetLocalGlobalPublicKey()};
-    if (!public_key) {
+    const auto local_identity{GetLocalOperatorIdentity()};
+    if (!local_identity) {
         ClearLocked();
         return;
     }
@@ -501,12 +536,13 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
                   registry_error);
     }
     if (!have_registry) {
-        // Snapshot recovery may be transient during a reorg. Keeping the old
-        // bounded overlay cannot authorize a share and avoids needless
-        // liveness loss while deterministic state catches up.
+        // Snapshot recovery may be transient during a reorg. Keep ordinary
+        // topology while state catches up, but temporary routes require a
+        // current identity and signing context.
         LogPrint(BCLog::NET_NETCONN,
                  "PQ overlay retaining previous topology at height=%d: %s\n",
                  new_tip->nHeight, registry_error);
+        ClearChainLockFallbackLocked();
         return;
     }
     if (current_registry.Height() != new_tip->nHeight ||
@@ -515,11 +551,15 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
                  "PQ overlay retaining previous topology; active registry "
                  "snapshot mismatch at height=%d\n",
                  new_tip->nHeight);
+        ClearChainLockFallbackLocked();
         return;
     }
     const auto local_operator{
-        current_registry.FindActiveOperatorByGlobalKey(*public_key)};
-    if (!local_operator) {
+        current_registry.FindActiveOperatorByGlobalKey(local_identity->public_key)};
+    const auto* registered_operator{current_registry.FindOperator(local_identity->pro_tx_hash)};
+    if (!local_operator || *local_operator != local_identity->pro_tx_hash ||
+        !registered_operator ||
+        registered_operator->global_key.key_version != local_identity->key_version) {
         ClearLocked();
         return;
     }
@@ -531,8 +571,19 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
         ClearLocked();
         return;
     }
-    const auto accepted_chainlock{
-        chainLocksHandler ? chainLocksHandler->GetBestChainLock() : nullptr};
+    const std::optional<PQQuorumOverlayPredecessor> accepted_predecessor{accepted_chainlock
+        ? std::optional<PQQuorumOverlayPredecessor>{PQQuorumOverlayPredecessor{
+            accepted_chainlock->statement.height, accepted_chainlock->statement.block_hash}}
+        : std::nullopt};
+    const PQQuorumOverlayTarget current_fallback_target{*target_height, target->GetBlockHash(),
+        initialization_fallback ? PQQuorumOverlayTargetMode::ROSTER_INITIALIZATION
+                                : PQQuorumOverlayTargetMode::ORDINARY};
+    const bool exact_fallback_source{m_fallback_context &&
+        m_fallback_context->target == current_fallback_target &&
+        m_fallback_context->local_pro_tx_hash == *local_operator &&
+        m_fallback_context->global_key_version == local_identity->key_version &&
+        m_fallback_context->global_public_key == local_identity->public_key &&
+        m_fallback_context->accepted_predecessor == accepted_predecessor};
     if (!accepted_chainlock ||
         !accepted_chainlock->statement.roster_beacons.active
              .IsForNewestEpoch(newest_identity.epoch)) {
@@ -540,6 +591,12 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
                  "PQ overlay retaining previous topology; no exact accepted "
                  "roster beacon bundle for target=%d\n",
                  *target_height);
+        // Before the first winner, the prepared context already authenticated
+        // the frozen rosters. Keep its lease only for the same target, local
+        // credentials and still-absent predecessor. INITIALIZE keeps its
+        // canonical round target; historical no-best contexts use the normal
+        // signing cadence. Neither waits for a winner to expire old routes.
+        if (accepted_chainlock || !exact_fallback_source) ClearChainLockFallbackLocked();
         return;
     }
     const auto& beacon_bundle{
@@ -550,7 +607,9 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
         ClearLocked();
         return;
     }
-    const Context context{*local_operator, newest_identity.epoch,
+    const Context context{*local_operator, local_identity->key_version, local_identity->public_key,
+                          *target_height, target->GetBlockHash(),
+                          *accepted_predecessor, newest_identity.epoch,
                           newest_base->GetBlockHash(), *beacon_bundle_hash};
     if (m_context && *m_context == context) return;
 
@@ -567,12 +626,27 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
                  "PQ overlay retaining previous topology; roster build "
                  "failed at target=%d error=%u\n",
                  *target_height, static_cast<unsigned>(build_error));
+        ClearChainLockFallbackLocked();
         return;
     }
 
-    const auto plan{BuildPQQuorumOverlayPlan(
+    auto plan{BuildPQQuorumOverlayPlan(
         genesis_hash, *target_height, target->GetBlockHash(), *rosters,
         *local_operator)};
+    // A block inside the same signing window must not retire sockets opened
+    // for that window. The group hash binds the target and frozen rosters;
+    // also bind the local identity and exact accepted predecessor, which are
+    // not part of that hash. A changed or unverifiable source retires extras.
+    const bool retain_fallback{exact_fallback_source && plan.size() == 1 &&
+        m_fallback_context->quorum_context_hash == plan.begin()->first};
+    const bool fallback_changed{!retain_fallback && !m_chainlock_fallback.empty()};
+    if (retain_fallback) {
+        const auto& members{m_chainlock_fallback.at(plan.begin()->first)};
+        plan.begin()->second.insert(members.begin(), members.end());
+    } else {
+        m_chainlock_fallback.clear();
+        m_fallback_context.reset();
+    }
     if (m_payment_audit_plan &&
         plan.count(m_payment_audit_plan->group) != 0) {
         m_retired_payment_audit_generation = std::max(
@@ -580,9 +654,7 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
             m_payment_audit_plan->runtime_generation);
         m_payment_audit_plan.reset();
     }
-    const bool fallback_changed{!m_chainlock_fallback.empty()};
     m_chainlock_plan = plan;
-    m_chainlock_fallback.clear();
     ReconcileLocked(fallback_changed);
     m_context = context;
     LogPrint(BCLog::NET_NETCONN,

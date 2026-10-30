@@ -38,6 +38,20 @@ struct PQQuorumOverlayPredecessor {
                            const PQQuorumOverlayPredecessor&) = default;
 };
 
+enum class PQQuorumOverlayTargetMode : uint8_t {
+    ORDINARY,
+    ROSTER_INITIALIZATION,
+};
+
+struct PQQuorumOverlayTarget {
+    int32_t height{-1};
+    uint256 block_hash;
+    PQQuorumOverlayTargetMode mode{PQQuorumOverlayTargetMode::ORDINARY};
+
+    friend bool operator==(const PQQuorumOverlayTarget&,
+                           const PQQuorumOverlayTarget&) = default;
+};
+
 /** Resolve the current relay target, including a missed-window recovery. */
 [[nodiscard]] std::optional<int32_t> GetPQQuorumOverlayTargetHeight(
     const pq::ChainLockScheduleConfig& schedule,
@@ -161,7 +175,8 @@ public:
     CPQQuorumConnectionOverlay(
         CConnman& connman,
         pq::FrozenQuorumRosterCachePtr roster_cache,
-        PQChainLockPredecessorHeight predecessor_height);
+        PQChainLockPredecessorHeight predecessor_height,
+        pq::BTCCScheduleConfig btcc_schedule = {});
     ~CPQQuorumConnectionOverlay();
 
     CPQQuorumConnectionOverlay(const CPQQuorumConnectionOverlay&) = delete;
@@ -170,11 +185,14 @@ public:
 
     void UpdatedBlockTip(const CBlockIndex* new_tip, bool initial_download)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Nonempty fallback routes must identify their local owner and exact target. */
     [[nodiscard]] bool ApplyPreparedContext(
         const uint256& quorum_context_hash,
         const PQQuorumConnectionSet& relay_members,
         const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor,
-        const PQQuorumConnectionSet& fallback_members = {})
+        const PQQuorumConnectionSet& fallback_members = {},
+        const uint256& local_pro_tx_hash = {},
+        const std::optional<PQQuorumOverlayTarget>& prepared_target = std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Remove only temporary local-share routes, keeping ordinary plans intact. */
     void ClearChainLockFallback() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -192,6 +210,11 @@ public:
 private:
     struct Context {
         uint256 local_pro_tx_hash;
+        uint32_t global_key_version{0};
+        pq::GlobalPublicKey global_public_key{};
+        int32_t target_height{-1};
+        uint256 target_block_hash;
+        PQQuorumOverlayPredecessor accepted_predecessor;
         uint32_t newest_epoch{0};
         uint256 newest_base_hash;
         uint256 roster_beacon_bundle_hash;
@@ -199,8 +222,21 @@ private:
         friend bool operator==(const Context&, const Context&) = default;
     };
 
+    struct FallbackContext {
+        uint256 quorum_context_hash;
+        uint256 local_pro_tx_hash;
+        uint32_t global_key_version{0};
+        pq::GlobalPublicKey global_public_key{};
+        PQQuorumOverlayTarget target;
+        std::optional<PQQuorumOverlayPredecessor> accepted_predecessor;
+
+        friend bool operator==(const FallbackContext&, const FallbackContext&) = default;
+    };
+
     const pq::FrozenQuorumRosterCachePtr m_roster_cache;
     const PQChainLockPredecessorHeight m_predecessor_height;
+    // The roster config may omit BTCC when recovery refresh is disabled.
+    const pq::BTCCScheduleConfig m_btcc_schedule;
     Mutex m_mutex;
     struct PaymentAuditPlan {
         uint256 group;
@@ -210,9 +246,11 @@ private:
 
     void ReconcileLocked(bool force_install = false) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void ClearLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void ClearChainLockFallbackLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     PQQuorumOverlayReconciler m_reconciler GUARDED_BY(m_mutex);
     PQQuorumOverlayPlan m_chainlock_plan GUARDED_BY(m_mutex);
     PQQuorumOverlayPlan m_chainlock_fallback GUARDED_BY(m_mutex);
+    std::optional<FallbackContext> m_fallback_context GUARDED_BY(m_mutex);
     std::optional<PaymentAuditPlan> m_payment_audit_plan
         GUARDED_BY(m_mutex);
     uint64_t m_retired_payment_audit_generation GUARDED_BY(m_mutex){0};

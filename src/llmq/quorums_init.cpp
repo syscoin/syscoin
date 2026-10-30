@@ -141,7 +141,7 @@ void InitLLMQSystem(CConnman& connman,
             const auto best{handler_ptr->GetBestChainLock()};
             return best ? std::optional<int32_t>{best->statement.height}
                         : initial_predecessor_height;
-        })};
+        }, pq::GetBTCCScheduleConfig(consensus))};
     chainlocks_handler->SetQuorumRosterCache(std::move(roster_cache));
 
     quorumBlockProcessor = block_processor.release();
