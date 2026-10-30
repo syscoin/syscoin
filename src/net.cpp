@@ -4029,10 +4029,12 @@ void CConnman::RetireMasternodeFallbackConnections()
     const NodesSnapshot snapshot{*this, AllNodes};
     LOCK(cs_vPendingMasternodes);
     for (CNode* node : snapshot.Nodes()) {
-        const auto& identity{node->m_masternode_fallback_identity};
-        if (identity.IsNull() || node->IsInboundConn() || node->IsManualConn() ||
-            node->m_masternode_probe_connection ||
-            masternodePendingProbes.contains(identity) ||
+        const auto& dialed_identity{node->m_masternode_fallback_identity};
+        if (dialed_identity.IsNull() || node->IsInboundConn() || node->IsManualConn() ||
+            node->m_masternode_probe_connection) continue;
+        const auto authenticated_identity{node->GetVerifiedProRegTxHash()};
+        const auto& identity{authenticated_identity.IsNull() ? dialed_identity : authenticated_identity};
+        if (masternodePendingProbes.contains(identity) ||
             std::find(vPendingMasternodes.begin(), vPendingMasternodes.end(), identity) != vPendingMasternodes.end()) continue;
         const bool needed{std::any_of(masternodeQuorumNodes.begin(), masternodeQuorumNodes.end(),
             [&](const auto& group) { return group.second.contains(identity); })};

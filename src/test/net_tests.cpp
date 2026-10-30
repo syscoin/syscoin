@@ -489,6 +489,32 @@ BOOST_AUTO_TEST_CASE(fallback_connection_retirement_preserves_shared_and_preexis
     connman.ClearTestNodes();
 }
 
+BOOST_AUTO_TEST_CASE(fallback_connection_authenticated_as_a_current_normal_peer_is_preserved)
+{
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const uint256 fallback_group{uint256S("c5")}, normal_group{uint256S("c6")};
+    const uint256 dialed_identity{uint256S("d5")}, authenticated_identity{uint256S("d6")};
+    connman.SetMasternodeQuorumNodes(fallback_group, {dialed_identity}, {dialed_identity});
+    in_addr ipv4_addr;
+    ipv4_addr.s_addr = 0xa0b0c0ed;
+    auto* peer = new CNode{1199, nullptr,
+        CAddress{CService{ipv4_addr, 7799}, NODE_NETWORK},
+        1, 1, CAddress{}, std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false};
+    peer->m_masternode_connection = true;
+    peer->m_masternode_fallback_identity = dialed_identity;
+    peer->fSuccessfullyConnected = true;
+    // A service reassignment while the dial was in flight can authenticate a
+    // different current owner. MNAUTH publishes that identity through here.
+    peer->SetVerifiedMasternode(authenticated_identity, uint256S("e5"), 1);
+    connman.AddTestNode(*peer);
+    connman.SetMasternodeQuorumNodes(normal_group, {authenticated_identity});
+    connman.RemoveMasternodeQuorumNodes(fallback_group);
+    BOOST_CHECK(!peer->fDisconnect);
+    connman.RemoveMasternodeQuorumNodes(normal_group);
+    BOOST_CHECK(peer->fDisconnect);
+    connman.ClearTestNodes();
+}
+
 BOOST_AUTO_TEST_CASE(fallback_connection_finishing_after_context_expiry_is_retired)
 {
     auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
