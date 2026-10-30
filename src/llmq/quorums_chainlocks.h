@@ -1074,6 +1074,9 @@ public:
                                           CChainLockSig& result) const;
     [[nodiscard]] CChainLockSigCPtr GetMostRecentChainLock() const;
     [[nodiscard]] CChainLockSigCPtr GetBestChainLock() const;
+    /** Revalidate only an already-published local-share fallback source. */
+    [[nodiscard]] bool IsCurrentChainLockRelaySource(const PQShareRelayFallbackKey& key) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_collector_mutex, !m_lookup_mutex, !m_btcc_preseal_mutex);
     /** Build one target from the exact currently accepted roster authority. */
     [[nodiscard]] pq::VerifiedRosterSetPtr GetVerifiedRosterSetForAccepted(
         const pq::FinalChainLock& accepted,

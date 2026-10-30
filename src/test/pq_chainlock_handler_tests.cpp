@@ -1343,6 +1343,32 @@ public:
             handler.m_collector_generation, handler.m_collectors[0]->ShareCounts());
     }
 
+    static std::optional<PQShareRelayFallbackKey> RelayFallbackKey(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_collector_mutex);
+        return handler.m_share_relay_fallback.Key();
+    }
+
+    static bool RelaySourceWithStaleRevisionIsCurrent(
+        CChainLocksHandler& handler, const PQShareRelayFallbackKey& key)
+    {
+        CChainLocksHandler::CurrentSigningContextsPtr original;
+        {
+            LOCK(handler.m_collector_mutex);
+            original = handler.m_current_signing_contexts;
+            BOOST_REQUIRE(original);
+            auto changed{std::make_shared<CChainLocksHandler::CurrentSigningContexts>(*original)};
+            ++changed->source.finality_store_revision;
+            handler.m_current_signing_contexts = std::move(changed);
+        }
+        const bool current{handler.IsCurrentChainLockRelaySource(key)};
+        {
+            LOCK(handler.m_collector_mutex);
+            handler.m_current_signing_contexts = std::move(original);
+        }
+        return current;
+    }
+
     static std::size_t CachedRelayShares(CChainLocksHandler& handler)
     {
         LOCK(handler.m_collector_mutex);
@@ -11180,13 +11206,36 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
     const auto cache{FrozenQuorumRosterCache::Create(genesis, *quorum_config,
         [](const CBlockIndex&) { return std::optional<QuorumSnapshotState>{}; })};
     BOOST_REQUIRE(cache);
+    std::optional<llmq::PQShareRelayFallbackKey> current_source_key;
+    uint64_t source_generation{0};
+    bool source_current{true};
+    bool clear_during_source_validation{false};
+    llmq::CPQQuorumConnectionOverlay* source_overlay{nullptr};
+    std::size_t source_validation_calls{0};
+    const auto publish_source = [&](const uint256& context_hash) {
+        current_source_key = llmq::PQShareRelayFallbackKey{context_hash, local, 1, ++source_generation};
+        return *current_source_key;
+    };
     llmq::CPQQuorumConnectionOverlay overlay{connman, cache, [&] {
         const auto best{handler->GetBestChainLock()};
         return best ? best->statement.height : config->activation_predecessor_height;
-    }, config->btcc_schedule};
+    }, config->btcc_schedule, [&](const llmq::PQShareRelayFallbackKey& key) {
+        ++source_validation_calls;
+        if (clear_during_source_validation) {
+            clear_during_source_validation = false;
+            source_overlay->Clear();
+        }
+        return source_current && current_source_key == std::optional<llmq::PQShareRelayFallbackKey>{key};
+    }};
+    source_overlay = &overlay;
+    overlay.UpdatedBlockTip(chain[TIP_HEIGHT], false);
+    BOOST_CHECK_EQUAL(source_validation_calls, 0U);
     const llmq::PQQuorumOverlayPredecessor predecessor{ACCEPTED_HEIGHT, accepted.statement.block_hash};
     const auto group{GetQuorumContextHash(genesis, TARGET_HEIGHT, chain[TARGET_HEIGHT]->GetBlockHash(), descriptors)};
     auto members{llmq::GetPQQuorumUnionRelayConnections(*rosters, local)};
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(group, members, predecessor));
+    overlay.UpdatedBlockTip(chain[TIP_HEIGHT], false);
+    BOOST_CHECK_EQUAL(source_validation_calls, 0U);
     const auto candidates{llmq::BuildPQShareRelayFallbackCandidates(*rosters, local)};
     BOOST_REQUIRE(!candidates.empty());
     const auto replacement_normal{llmq::GetPQQuorumUnionRelayConnections(*rosters, replacement)};
@@ -11196,10 +11245,12 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
     const uint256 extra{*selected};
     members.insert(extra);
     const llmq::PQQuorumOverlayTarget prepared_target{TARGET_HEIGHT, chain[TARGET_HEIGHT]->GetBlockHash()};
+    const auto source_key{publish_source(group)};
     BOOST_CHECK(!overlay.ApplyPreparedContext(group, members, predecessor, {extra}, {}, prepared_target));
     BOOST_CHECK(!overlay.ApplyPreparedContext(group, members, predecessor, {extra}, local));
+    BOOST_CHECK(!overlay.ApplyPreparedContext(group, members, predecessor, {extra}, local, prepared_target));
     const auto install = [&] {
-        BOOST_REQUIRE(overlay.ApplyPreparedContext(group, members, predecessor, {extra}, local, prepared_target));
+        BOOST_REQUIRE(overlay.ApplyPreparedContext(group, members, predecessor, {extra}, local, prepared_target, source_key));
         auto* peer{new CNode{1'960'000, nullptr,
             CAddress{LookupNumeric("192.0.2.1", 8369), NODE_NETWORK}, 1, 1, CAddress{},
             std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
@@ -11262,7 +11313,7 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
         chain[TARGET_HEIGHT + PQ_CL_PERIOD]->GetBlockHash(), descriptors)};
     BOOST_REQUIRE(overlay.ApplyPreparedContext(later_group, members, predecessor, {extra}, local,
         llmq::PQQuorumOverlayTarget{TARGET_HEIGHT + PQ_CL_PERIOD,
-            chain[TARGET_HEIGHT + PQ_CL_PERIOD]->GetBlockHash()}));
+            chain[TARGET_HEIGHT + PQ_CL_PERIOD]->GetBlockHash()}, publish_source(later_group)));
     auto* predecessor_peer{new CNode{1'960'001, nullptr,
         CAddress{LookupNumeric("192.0.2.2", 8369), NODE_NETWORK}, 1, 1, CAddress{},
         std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
@@ -11298,7 +11349,7 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
         chain[ACCEPTED_HEIGHT]->GetBlockHash(), descriptors)};
     BOOST_REQUIRE(overlay.ApplyPreparedContext(bootstrap_group, members, std::nullopt, {extra}, local,
         llmq::PQQuorumOverlayTarget{ACCEPTED_HEIGHT, chain[ACCEPTED_HEIGHT]->GetBlockHash(),
-            llmq::PQQuorumOverlayTargetMode::ROSTER_INITIALIZATION}));
+            llmq::PQQuorumOverlayTargetMode::ROSTER_INITIALIZATION}, publish_source(bootstrap_group)));
     auto* bootstrap_peer{new CNode{1'960'002, nullptr,
         CAddress{LookupNumeric("192.0.2.3", 8369), NODE_NETWORK}, 1, 1, CAddress{},
         std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
@@ -11317,7 +11368,8 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
     // A no-best context authorized by historical coverage still uses the
     // ordinary target cadence; it must not inherit initialization's lifetime.
     connman.ClearTestNodes();
-    BOOST_REQUIRE(overlay.ApplyPreparedContext(group, members, std::nullopt, {extra}, local, prepared_target));
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(group, members, std::nullopt, {extra}, local,
+        prepared_target, publish_source(group)));
     auto* historical_peer{new CNode{1'960'003, nullptr,
         CAddress{LookupNumeric("192.0.2.4", 8369), NODE_NETWORK}, 1, 1, CAddress{},
         std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
@@ -11327,6 +11379,91 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_survives_only_its_exact_tip_context,
     BOOST_CHECK(!historical_peer->fDisconnect);
     update_tip(LAST_HEIGHT);
     BOOST_CHECK(historical_peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+
+    // At an epoch boundary the prepared ROTATE view already has the new
+    // roster, while the last accepted certificate still has the old epoch.
+    // That is a valid next signing context, not a stale fallback lease.
+    connman.ClearTestNodes();
+    Access::ResetFinalityStoreWithContext(*handler, store_context);
+    store = Access::Store(*handler);
+    const uint32_t rotation_epoch{epochs->back().epoch + 1};
+    const auto rotation_base_height{EpochBaseHeight(config->chainlock_schedule, rotation_epoch)};
+    BOOST_REQUIRE(rotation_base_height);
+    const auto rotation_target{NextEligibleChainLockTargetHeight(
+        config->chainlock_schedule, *rotation_base_height - 1)};
+    BOOST_REQUIRE(rotation_target);
+    const int32_t rotation_predecessor{*rotation_target - static_cast<int32_t>(PQ_CL_PERIOD)};
+    const int32_t rotation_tip{*rotation_target + static_cast<int32_t>(PQ_CL_SIGN_LAG)};
+    BOOST_REQUIRE_LE(rotation_tip, chain_height);
+    auto rotation_base{accepted};
+    rotation_base.statement.height = rotation_predecessor;
+    rotation_base.statement.block_hash = chain[rotation_predecessor]->GetBlockHash();
+    rotation_base.statement.previous_chainlock_height = rotation_predecessor - PQ_CL_PERIOD;
+    rotation_base.statement.previous_chainlock_hash =
+        chain[rotation_base.statement.previous_chainlock_height]->GetBlockHash();
+    rotation_base.statement.roster_beacons.next = SubjectBeacon(rotation_epoch);
+    rotation_base.statement.quorum_context_hash = GetQuorumContextHash(genesis,
+        rotation_predecessor, rotation_base.statement.block_hash, descriptors);
+    const auto rotation_base_context{ChainLockStoreTestContextFactory::Create(config->chainlock_schedule,
+        rotation_base.statement, roster_set, 0b1111, authorization)};
+    const auto rotation_base_prepared{store->PreparePersistedCandidate(rotation_base)};
+    BOOST_REQUIRE(rotation_base_prepared);
+    BOOST_REQUIRE(store->AcceptPersistedVerified(
+        *rotation_base_prepared, rotation_base, true, nullptr, rotation_base_context));
+    BOOST_REQUIRE(handler->GetBestChainLock());
+
+    auto rotated_rosters{std::make_shared<FrozenQuorumRosters>()};
+    for (std::size_t slot{0}; slot + 1 < ACTIVE_QUORUMS; ++slot) {
+        (*rotated_rosters)[slot] = (*rosters)[slot + 1];
+    }
+    auto& rotated_newest{rotated_rosters->back()};
+    rotated_newest = rosters->back();
+    rotated_newest.descriptor.epoch = rotation_epoch;
+    rotated_newest.descriptor.base_height = *rotation_base_height;
+    rotated_newest.descriptor.base_hash = chain[*rotation_base_height]->GetBlockHash();
+    rotated_newest.descriptor.snapshot_height = *rotation_base_height - 288;
+    rotated_newest.descriptor.snapshot_hash =
+        chain[rotated_newest.descriptor.snapshot_height]->GetBlockHash();
+    rotated_newest.descriptor.roster_beacon_hash = NonNullHash(1'940'100);
+    for (auto& member : rotated_newest.members) member.child_root->epoch = rotation_epoch;
+    rotated_newest.descriptor.member_root = ComputeQuorumMemberRoot(genesis, rotated_newest);
+    rotated_newest.descriptor.child_key_root = ComputeQuorumChildKeyRoot(genesis, rotated_newest);
+    const auto rotated_set{ChainLockStoreTestContextFactory::CreateCanonicalRosterSet(
+        genesis, rotated_rosters, &roster_error)};
+    BOOST_REQUIRE_MESSAGE(rotated_set, static_cast<unsigned>(roster_error));
+    std::array<QuorumDescriptor, ACTIVE_QUORUMS> rotated_descriptors;
+    for (std::size_t slot{0}; slot < ACTIVE_QUORUMS; ++slot) {
+        rotated_descriptors[slot] = (*rotated_rosters)[slot].descriptor;
+    }
+    const auto rotation_group{GetQuorumContextHash(genesis, *rotation_target,
+        chain[*rotation_target]->GetBlockHash(), rotated_descriptors)};
+    auto rotation_members{llmq::GetPQQuorumUnionRelayConnections(*rotated_rosters, local)};
+    rotation_members.insert(extra);
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(rotation_group, rotation_members,
+        llmq::PQQuorumOverlayPredecessor{rotation_predecessor, rotation_base.statement.block_hash},
+        {extra}, local, llmq::PQQuorumOverlayTarget{*rotation_target, chain[*rotation_target]->GetBlockHash()},
+        publish_source(rotation_group)));
+    auto* rotation_peer{new CNode{1'960'004, nullptr,
+        CAddress{LookupNumeric("192.0.2.5", 8369), NODE_NETWORK}, 1, 1, CAddress{},
+        std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false}};
+    rotation_peer->m_masternode_fallback_identity = extra;
+    connman.AddTestNode(*rotation_peer);
+    update_tip(rotation_tip);
+    BOOST_CHECK(!rotation_peer->fDisconnect);
+    BOOST_CHECK(connman.IsMasternodeQuorumRelayMember(extra));
+    source_current = false;
+    update_tip(rotation_tip);
+    BOOST_CHECK(rotation_peer->fDisconnect);
+    BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+    source_current = true;
+    BOOST_REQUIRE(overlay.ApplyPreparedContext(rotation_group, rotation_members,
+        llmq::PQQuorumOverlayPredecessor{rotation_predecessor, rotation_base.statement.block_hash},
+        {extra}, local, llmq::PQQuorumOverlayTarget{*rotation_target, chain[*rotation_target]->GetBlockHash()},
+        publish_source(rotation_group)));
+    clear_during_source_validation = true;
+    update_tip(rotation_tip);
+    BOOST_CHECK(!clear_during_source_validation);
     BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
 }
 
@@ -11414,7 +11551,8 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_relays_only_local_cached_shares_after
     plan->authorized_recipients.insert(extras.begin(), extras.end());
     auto retry{Access::FinalizationRetryState(context)};
     BOOST_REQUIRE(Access::PublishFinalizationRetry(*handler, retry, plan));
-    llmq::CPQQuorumConnectionOverlay overlay{connman, cache, {}};
+    llmq::CPQQuorumConnectionOverlay overlay{connman, cache, {}, {},
+        [&](const llmq::PQShareRelayFallbackKey& key) { return handler->IsCurrentChainLockRelaySource(key); }};
     auto* prior_overlay{std::exchange(llmq::pqQuorumConnectionOverlay, &overlay)};
     auto* prior_handler{std::exchange(llmq::chainLocksHandler, handler.get())};
     CActiveMasternodeInfo prior_identity;
@@ -11499,6 +11637,19 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_relays_only_local_cached_shares_after
     Access::CacheLocalRelayShare(*handler, own);
     BOOST_CHECK_EQUAL(Access::CachedRelayShares(*handler), 1U);
     Access::StartRelayFallback(*handler, extras, 4);
+    const auto active_source_key{Access::RelayFallbackKey(*handler)};
+    BOOST_REQUIRE(active_source_key);
+    BOOST_REQUIRE(handler->IsCurrentChainLockRelaySource(*active_source_key));
+    for (unsigned change{0}; change < 4; ++change) {
+        auto stale{*active_source_key};
+        if (change == 0) stale.context_hash = NonNullHash(998'001);
+        if (change == 1) stale.local_pro_tx_hash = NonNullHash(998'002);
+        if (change == 2) ++stale.admission_generation;
+        if (change == 3) ++stale.collector_generation;
+        BOOST_CHECK(!handler->IsCurrentChainLockRelaySource(stale));
+    }
+    BOOST_CHECK(!Access::RelaySourceWithStaleRevisionIsCurrent(*handler, *active_source_key));
+    BOOST_REQUIRE(handler->IsCurrentChainLockRelaySource(*active_source_key));
     const auto stable{Access::RelayContextState(*handler)};
     Access::RelayLocalShares(*handler);
     BOOST_CHECK(Access::RelayContextState(*handler) == stable);
@@ -11528,6 +11679,7 @@ BOOST_FIXTURE_TEST_CASE(chainlock_fallback_relays_only_local_cached_shares_after
     for (const auto& extra : extras) BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
     BOOST_CHECK(connman.IsMasternodeQuorumRelayMember(normal));
     Access::ResetRelayContext(*handler);
+    BOOST_CHECK(!handler->IsCurrentChainLockRelaySource(*active_source_key));
     Access::RelayLocalShares(*handler);
     for (auto* peer : peers) BOOST_CHECK(drain(peer).empty());
 

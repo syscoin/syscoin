@@ -272,10 +272,12 @@ CPQQuorumConnectionOverlay::CPQQuorumConnectionOverlay(
     CConnman& connman,
     pq::FrozenQuorumRosterCachePtr roster_cache,
     PQChainLockPredecessorHeight predecessor_height,
-    pq::BTCCScheduleConfig btcc_schedule)
+    pq::BTCCScheduleConfig btcc_schedule,
+    PQQuorumOverlaySourceValidator source_validator)
     : m_roster_cache{std::move(roster_cache)},
       m_predecessor_height{std::move(predecessor_height)},
       m_btcc_schedule{btcc_schedule},
+      m_source_validator{std::move(source_validator)},
       m_reconciler{
           [this, &connman](const uint256& group,
                      const PQQuorumConnectionSet& connections) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) {
@@ -338,7 +340,8 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
     const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor,
     const PQQuorumConnectionSet& fallback_members,
     const uint256& local_pro_tx_hash,
-    const std::optional<PQQuorumOverlayTarget>& prepared_target)
+    const std::optional<PQQuorumOverlayTarget>& prepared_target,
+    const std::optional<PQShareRelayFallbackKey>& source_key)
 {
     const auto local_identity{fallback_members.empty()
         ? std::optional<LocalOperatorIdentity>{} : GetLocalOperatorIdentity()};
@@ -347,6 +350,11 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
          (!local_identity || local_identity->pro_tx_hash != local_pro_tx_hash)) ||
         (!fallback_members.empty() &&
          (!prepared_target || prepared_target->height < 0 || prepared_target->block_hash.IsNull())) ||
+        (!fallback_members.empty() &&
+         (!source_key || source_key->context_hash != quorum_context_hash ||
+          source_key->local_pro_tx_hash != local_pro_tx_hash ||
+          source_key->admission_generation == 0 || source_key->collector_generation == 0 ||
+          !m_source_validator)) ||
         fallback_members.size() > PQShareRelayFallback::MAX_EXTRA_CONNECTIONS ||
         !std::all_of(fallback_members.begin(), fallback_members.end(),
                      [&](const auto& member) { return relay_members.contains(member); })) return false;
@@ -372,6 +380,7 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
             accepted_predecessor, current_predecessor)) {
         return false;
     }
+    if (!fallback_members.empty() && !m_source_validator(*source_key)) return false;
     LOCK(m_mutex);
     if (m_revision != observed_revision) return false;
     const PQQuorumOverlayPlan fallback{fallback_members.empty()
@@ -379,7 +388,7 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
     const std::optional<FallbackContext> fallback_context{fallback_members.empty()
         ? std::nullopt : std::optional<FallbackContext>{FallbackContext{
             quorum_context_hash, local_pro_tx_hash, local_identity->key_version,
-            local_identity->public_key, *prepared_target, accepted_predecessor}}};
+            local_identity->public_key, *prepared_target, accepted_predecessor, *source_key}}};
     if (m_chainlock_plan == plan && m_chainlock_fallback == fallback &&
         m_fallback_context == fallback_context) return true;
     if (m_payment_audit_plan &&
@@ -486,7 +495,7 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     // makes direct startup/test calls safe and fixes the lock order relative
     // to active-chain updates.
     LOCK(cs_main);
-    LOCK(m_mutex);
+    WAIT_LOCK(m_mutex, overlay_lock);
     ++m_revision;
 
     if (initial_download || new_tip == nullptr || !m_roster_cache ||
@@ -584,6 +593,22 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
         m_fallback_context->global_key_version == local_identity->key_version &&
         m_fallback_context->global_public_key == local_identity->public_key &&
         m_fallback_context->accepted_predecessor == accepted_predecessor};
+    // The prepared source can legitimately use a rotated or recovered roster
+    // before that roster has an accepted winner. Retain its exact group only
+    // while the handler still authenticates the same published source.
+    if (!m_chainlock_fallback.empty() && exact_fallback_source && m_source_validator) {
+        const auto source_key{m_fallback_context->source_key};
+        const auto observed_revision{m_revision};
+        bool current_source{false};
+        {
+            REVERSE_LOCK(overlay_lock);
+            current_source = m_source_validator(source_key);
+        }
+        // A clear or replacement while the handler was checked owns the
+        // newer topology; this callback must not restore or retire it.
+        if (m_revision != observed_revision) return;
+        if (current_source) return;
+    }
     if (!accepted_chainlock ||
         !accepted_chainlock->statement.roster_beacons.active
              .IsForNewestEpoch(newest_identity.epoch)) {
@@ -591,12 +616,7 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
                  "PQ overlay retaining previous topology; no exact accepted "
                  "roster beacon bundle for target=%d\n",
                  *target_height);
-        // Before the first winner, the prepared context already authenticated
-        // the frozen rosters. Keep its lease only for the same target, local
-        // credentials and still-absent predecessor. INITIALIZE keeps its
-        // canonical round target; historical no-best contexts use the normal
-        // signing cadence. Neither waits for a winner to expire old routes.
-        if (accepted_chainlock || !exact_fallback_source) ClearChainLockFallbackLocked();
+        ClearChainLockFallbackLocked();
         return;
     }
     const auto& beacon_bundle{
@@ -611,7 +631,7 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
                           *target_height, target->GetBlockHash(),
                           *accepted_predecessor, newest_identity.epoch,
                           newest_base->GetBlockHash(), *beacon_bundle_hash};
-    if (m_context && *m_context == context) return;
+    if (m_context && *m_context == context && m_chainlock_fallback.empty()) return;
 
     pq::QuorumBuildError build_error{pq::QuorumBuildError::NONE};
     const auto verified{
@@ -633,20 +653,9 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
     auto plan{BuildPQQuorumOverlayPlan(
         genesis_hash, *target_height, target->GetBlockHash(), *rosters,
         *local_operator)};
-    // A block inside the same signing window must not retire sockets opened
-    // for that window. The group hash binds the target and frozen rosters;
-    // also bind the local identity and exact accepted predecessor, which are
-    // not part of that hash. A changed or unverifiable source retires extras.
-    const bool retain_fallback{exact_fallback_source && plan.size() == 1 &&
-        m_fallback_context->quorum_context_hash == plan.begin()->first};
-    const bool fallback_changed{!retain_fallback && !m_chainlock_fallback.empty()};
-    if (retain_fallback) {
-        const auto& members{m_chainlock_fallback.at(plan.begin()->first)};
-        plan.begin()->second.insert(members.begin(), members.end());
-    } else {
-        m_chainlock_fallback.clear();
-        m_fallback_context.reset();
-    }
+    const bool fallback_changed{!m_chainlock_fallback.empty()};
+    m_chainlock_fallback.clear();
+    m_fallback_context.reset();
     if (m_payment_audit_plan &&
         plan.count(m_payment_audit_plan->group) != 0) {
         m_retired_payment_audit_generation = std::max(

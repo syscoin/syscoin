@@ -21262,6 +21262,29 @@ void CChainLocksHandler::ResetCollectors()
     ++m_collector_generation;
 }
 
+bool CChainLocksHandler::IsCurrentChainLockRelaySource(const PQShareRelayFallbackKey& key) const
+{
+    const auto contexts{GetPublishedCurrentSigningContexts(key.admission_generation)};
+    if (!contexts || contexts->statements[0].quorum_context_hash != key.context_hash ||
+        contexts->relay_plan->local_pro_tx_hash != key.local_pro_tx_hash) return false;
+    const auto still_published = [&]() EXCLUSIVE_LOCKS_REQUIRED(m_collector_mutex) {
+        return m_current_signing_contexts == contexts &&
+               m_collector_generation == key.collector_generation &&
+               m_share_relay_fallback.Key() == std::optional<PQShareRelayFallbackKey>{key} &&
+               !m_share_relay_fallback.Members().empty();
+    };
+    {
+        LOCK(m_collector_mutex);
+        if (!still_published()) return false;
+    }
+    // Do not hold the collector lock across source validation or an overlay
+    // callback. A replacement publication must invalidate this exact lease.
+    if (!IsPQRelayPlanForActiveIdentity(contexts->relay_plan) ||
+        !IsCurrentSigningSource(contexts->source)) return false;
+    LOCK(m_collector_mutex);
+    return still_published() && IsShareAdmissionGenerationCurrent(key.admission_generation);
+}
+
 void CChainLocksHandler::ApplyCurrentChainLockRelayPlan(
     const CurrentSigningContextsPtr& contexts)
 {
@@ -21275,6 +21298,7 @@ void CChainLocksHandler::ApplyCurrentChainLockRelayPlan(
     if (!IsShareAdmissionGenerationCurrent(contexts->source.admission_generation)) return;
     PQQuorumConnectionSet members{contexts->relay_plan->relay_members};
     PQQuorumConnectionSet fallback;
+    std::optional<PQShareRelayFallbackKey> source_key;
     {
         LOCK(m_collector_mutex);
         if (m_current_signing_contexts != contexts) return;
@@ -21292,6 +21316,7 @@ void CChainLocksHandler::ApplyCurrentChainLockRelayPlan(
             m_share_relay_fallback.Key()->collector_generation == m_collector_generation &&
             m_share_relay_fallback.Key()->admission_generation == contexts->source.admission_generation) {
             fallback = m_share_relay_fallback.Members();
+            if (!fallback.empty()) source_key = m_share_relay_fallback.Key();
             members.insert(fallback.begin(), fallback.end());
         }
     }
@@ -21309,7 +21334,7 @@ void CChainLocksHandler::ApplyCurrentChainLockRelayPlan(
                     (!contexts->source.has_durable_chainlock &&
                      contexts->source.historical_coverage_token.IsNull())
                 ? PQQuorumOverlayTargetMode::ROSTER_INITIALIZATION
-                : PQQuorumOverlayTargetMode::ORDINARY});
+                : PQQuorumOverlayTargetMode::ORDINARY}, source_key);
 }
 
 void CChainLocksHandler::RememberLocalChainLockShare(

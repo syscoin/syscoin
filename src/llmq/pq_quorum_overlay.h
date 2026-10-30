@@ -88,6 +88,9 @@ struct PQShareRelayFallbackKey {
     friend bool operator==(const PQShareRelayFallbackKey&, const PQShareRelayFallbackKey&) = default;
 };
 
+using PQQuorumOverlaySourceValidator =
+    std::function<bool(const PQShareRelayFallbackKey&)>;
+
 /**
  * Bounded exploration of an already shuffled frozen eligible union. The caller
  * owns authentication and only reannounces its own journaled shares. Remote
@@ -176,7 +179,8 @@ public:
         CConnman& connman,
         pq::FrozenQuorumRosterCachePtr roster_cache,
         PQChainLockPredecessorHeight predecessor_height,
-        pq::BTCCScheduleConfig btcc_schedule = {});
+        pq::BTCCScheduleConfig btcc_schedule = {},
+        PQQuorumOverlaySourceValidator source_validator = {});
     ~CPQQuorumConnectionOverlay();
 
     CPQQuorumConnectionOverlay(const CPQQuorumConnectionOverlay&) = delete;
@@ -185,14 +189,15 @@ public:
 
     void UpdatedBlockTip(const CBlockIndex* new_tip, bool initial_download)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** Nonempty fallback routes must identify their local owner and exact target. */
+    /** Nonempty fallback routes require their exact target and a live prepared-source key. */
     [[nodiscard]] bool ApplyPreparedContext(
         const uint256& quorum_context_hash,
         const PQQuorumConnectionSet& relay_members,
         const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor,
         const PQQuorumConnectionSet& fallback_members = {},
         const uint256& local_pro_tx_hash = {},
-        const std::optional<PQQuorumOverlayTarget>& prepared_target = std::nullopt)
+        const std::optional<PQQuorumOverlayTarget>& prepared_target = std::nullopt,
+        const std::optional<PQShareRelayFallbackKey>& source_key = std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Remove only temporary local-share routes, keeping ordinary plans intact. */
     void ClearChainLockFallback() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -229,6 +234,7 @@ private:
         pq::GlobalPublicKey global_public_key{};
         PQQuorumOverlayTarget target;
         std::optional<PQQuorumOverlayPredecessor> accepted_predecessor;
+        PQShareRelayFallbackKey source_key;
 
         friend bool operator==(const FallbackContext&, const FallbackContext&) = default;
     };
@@ -237,6 +243,7 @@ private:
     const PQChainLockPredecessorHeight m_predecessor_height;
     // The roster config may omit BTCC when recovery refresh is disabled.
     const pq::BTCCScheduleConfig m_btcc_schedule;
+    const PQQuorumOverlaySourceValidator m_source_validator;
     Mutex m_mutex;
     struct PaymentAuditPlan {
         uint256 group;
