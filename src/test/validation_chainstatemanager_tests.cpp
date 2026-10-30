@@ -13603,7 +13603,7 @@ BOOST_FIXTURE_TEST_CASE(nevm_connect_live_missing_parent_evidence_remains_retrya
     {
         struct RestoreParentPosition {
             CBlockIndex& index;
-            const unsigned int position;
+            const uint64_t position;
             ~RestoreParentPosition()
             {
                 LOCK(::cs_main);

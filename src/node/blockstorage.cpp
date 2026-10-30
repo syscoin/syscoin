@@ -942,7 +942,7 @@ bool BlockManager::FlushBlockFilesForDurability()
     }
     for (const int file : files) {
         const auto& info{m_blockfile_info.at(file)};
-        const auto flush = [&](FlatFileSeq sequence, unsigned int size) {
+        const auto flush = [&](FlatFileSeq sequence, uint64_t size) {
             // Pruning leaves zero-size tombstones in the dirty batch. A
             // not-yet-connected block can also have no undo stream at all.
             if (size == 0) return true;

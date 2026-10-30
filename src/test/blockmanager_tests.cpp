@@ -1138,7 +1138,7 @@ BOOST_FIXTURE_TEST_CASE(preseal_durability_rejects_missing_or_truncated_streams,
     LOCK(cs_main);
     Store(/*with_undo=*/true);
     const auto* info{blockman.GetBlockFileInfo(index->nFile)};
-    const std::array<std::pair<fs::path, unsigned int>, 2> streams{{
+    const std::array<std::pair<fs::path, uint64_t>, 2> streams{{
         {blockman.GetBlockPosFilename(index->GetBlockPos()), info->nSize},
         {m_args.GetBlocksDirPath() / "rev00000.dat", info->nUndoSize},
     }};
@@ -1160,6 +1160,38 @@ BOOST_FIXTURE_TEST_CASE(preseal_durability_rejects_missing_or_truncated_streams,
             }
         }
     }
+    CheckStored(*index, block.vchNEVMBlockData);
+}
+
+BOOST_FIXTURE_TEST_CASE(preseal_durability_preserves_64bit_undo_sizes, NEVMBlockStorageSetup)
+{
+    LOCK(cs_main);
+    Store(/*with_undo=*/true);
+    BOOST_REQUIRE_EQUAL(index->nFile, 0);
+    auto* info{blockman.GetBlockFileInfo(index->nFile)};
+    const uint64_t original_size{info->nUndoSize};
+    const fs::path undo_path{m_args.GetBlocksDirPath() / "rev00000.dat"};
+    const auto disk_size{fs::file_size(undo_path)};
+    BOOST_REQUIRE_GT(original_size, 0U);
+    BOOST_REQUIRE_LT(disk_size, uint64_t{1} << 32);
+
+    // A 32-bit size would turn the first obligation into a zero-size tombstone
+    // and the second into the original, already-present stream length.
+    for (const uint64_t required_size : {uint64_t{1} << 32, (uint64_t{1} << 32) + original_size}) {
+        BOOST_TEST_CONTEXT("required undo size=" << required_size) {
+            info->nUndoSize = required_size;
+            // Keep the real file small: its existing contents are insufficient
+            // for either large obligation, without creating a multi-GiB file.
+            BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+            BOOST_CHECK_EQUAL(fs::file_size(undo_path), disk_size);
+            WithMovedFlatFile(undo_path, [&](const fs::path&) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                BOOST_CHECK(!blockman.FlushBlockFilesForDurability());
+                BOOST_CHECK(!fs::exists(undo_path));
+            });
+        }
+    }
+    info->nUndoSize = original_size;
+    BOOST_REQUIRE(blockman.FlushBlockFilesForDurability());
     CheckStored(*index, block.vchNEVMBlockData);
 }
 
