@@ -20,6 +20,18 @@
 struct ConnmanTestMsg : public CConnman {
     using CConnman::CConnman;
 
+    bool IsTestMasternodeFallbackOnly(const uint256& identity)
+    {
+        LOCK(cs_vPendingMasternodes);
+        return IsMasternodeFallbackOnly(identity);
+    }
+
+    void RetireTestMasternodeFallbackConnections()
+    {
+        AssertLockNotHeld(cs_vPendingMasternodes);
+        RetireMasternodeFallbackConnections();
+    }
+
     void SetPeerConnectTimeout(std::chrono::seconds timeout)
     {
         m_peer_connect_timeout = timeout;

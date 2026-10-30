@@ -181,6 +181,99 @@ BOOST_AUTO_TEST_CASE(disjoint_rosters_form_one_bounded_connected_union)
         participants.size());
 }
 
+BOOST_AUTO_TEST_CASE(replacement_intent_is_installed_before_old_fallback_retires)
+{
+    const auto old_group{NonNullHash(600)};
+    const auto new_group{NonNullHash(601)};
+    const auto peer{NonNullHash(602)};
+    PQQuorumOverlayPlan installed;
+    bool disconnected{false};
+    PQQuorumOverlayReconciler reconciler{
+        [&](const uint256& group, const PQQuorumConnectionSet& members) { installed[group] = members; },
+        [&](const uint256& group) {
+            installed.erase(group);
+            const bool still_needed{std::any_of(installed.begin(), installed.end(),
+                [&](const auto& entry) { return entry.second.contains(peer); })};
+            if (!still_needed) disconnected = true;
+        }};
+    reconciler.Apply({{old_group, Connections({peer})}});
+    reconciler.Apply({{new_group, Connections({peer})}});
+    BOOST_CHECK(!disconnected);
+    BOOST_CHECK_EQUAL(installed.size(), 1U);
+    BOOST_CHECK(installed.contains(new_group));
+    reconciler.Clear();
+    BOOST_CHECK(disconnected);
+}
+
+BOOST_AUTO_TEST_CASE(local_share_fallback_has_fixed_grace_bounded_rotation_and_completion)
+{
+    const PQShareRelayFallbackKey key{NonNullHash(700), NonNullHash(701), 1, 2};
+    std::vector<uint256> candidates;
+    for (uint64_t i{0}; i < 12; ++i) candidates.push_back(NonNullHash(800 + i));
+    PQShareRelayFallback fallback;
+    BOOST_REQUIRE(fallback.Start(key, candidates, 100));
+    BOOST_CHECK(!fallback.Advance(129, false));
+    BOOST_CHECK(fallback.Members().empty());
+    BOOST_REQUIRE(fallback.Start(key, candidates, 129));
+    // Re-observing the same immutable context cannot restart the grace clock.
+    BOOST_CHECK(fallback.Advance(130, false));
+    BOOST_REQUIRE_EQUAL(fallback.Members().size(), 1U);
+    BOOST_CHECK(fallback.Members().contains(candidates[0]));
+    BOOST_CHECK(!fallback.Advance(189, false));
+    for (std::size_t i{1}; i < candidates.size(); ++i) {
+        BOOST_CHECK(fallback.Advance(130 + 60 * i, false));
+        BOOST_CHECK_LE(fallback.Members().size(), PQShareRelayFallback::MAX_EXTRA_CONNECTIONS);
+        BOOST_CHECK(fallback.Members().contains(candidates[i]));
+        if (i >= PQShareRelayFallback::MAX_EXTRA_CONNECTIONS) {
+            BOOST_CHECK(!fallback.Members().contains(candidates[i - PQShareRelayFallback::MAX_EXTRA_CONNECTIONS]));
+        }
+        BOOST_CHECK(!fallback.Advance(130 + 60 * i, false));
+    }
+    BOOST_CHECK(!fallback.Advance(10'000, false)); // Exhausted, no replacement.
+    BOOST_CHECK(fallback.Advance(10'001, true));
+    BOOST_CHECK(fallback.Members().empty());
+    BOOST_REQUIRE(fallback.Start(key, candidates, 10'002));
+    BOOST_CHECK(!fallback.Advance(20'000, false)); // Completion stays latched.
+    auto replacement{key};
+    ++replacement.collector_generation;
+    BOOST_REQUIRE(fallback.Start(replacement, candidates, 20'000));
+    BOOST_CHECK(fallback.Members().empty());
+    BOOST_CHECK(fallback.Advance(20'030, false));
+    BOOST_CHECK(fallback.Members().contains(candidates[0]));
+    fallback.Reset();
+    BOOST_CHECK(!fallback.Key());
+    BOOST_CHECK(fallback.Members().empty());
+}
+
+BOOST_AUTO_TEST_CASE(local_share_fallback_candidates_are_exact_frozen_union)
+{
+    std::vector<uint256> participants;
+    for (uint64_t i{0}; i < 400; ++i) participants.push_back(NonNullHash(1'000 + i));
+    std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS> rosters;
+    for (std::size_t slot{0}; slot < rosters.size(); ++slot) rosters[slot] = Roster(slot, participants);
+    const auto local{participants.front()};
+    const auto normal{GetPQQuorumUnionRelayConnections(rosters, local)};
+    const auto candidates{BuildPQShareRelayFallbackCandidates(rosters, local)};
+    BOOST_REQUIRE_EQUAL(candidates.size(), 391U);
+    std::set<uint256> unique;
+    for (const auto& candidate : candidates) {
+        BOOST_CHECK(candidate != local);
+        BOOST_CHECK(!normal.contains(candidate));
+        BOOST_CHECK(unique.insert(candidate).second);
+    }
+    PQShareRelayFallback fallback;
+    const PQShareRelayFallbackKey key{NonNullHash(70), local, 1, 1};
+    BOOST_CHECK(!fallback.Start(key, {local}, 0));
+    BOOST_CHECK(!fallback.Start(key, {participants[1], participants[1]}, 0));
+    BOOST_CHECK(!fallback.Start(key, {uint256{}}, 0));
+    BOOST_CHECK(!fallback.Start(key, candidates, -1));
+    BOOST_CHECK(fallback.Start(key, candidates, 0));
+    BOOST_CHECK(fallback.Advance(30, false));
+    BOOST_CHECK(fallback.Advance(29, false)); // Backward time closes the routes.
+    BOOST_CHECK(fallback.Members().empty());
+    BOOST_CHECK(!fallback.Advance(300, false));
+}
+
 BOOST_AUTO_TEST_CASE(plan_is_one_union_group_for_any_participating_signer)
 {
     const uint256 local{NonNullHash(1)};

@@ -27,6 +27,7 @@
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
 #include <protocol.h>
+#include <random.h>
 #include <scheduler.h>
 #include <services/nevmconsensus.h>
 #include <spork.h>
@@ -3413,6 +3414,7 @@ void CChainLocksHandler::Start()
                 (void)RefreshCurrentSigningContexts(
                     admission_generation);
             }
+            MaybeRelayLocalChainLockShares();
             MaybeCreateAndSignChainLock();
             MaybeCreateAndSignPaymentAudit();
         }, std::chrono::seconds{5});
@@ -3458,6 +3460,7 @@ void CChainLocksHandler::Stop()
             LOCK(m_collector_mutex);
             ResetCollectors();
         }
+        if (pqQuorumConnectionOverlay) pqQuorumConnectionOverlay->ClearChainLockFallback();
         {
             LOCK(m_payment_audit_mutex);
             ResetPaymentAuditRuntime();
@@ -15786,28 +15789,10 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
                    contexts->relay_plan) &&
                IsCurrentSigningSource(contexts->source);
     };
-    const auto apply_relay_plan = [](
-                                      const CurrentSigningContextsPtr& contexts) {
-        if (pqQuorumConnectionOverlay == nullptr || !contexts ||
-            !IsPQRelayPlanForActiveIdentity(contexts->relay_plan)) {
-            return;
-        }
-        const std::optional<PQQuorumOverlayPredecessor> accepted_predecessor{
-            contexts->source.has_durable_chainlock
-                ? std::optional<PQQuorumOverlayPredecessor>{
-                      PQQuorumOverlayPredecessor{
-                          contexts->source.durable_predecessor.height,
-                          contexts->source.durable_predecessor.block_hash}}
-                : std::nullopt};
-        (void)pqQuorumConnectionOverlay->ApplyPreparedContext(
-            contexts->statements[0].quorum_context_hash,
-            contexts->relay_plan->relay_members,
-            accepted_predecessor);
-    };
     auto cached{GetPublishedCurrentSigningContexts(admission_generation)};
     const bool initial_current{is_current(cached)};
     if (initial_current) {
-        apply_relay_plan(cached);
+        ApplyCurrentChainLockRelayPlan(cached);
         return true;
     }
 
@@ -15818,7 +15803,7 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
     cached = GetPublishedCurrentSigningContexts(admission_generation);
     const bool cached_current{is_current(cached)};
     if (cached_current) {
-        apply_relay_plan(cached);
+        ApplyCurrentChainLockRelayPlan(cached);
         return true;
     }
 
@@ -15874,6 +15859,9 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
     auto published{std::make_shared<const CurrentSigningContexts>(
         std::move(*built))};
 
+    auto fallback_candidates{BuildPQShareRelayFallbackCandidates(
+        published->roster_set->Rosters(), published->relay_plan->local_pro_tx_hash)};
+    Shuffle(fallback_candidates.begin(), fallback_candidates.end(), FastRandomContext{});
     uint64_t published_generation{0};
     {
         LOCK(m_collector_mutex);
@@ -15885,6 +15873,12 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
         m_collectors = std::move(collectors);
         m_current_signing_contexts = published;
         published_generation = ++m_collector_generation;
+        for (auto& shares : m_local_journaled_shares) shares.clear();
+        (void)m_share_relay_fallback.Start(
+            {published->statements[0].quorum_context_hash,
+             published->relay_plan->local_pro_tx_hash, admission_generation,
+             published_generation}, std::move(fallback_candidates),
+            TicksSinceEpoch<std::chrono::seconds>(SteadyClock::now()));
     }
     // Source inputs are not serialized by the publication mutex. Retire only
     // this exact pointer/generation if the post-publication safety check loses
@@ -15900,7 +15894,7 @@ bool CChainLocksHandler::RefreshCurrentSigningContexts(
     // The first INITIALIZE context has no accepted predecessor for the
     // tip-driven overlay path. Reapplying cached contexts also repairs a plan
     // cleared by IBD or a racing tip callback before any share announcement.
-    apply_relay_plan(published);
+    ApplyCurrentChainLockRelayPlan(published);
     LogPrint(BCLog::CHAINLOCKS,
              "CChainLocksHandler::%s -- published PQ ChainLock signing "
              "context height=%d variants=%u\n",
@@ -21263,7 +21257,127 @@ void CChainLocksHandler::ResetCollectors()
 {
     for (auto& collector : m_collectors) collector.reset();
     m_current_signing_contexts.reset();
+    m_share_relay_fallback.Reset();
+    for (auto& shares : m_local_journaled_shares) shares.clear();
     ++m_collector_generation;
+}
+
+void CChainLocksHandler::ApplyCurrentChainLockRelayPlan(
+    const CurrentSigningContextsPtr& contexts)
+{
+    if (!pqQuorumConnectionOverlay || !contexts ||
+        !IsCurrentSigningSource(contexts->source) ||
+        !IsPQRelayPlanForActiveIdentity(contexts->relay_plan)) return;
+    // Context refresh may still own its build mutex. A busy lifecycle is
+    // retried by the next scheduler pass without changing fallback progress.
+    TRY_LOCK(m_share_lifecycle_mutex, lifecycle_lock);
+    if (!lifecycle_lock) return;
+    if (!IsShareAdmissionGenerationCurrent(contexts->source.admission_generation)) return;
+    PQQuorumConnectionSet members{contexts->relay_plan->relay_members};
+    PQQuorumConnectionSet fallback;
+    {
+        LOCK(m_collector_mutex);
+        if (m_current_signing_contexts != contexts) return;
+        if (!m_share_relay_fallback.Key()) {
+            auto candidates{BuildPQShareRelayFallbackCandidates(
+                contexts->roster_set->Rosters(), contexts->relay_plan->local_pro_tx_hash)};
+            Shuffle(candidates.begin(), candidates.end(), FastRandomContext{});
+            (void)m_share_relay_fallback.Start(
+                {contexts->statements[0].quorum_context_hash,
+                 contexts->relay_plan->local_pro_tx_hash,
+                 contexts->source.admission_generation, m_collector_generation},
+                std::move(candidates), TicksSinceEpoch<std::chrono::seconds>(SteadyClock::now()));
+        }
+        if (m_share_relay_fallback.Key() &&
+            m_share_relay_fallback.Key()->collector_generation == m_collector_generation &&
+            m_share_relay_fallback.Key()->admission_generation == contexts->source.admission_generation) {
+            fallback = m_share_relay_fallback.Members();
+            members.insert(fallback.begin(), fallback.end());
+        }
+    }
+    const std::optional<PQQuorumOverlayPredecessor> predecessor{
+        contexts->source.has_durable_chainlock
+            ? std::optional<PQQuorumOverlayPredecessor>{PQQuorumOverlayPredecessor{
+                  contexts->source.durable_predecessor.height,
+                  contexts->source.durable_predecessor.block_hash}}
+            : std::nullopt};
+    (void)pqQuorumConnectionOverlay->ApplyPreparedContext(
+        contexts->statements[0].quorum_context_hash, members, predecessor, fallback);
+}
+
+void CChainLocksHandler::RememberLocalChainLockShare(
+    const pq::ChainLockShare& share, const CurrentSigningContextsPtr& contexts,
+    std::size_t variant_index, uint64_t admission_generation)
+{
+    LOCK(m_collector_mutex);
+    if (!contexts || m_current_signing_contexts != contexts ||
+        !IsShareAdmissionGenerationCurrent(admission_generation) ||
+        variant_index >= contexts->count || !contexts->relay_plan ||
+        contexts->relay_plan->local_pro_tx_hash != share.transcript.member_pro_tx_hash ||
+        share.GetStatement() != contexts->statements[variant_index]) return;
+    auto& cached{m_local_journaled_shares[variant_index]};
+    const auto existing{std::find_if(cached.begin(), cached.end(), [&](const auto& old) {
+        return old.transcript.quorum_epoch == share.transcript.quorum_epoch &&
+               old.transcript.member_index == share.transcript.member_index;
+    })};
+    // Only this process's successful journal-backed signing path calls here.
+    // A retry keeps the exact original bytes and never creates a new vote.
+    if (existing == cached.end() && cached.size() < pq::ACTIVE_QUORUMS) cached.push_back(share);
+}
+
+void CChainLocksHandler::MaybeRelayLocalChainLockShares()
+{
+    const uint64_t generation{GetShareAdmissionGeneration()};
+    CurrentSigningContextsPtr observed;
+    {
+        LOCK(m_collector_mutex);
+        observed = m_current_signing_contexts;
+    }
+    const auto contexts{GetPublishedCurrentSigningContexts(generation)};
+    if (!contexts || !IsCurrentSigningSource(contexts->source) ||
+        !IsPQRelayPlanForActiveIdentity(contexts->relay_plan)) {
+        LOCK(m_share_lifecycle_mutex);
+        {
+            LOCK(m_collector_mutex);
+            // Do not retire a replacement published after the initial read.
+            if (m_current_signing_contexts != observed) return;
+            m_share_relay_fallback.Reset();
+            for (auto& shares : m_local_journaled_shares) shares.clear();
+        }
+        if (pqQuorumConnectionOverlay) pqQuorumConnectionOverlay->ClearChainLockFallback();
+        return;
+    }
+    std::array<std::vector<pq::ChainLockShare>, CurrentSigningContexts::MAX_VARIANTS> local;
+    {
+        LOCK(m_collector_mutex);
+        if (m_current_signing_contexts != contexts || !m_share_relay_fallback.Key() ||
+            m_share_relay_fallback.Key()->collector_generation != m_collector_generation) return;
+        bool complete{false};
+        bool own_share{false};
+        for (std::size_t i{0}; i < contexts->count; ++i) {
+            complete = complete || (m_collectors[i] && m_collectors[i]->IsComplete());
+            own_share = own_share || !m_local_journaled_shares[i].empty();
+        }
+        if (complete || own_share) {
+            (void)m_share_relay_fallback.Advance(
+                TicksSinceEpoch<std::chrono::seconds>(SteadyClock::now()), complete);
+        }
+        if (complete) {
+            for (auto& shares : m_local_journaled_shares) shares.clear();
+        } else if (!m_share_relay_fallback.Members().empty()) {
+            local = m_local_journaled_shares;
+        }
+    }
+    // Both connection establishment and the send gate use this mutable plan;
+    // immutable collector contexts and generations remain untouched.
+    ApplyCurrentChainLockRelayPlan(contexts);
+    for (std::size_t i{0}; i < contexts->count; ++i) {
+        for (const auto& share : local[i]) {
+            const auto statement{share.GetStatement()};
+            if (!IsNEVMReadyForLocalSigning(statement.height, statement.block_hash)) return;
+            RelayChainLockShare(share, contexts, i, generation, {}, /*fallback_only=*/true);
+        }
+    }
 }
 
 void CChainLocksHandler::RelayChainLockShare(
@@ -21271,7 +21385,8 @@ void CChainLocksHandler::RelayChainLockShare(
     CurrentSigningContextsPtr signing_contexts,
     std::size_t variant_index,
     uint64_t admission_generation,
-    uint256 excluded_identity)
+    uint256 excluded_identity,
+    bool fallback_only)
 {
     if (!signing_contexts ||
         !IsCurrentSigningSource(signing_contexts->source)) {
@@ -21286,8 +21401,9 @@ void CChainLocksHandler::RelayChainLockShare(
     }
     {
         LOCK(cs_main);
-        if (IsPaymentAuditPresealActive()) return;
+        if (IsPaymentAuditPresealActive() || (fallback_only && IsBTCCPresealActive())) return;
     }
+    PQQuorumConnectionSet fallback_members;
     {
         LOCK(m_collector_mutex);
         if (m_current_signing_contexts != signing_contexts ||
@@ -21295,6 +21411,13 @@ void CChainLocksHandler::RelayChainLockShare(
             m_collectors[variant_index]->GetStatement() !=
                 share.GetStatement()) {
             return;
+        }
+        if (fallback_only && signing_contexts->relay_plan &&
+            share.transcript.member_pro_tx_hash == signing_contexts->relay_plan->local_pro_tx_hash &&
+            m_share_relay_fallback.Key() &&
+            m_share_relay_fallback.Key()->collector_generation == m_collector_generation &&
+            m_share_relay_fallback.Key()->admission_generation == admission_generation) {
+            fallback_members = m_share_relay_fallback.Members();
         }
     }
     const auto& relay_plan{signing_contexts->relay_plan};
@@ -21313,11 +21436,17 @@ void CChainLocksHandler::RelayChainLockShare(
             node->GetCommonVersion() < PQ_MNAUTH_PROTO_VERSION) {
             return;
         }
+        // For the initiating side, receiving and verifying the response proves
+        // both parties have authenticated. A responder's COMPLETE only means
+        // its response was queued; the remote side may still be verifying it.
+        if (fallback_only && (node->IsInboundConn() ||
+            node->GetMNAuthPending().phase != CMNAuthPendingPhase::COMPLETE)) return;
         const uint256 identity{node->GetVerifiedProRegTxHash()};
         if (!relay_gate.Admit(
                 identity,
                 relay_plan->authorized_recipients.contains(identity),
-                relay_plan->relay_members.contains(identity))) {
+                fallback_only ? fallback_members.contains(identity)
+                              : relay_plan->relay_members.contains(identity))) {
             return;
         }
         m_connman.PushMessage(
@@ -21622,6 +21751,11 @@ void CChainLocksHandler::MaybeCreateAndSignChainLock()
                 current->variant_index,
                 admission_generation)};
             if (collection.stale) return;
+            if (collection.result == pq::ShareCollectionResult::ACCEPTED ||
+                collection.result == pq::ShareCollectionResult::DUPLICATE) {
+                RememberLocalChainLockShare(*signed_share.share, contexts,
+                    current->variant_index, admission_generation);
+            }
             if (collection.result !=
                 pq::ShareCollectionResult::ACCEPTED) {
                 // A peer can receive our first share before its private

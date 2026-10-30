@@ -1236,7 +1236,8 @@ public:
 
     static bool PublishFinalizationRetry(
         CChainLocksHandler& handler,
-        ChainLockFinalizationRetryState& retry)
+        ChainLockFinalizationRetryState& retry,
+        std::shared_ptr<const PQRelayPlan> relay_plan = {})
     {
         if (!handler.m_config || !handler.m_store || !handler.m_persistence ||
             !handler.m_payment_audit_store ||
@@ -1289,7 +1290,7 @@ public:
         source.btcc_receipt_state = statement.btcc_receipt_state;
         source.payment_audit_receipt_state = statement.payment_audit_receipt_state;
         source.payment_probation_state_hash = statement.payment_probation_state_hash;
-        contexts.relay_plan = std::make_shared<const PQRelayPlan>();
+        contexts.relay_plan = relay_plan ? std::move(relay_plan) : std::make_shared<const PQRelayPlan>();
         if (!handler.IsCurrentSigningSource(source)) return false;
         const auto published{
             std::make_shared<const CChainLocksHandler::CurrentSigningContexts>(
@@ -1303,6 +1304,70 @@ public:
         return handler.IsChainLockVerificationAvailable() &&
                handler.GetPublishedCurrentSigningContexts(
                    published->source.admission_generation) == published;
+    }
+
+    static void StartRelayFallback(CChainLocksHandler& handler,
+                                   const std::vector<uint256>& candidates,
+                                   std::size_t selected)
+    {
+        LOCK(handler.m_collector_mutex);
+        const auto& context{handler.m_current_signing_contexts};
+        BOOST_REQUIRE(context && context->relay_plan);
+        const int64_t now{TicksSinceEpoch<std::chrono::seconds>(SteadyClock::now())};
+        handler.m_share_relay_fallback.Reset();
+        const int64_t age{PQShareRelayFallback::GRACE_SECONDS +
+            static_cast<int64_t>(selected ? selected - 1 : 0) * PQShareRelayFallback::ROTATION_SECONDS};
+        BOOST_REQUIRE(handler.m_share_relay_fallback.Start(
+            {context->statements[0].quorum_context_hash, context->relay_plan->local_pro_tx_hash,
+             context->source.admission_generation, handler.m_collector_generation}, candidates, now - age));
+        for (std::size_t i{0}; i < selected; ++i) {
+            BOOST_REQUIRE(handler.m_share_relay_fallback.Advance(
+                now - static_cast<int64_t>(selected - 1 - i) * PQShareRelayFallback::ROTATION_SECONDS, false));
+        }
+    }
+
+    static void CacheLocalRelayShare(CChainLocksHandler& handler, const pq::ChainLockShare& share)
+    {
+        CChainLocksHandler::CurrentSigningContextsPtr context;
+        {
+            LOCK(handler.m_collector_mutex);
+            context = handler.m_current_signing_contexts;
+        }
+        handler.RememberLocalChainLockShare(share, context, 0, context->source.admission_generation);
+    }
+
+    static auto RelayContextState(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_collector_mutex);
+        return std::make_tuple(handler.m_current_signing_contexts.get(), handler.m_collectors[0].get(),
+            handler.m_collector_generation, handler.m_collectors[0]->ShareCounts());
+    }
+
+    static std::size_t CachedRelayShares(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_collector_mutex);
+        return handler.m_local_journaled_shares[0].size();
+    }
+
+    static void RelayLocalShares(CChainLocksHandler& handler)
+        EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+    {
+        handler.MaybeRelayLocalChainLockShares();
+    }
+
+    static void CompleteRelayCollector(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_collector_mutex);
+        for (std::size_t slot{0}; slot < pq::REQUIRED_QUORUMS; ++slot) {
+            llmq_tests::ChainLockCollectorTestAccess::Insert(*handler.m_collectors[0], slot,
+                pq::QUORUM_THRESHOLD, static_cast<uint8_t>(slot + 1));
+        }
+    }
+
+    static void ResetRelayContext(CChainLocksHandler& handler)
+    {
+        LOCK(handler.m_collector_mutex);
+        handler.ResetCollectors();
     }
 
     static Mutex& ChainLockAdmissionMutex(CChainLocksHandler& handler)
@@ -10871,6 +10936,225 @@ BOOST_FIXTURE_TEST_CASE(
     run();
     // This seam fixture intentionally has no roster member or child-key cache:
     // it exercises the real local handler gate, not a completed WOTS signature.
+}
+
+BOOST_FIXTURE_TEST_CASE(chainlock_fallback_relays_only_local_cached_shares_after_outbound_auth,
+                        PQAuthorizationBasePathSetup)
+{
+    using Access = llmq::test::CChainLocksHandlerTestAccess;
+    using namespace llmq::pq;
+    constexpr int32_t TARGET_HEIGHT{2'305};
+    constexpr int32_t TIP_HEIGHT{TARGET_HEIGHT + PQ_CL_SIGN_LAG};
+    auto& chainman{*Assert(m_node.chainman)};
+    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+    std::vector<CBlockIndex*> chain(static_cast<std::size_t>(TIP_HEIGHT + 1));
+    {
+        LOCK(::cs_main);
+        chain[0] = chainman.ActiveTip();
+        BOOST_REQUIRE(chain[0]);
+        for (int32_t height{1}; height <= TIP_HEIGHT; ++height) {
+            CBlockHeader header;
+            header.nVersion = 4;
+            header.hashPrevBlock = chain[height - 1]->GetBlockHash();
+            header.hashMerkleRoot = NonNullHash(920'000 + height);
+            header.nTime = static_cast<uint32_t>(GetTime<std::chrono::seconds>().count());
+            header.nBits = 0x207fffff;
+            header.nNonce = static_cast<uint32_t>(height);
+            chain[height] = chainman.m_blockman.AddToBlockIndex(header, chainman.m_best_header);
+            BOOST_REQUIRE(chain[height]);
+            chain[height]->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                BLOCK_PQ_BTCC_INDEX_VALIDATED | BLOCK_PQ_RECEIPT_INDEX_VALIDATED |
+                BLOCK_GOVERNANCE_VALIDATED;
+            chain[height]->pqPaymentProbationStateHash = NonNullHash(30'000);
+        }
+        chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]);
+    }
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    const auto original_consensus{consensus};
+    struct RestoreConsensus { Consensus::Params& target; Consensus::Params saved;
+        ~RestoreConsensus() { target = saved; } } restore_consensus{consensus, original_consensus};
+    consensus.nPQActivationHeight = TARGET_HEIGHT;
+    consensus.nPQPreparationHeight = 1'000;
+    consensus.nPQChainLockEpochOrigin = 1'440;
+    consensus.nPQRegistrationCutoffBlocks = 288;
+    consensus.nPQFutureHorizonEpochs = 8;
+    consensus.nPQRosterSnapshotLag = 288;
+    consensus.nPQBTCCCandidateOrigin = TARGET_HEIGHT;
+    consensus.nPQBTCCNEVMInjectionLag = PQ_BTCC_NEVM_LAG;
+    consensus.nPQBTCCReceiptAnchorHeight = 1'000;
+    consensus.hashPQBTCCReceiptAnchorBlock = chain[1'000]->GetBlockHash();
+    consensus.nPQBTCCReceiptAnchorCursorHeight = -1;
+    consensus.hashPQBTCCReceiptAnchorCursorSysBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorCursorBTCBlock.SetNull();
+    consensus.hashPQBTCCReceiptAnchorState.SetNull();
+    consensus.nDefaultAssumeValidHeight = -1;
+
+
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    std::unique_ptr<llmq::CChainLocksHandler> handler;
+    {
+        LOCK(::cs_main);
+        handler = std::make_unique<llmq::CChainLocksHandler>(connman, *m_node.peerman, chainman);
+    }
+    consensus = original_consensus;
+    const auto* config{Access::Config(*handler)};
+    const auto* quorum_config{Access::QuorumConfig(*handler)};
+    BOOST_REQUIRE(config && quorum_config);
+    const auto cache{FrozenQuorumRosterCache::Create(genesis, *quorum_config,
+        [](const CBlockIndex&) { return std::optional<QuorumSnapshotState>{}; })};
+    BOOST_REQUIRE(cache);
+    handler->SetQuorumRosterCache(cache);
+    auto certificate{MakeCatchupChainLock(TARGET_HEIGHT, TARGET_HEIGHT - 1,
+        chain[TARGET_HEIGHT - 1]->GetBlockHash(), 42)};
+    certificate.statement.block_hash = chain[TARGET_HEIGHT]->GetBlockHash();
+    const auto context{ChainLockStoreTestContextFactory::CreateDurable(
+        genesis, config->chainlock_schedule, certificate.statement)};
+    BOOST_REQUIRE(context);
+    const auto& roster{context->Rosters()[0]};
+    const auto local{roster.members[0].pro_tx_hash};
+    const uint256 normal{NonNullHash(991'001)};
+    const std::vector<uint256> extras{NonNullHash(991'002), NonNullHash(991'003),
+        NonNullHash(991'004), NonNullHash(991'005)};
+    auto plan{std::make_shared<llmq::PQRelayPlan>()};
+    plan->local_pro_tx_hash = local;
+    plan->relay_members.insert(normal);
+    plan->authorized_recipients.insert(normal);
+    plan->authorized_recipients.insert(extras.begin(), extras.end());
+    auto retry{Access::FinalizationRetryState(context)};
+    BOOST_REQUIRE(Access::PublishFinalizationRetry(*handler, retry, plan));
+    llmq::CPQQuorumConnectionOverlay overlay{connman, cache, {}};
+    auto* prior_overlay{std::exchange(llmq::pqQuorumConnectionOverlay, &overlay)};
+    auto* prior_handler{std::exchange(llmq::chainLocksHandler, handler.get())};
+    CActiveMasternodeInfo prior_identity;
+    {
+        LOCK(activeMasternodeInfoCs);
+        std::swap(activeMasternodeInfo, prior_identity);
+    }
+    const bool prior_masternode{fMasternodeMode};
+    const bool prior_nevm{fNEVMConnection};
+    struct RestoreRuntime {
+        ConnmanTestMsg& connman; llmq::CPQQuorumConnectionOverlay* overlay;
+        llmq::CChainLocksHandler* handler;
+        CActiveMasternodeInfo& identity; bool masternode; bool nevm;
+        ~RestoreRuntime() {
+            connman.ClearTestNodes();
+            llmq::pqQuorumConnectionOverlay = overlay;
+            llmq::chainLocksHandler = handler;
+            LOCK(activeMasternodeInfoCs);
+            std::swap(activeMasternodeInfo, identity);
+            fMasternodeMode = masternode; fNEVMConnection = nevm;
+        }
+    } restore{connman, prior_overlay, prior_handler, prior_identity, prior_masternode, prior_nevm};
+    slhdsa::KeyGenerationSeed seed{}; seed[0] = 99;
+    auto secret{slhdsa::GenerateSecretKey(seed)};
+    BOOST_REQUIRE(secret);
+    ChainLockMasterSeed child_seed{}; child_seed[0] = 98;
+    {
+        LOCK(activeMasternodeInfoCs);
+        activeMasternodeInfo.operatorKeyManager = std::make_shared<LocalOperatorKeyManager>(
+            std::move(*secret), std::move(child_seed));
+        activeMasternodeInfo.proTxHash = local;
+        activeMasternodeInfo.globalKeyVersion = 1;
+    }
+    fMasternodeMode = true;
+    fNEVMConnection = false;
+
+    std::vector<CNode*> peers;
+    const auto add_peer = [&](const uint256& identity, ConnectionType type, CMNAuthPendingPhase phase) {
+        auto* node{new CNode{static_cast<NodeId>(9910 + peers.size()), nullptr,
+            CAddress{LookupNumeric("13.192.176.160", static_cast<uint16_t>(7800 + peers.size())), NODE_NETWORK},
+            13, 9910 + peers.size(), CAddress{}, std::string{}, type, false}};
+        node->SetCommonVersion(PROTOCOL_VERSION);
+        node->fSuccessfullyConnected = true;
+        node->SetVerifiedMasternode(identity, NonNullHash(888), 1);
+        node->SetMNAuthPending(phase, std::numeric_limits<int64_t>::max());
+        connman.AddTestNode(*node); peers.push_back(node); return node;
+    };
+    auto* delayed{add_peer(extras[0], ConnectionType::OUTBOUND_FULL_RELAY, CMNAuthPendingPhase::SIGN_PENDING)};
+    auto* ready{add_peer(extras[1], ConnectionType::OUTBOUND_FULL_RELAY, CMNAuthPendingPhase::COMPLETE)};
+    auto* unauth{add_peer({}, ConnectionType::OUTBOUND_FULL_RELAY, CMNAuthPendingPhase::COMPLETE)};
+    auto* ready_last{add_peer(extras[3], ConnectionType::OUTBOUND_FULL_RELAY, CMNAuthPendingPhase::COMPLETE)};
+    auto* inbound{add_peer(extras[1], ConnectionType::INBOUND, CMNAuthPendingPhase::COMPLETE)};
+    auto* normal_peer{add_peer(normal, ConnectionType::OUTBOUND_FULL_RELAY, CMNAuthPendingPhase::COMPLETE)};
+    const auto drain = [&](CNode* node) {
+        LOCK(node->cs_vSend);
+        BOOST_REQUIRE(node->vSendMsg.empty());
+        std::vector<uint8_t> bytes;
+        while (true) {
+            const auto& [data, more, command]{node->m_transport->GetBytesToSend(false)};
+            if (data.empty()) break;
+            BOOST_CHECK_EQUAL(command, NetMsgType::PQCLSHARE);
+            bytes.insert(bytes.end(), UCharCast(data.data()), UCharCast(data.data() + data.size()));
+            node->m_transport->MarkBytesSent(data.size());
+        }
+        return bytes;
+    };
+    // This seam substitutes for successful local journal-backed signing;
+    // the production cache rejects shares attributed to another operator.
+    ChainLockShare own;
+    own.transcript = BuildChainLockShareTranscript(certificate, roster.descriptor, 0, local);
+    own.authenticated_signature.key_proof.public_key[0] = 1;
+    own.authenticated_signature.signature[0] = 42;
+    BOOST_REQUIRE(own.IsStructurallyValid());
+    auto remote{own};
+    remote.transcript = BuildChainLockShareTranscript(certificate, roster.descriptor, 1, roster.members[1].pro_tx_hash);
+    Access::StartRelayFallback(*handler, extras, 0);
+    Access::CacheLocalRelayShare(*handler, remote);
+    BOOST_CHECK_EQUAL(Access::CachedRelayShares(*handler), 0U);
+    Access::RelayLocalShares(*handler);
+    for (auto* peer : peers) BOOST_CHECK(drain(peer).empty());
+    Access::CacheLocalRelayShare(*handler, own);
+    Access::CacheLocalRelayShare(*handler, own);
+    BOOST_CHECK_EQUAL(Access::CachedRelayShares(*handler), 1U);
+    Access::StartRelayFallback(*handler, extras, 4);
+    const auto stable{Access::RelayContextState(*handler)};
+    Access::RelayLocalShares(*handler);
+    BOOST_CHECK(Access::RelayContextState(*handler) == stable);
+    const auto check_share = [&](CNode* peer) {
+        const auto bytes{drain(peer)};
+        BOOST_REQUIRE_EQUAL(bytes.size(), CMessageHeader::HEADER_SIZE + CompactChainLockShare::WIRE_SIZE);
+        CDataStream stream{std::vector<unsigned char>{bytes.begin() + CMessageHeader::HEADER_SIZE, bytes.end()}, SER_NETWORK, PROTOCOL_VERSION};
+        CompactChainLockShare compact; stream >> compact;
+        const auto expanded{ExpandCompactChainLockShare(compact, *context)};
+        BOOST_REQUIRE(expanded); BOOST_CHECK(*expanded == own);
+    };
+    check_share(ready); check_share(ready_last);
+    BOOST_CHECK(drain(delayed).empty()); BOOST_CHECK(drain(unauth).empty());
+    BOOST_CHECK(drain(inbound).empty()); BOOST_CHECK(drain(normal_peer).empty());
+    delayed->SetMNAuthPending(CMNAuthPendingPhase::COMPLETE, std::numeric_limits<int64_t>::max());
+    unauth->SetVerifiedMasternode(extras[2], NonNullHash(889), 1);
+    Access::RelayLocalShares(*handler);
+    for (auto* peer : {delayed, ready, unauth, ready_last}) check_share(peer);
+    BOOST_CHECK(drain(inbound).empty()); BOOST_CHECK(drain(normal_peer).empty());
+    BOOST_CHECK(Access::RelayContextState(*handler) == stable);
+    Access::CompleteRelayCollector(*handler);
+    const auto completed{Access::RelayContextState(*handler)};
+    Access::RelayLocalShares(*handler);
+    BOOST_CHECK(Access::RelayContextState(*handler) == completed);
+    BOOST_CHECK_EQUAL(Access::CachedRelayShares(*handler), 0U);
+    for (auto* peer : peers) BOOST_CHECK(drain(peer).empty());
+    for (const auto& extra : extras) BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+    BOOST_CHECK(connman.IsMasternodeQuorumRelayMember(normal));
+    Access::ResetRelayContext(*handler);
+    Access::RelayLocalShares(*handler);
+    for (auto* peer : peers) BOOST_CHECK(drain(peer).empty());
+
+    // Expiry of the actual source window also retires the routes and cached
+    // local share, without replacing the collector or immutable context.
+    auto expired_retry{Access::FinalizationRetryState(context)};
+    BOOST_REQUIRE(Access::PublishFinalizationRetry(*handler, expired_retry, plan));
+    Access::CacheLocalRelayShare(*handler, own);
+    Access::StartRelayFallback(*handler, extras, 4);
+    Access::RelayLocalShares(*handler);
+    for (auto* peer : {delayed, ready, unauth, ready_last}) check_share(peer);
+    const auto before_expiry{Access::RelayContextState(*handler)};
+    WITH_LOCK(::cs_main, chainman.ActiveChainstate().m_chain.SetTip(*chain[TARGET_HEIGHT - 1]));
+    Access::RelayLocalShares(*handler);
+    BOOST_CHECK(Access::RelayContextState(*handler) == before_expiry);
+    BOOST_CHECK_EQUAL(Access::CachedRelayShares(*handler), 0U);
+    for (const auto& extra : extras) BOOST_CHECK(!connman.IsMasternodeQuorumRelayMember(extra));
+    for (auto* peer : peers) BOOST_CHECK(drain(peer).empty());
+    WITH_LOCK(::cs_main, chainman.ActiveChainstate().m_chain.SetTip(*chain[TIP_HEIGHT]));
 }
 
 BOOST_FIXTURE_TEST_CASE(

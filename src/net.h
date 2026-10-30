@@ -761,6 +761,8 @@ public:
     std::atomic<bool> fFirstMessageIsMNAUTH;
     // If 'true' this node will be disconnected on CMasternodeMan::ProcessMasternodeConnections()
     std::atomic<bool> m_masternode_connection{false};
+    // Set before publication only for a newly opened temporary relay socket.
+    uint256 m_masternode_fallback_identity;
     /**
      * If 'true' this node will be disconnected after MNAUTH (outbound only) or
      * after PROBE_WAIT_INTERVAL seconds since m_connected
@@ -1324,8 +1326,8 @@ public:
         DISCONNECTING,
     };
     MasternodeConnectionStatus GetMasternodeConnectionStatus(const CService& addr) const;
-    bool OpenMasternodeConnection(const CAddress& addrConnect, MasternodeProbeConn probe = MasternodeProbeConn::Is_Connection) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
-    void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_Outbound, const char *strDest, ConnectionType conn_type = ConnectionType::OUTBOUND_FULL_RELAY, bool use_v2transport = false, MasternodeConn masternode_connection = MasternodeConn::Is_Not_Connection, MasternodeProbeConn masternode_probe_connection = MasternodeProbeConn::Is_Not_Connection) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    bool OpenMasternodeConnection(const CAddress& addrConnect, MasternodeProbeConn probe = MasternodeProbeConn::Is_Connection, const uint256& fallback_identity = {}) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_Outbound, const char *strDest, ConnectionType conn_type = ConnectionType::OUTBOUND_FULL_RELAY, bool use_v2transport = false, MasternodeConn masternode_connection = MasternodeConn::Is_Not_Connection, MasternodeProbeConn masternode_probe_connection = MasternodeProbeConn::Is_Not_Connection, const uint256& fallback_identity = {}) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
 
     // alias for thread safety annotations only, not defined
@@ -1478,7 +1480,8 @@ public:
     // SYSCOIN
     bool AddPendingMasternode(const uint256& proTxHash);
     void SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
-    void SetMasternodeQuorumNodes(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes);
+    void SetMasternodeQuorumNodes(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes,
+                                 const std::unordered_set<uint256, StaticSaltedHasher>& fallback_members = {});
     void RemoveMasternodeQuorumNodes(const uint256& quorumHash);
     bool IsMasternodeQuorumNode(const CNode* pnode);
     bool IsMasternodeQuorumRelayMember(const uint256& protxHash);
@@ -1662,7 +1665,7 @@ private:
     void ThreadSocketHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !mutexMsgProc, !m_nodes_mutex, !m_reconnections_mutex);
     void ThreadDNSAddressSeed() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_nodes_mutex);
     // SYSCOIN
-    void ThreadOpenMasternodeConnections() EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    void ThreadOpenMasternodeConnections() EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex, !cs_vPendingMasternodes);
 
     uint64_t CalculateKeyedNetGroup(const CAddress& ad) const;
 
@@ -1762,6 +1765,9 @@ private:
     std::vector<uint256> vPendingMasternodes GUARDED_BY(cs_vPendingMasternodes);
     std::map<uint256, std::unordered_set<uint256, StaticSaltedHasher>> masternodeQuorumNodes GUARDED_BY(cs_vPendingMasternodes);
     std::map<uint256, std::unordered_set<uint256, StaticSaltedHasher>> masternodeQuorumRelayMembers GUARDED_BY(cs_vPendingMasternodes);
+    std::map<uint256, std::unordered_set<uint256, StaticSaltedHasher>> m_masternode_fallback_members GUARDED_BY(cs_vPendingMasternodes);
+    bool IsMasternodeFallbackOnly(const uint256& identity) const EXCLUSIVE_LOCKS_REQUIRED(cs_vPendingMasternodes);
+    void RetireMasternodeFallbackConnections() EXCLUSIVE_LOCKS_REQUIRED(!cs_vPendingMasternodes);
     std::set<uint256> masternodePendingProbes GUARDED_BY(cs_vPendingMasternodes);
     mutable RecursiveMutex cs_vPendingMasternodes;
     std::vector<CNode*> m_nodes GUARDED_BY(m_nodes_mutex);

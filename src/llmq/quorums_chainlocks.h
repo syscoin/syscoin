@@ -19,6 +19,7 @@
 #include <llmq/pq_payment_audit_store.h>
 #include <llmq/pq_payment_audit_verify.h>
 #include <llmq/pq_quorum_builder.h>
+#include <llmq/pq_quorum_overlay.h>
 #include <protocol.h>
 #include <saltedhasher.h>
 
@@ -2440,6 +2441,7 @@ private:
         uint64_t admission_generation)
         EXCLUSIVE_LOCKS_REQUIRED(!m_context_build_mutex,
                                  !m_collector_mutex,
+                                 !m_share_lifecycle_mutex,
                                  !m_lookup_mutex,
                                  !m_needed_btcc_certificate_mutex,
                                  !m_btcc_preseal_mutex);
@@ -2889,11 +2891,21 @@ private:
                              CurrentSigningContextsPtr signing_contexts,
                              std::size_t variant_index,
                              uint64_t admission_generation,
-                             uint256 excluded_identity = {})
+                             uint256 excluded_identity = {},
+                             bool fallback_only = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_share_lifecycle_mutex,
                                  !m_collector_mutex,
                                  !m_lookup_mutex,
                                  !m_btcc_preseal_mutex);
+    void ApplyCurrentChainLockRelayPlan(const CurrentSigningContextsPtr& contexts)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_collector_mutex, !m_share_lifecycle_mutex,
+                                 !m_lookup_mutex, !m_btcc_preseal_mutex);
+    void MaybeRelayLocalChainLockShares()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_collector_mutex, !m_share_lifecycle_mutex,
+                                 !m_lookup_mutex, !m_btcc_preseal_mutex);
+    void RememberLocalChainLockShare(const pq::ChainLockShare& share,
+        const CurrentSigningContextsPtr& contexts, std::size_t variant_index,
+        uint64_t admission_generation) EXCLUSIVE_LOCKS_REQUIRED(!m_collector_mutex);
     void ResetCollectors() EXCLUSIVE_LOCKS_REQUIRED(m_collector_mutex);
     enum class PersistedChainLockImport : uint8_t {
         NONE = 0,
@@ -3019,6 +3031,9 @@ private:
     CurrentSigningContextsPtr m_current_signing_contexts
         GUARDED_BY(m_collector_mutex);
     uint64_t m_collector_generation GUARDED_BY(m_collector_mutex){0};
+    PQShareRelayFallback m_share_relay_fallback GUARDED_BY(m_collector_mutex);
+    std::array<std::vector<pq::ChainLockShare>, CurrentSigningContexts::MAX_VARIANTS>
+        m_local_journaled_shares GUARDED_BY(m_collector_mutex);
     Mutex m_context_build_mutex;
     LiveSigningValidationFrontier m_live_signing_validation_frontier
         GUARDED_BY(m_context_build_mutex);

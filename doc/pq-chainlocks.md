@@ -1152,6 +1152,28 @@ The union has at most 1,600 identities and uses a successor ring plus
 power-of-two shortcuts, giving each participant logarithmic fan-out while
 remaining connected even when the four rosters do not overlap.
 
+If a certificate remains incomplete after 30 seconds, a signer that has
+journaled its own shares also explores additional routes within that same
+frozen eligible union. It shuffles the candidates once per runtime context and
+tries one new identity per 60 seconds without replacement, retaining at most
+four extra connection targets. The normal sparse overlay remains in place.
+Only the signer's existing journaled shares use these additional routes;
+remote shares keep their normal forwarding bounds. Authentication uses the
+existing MNAUTH queues and rate limits. The five-second retry loop can deliver
+the cached shares over a fully authenticated outbound connection to a selected
+peer, without signing again. Existing inbound-only connections do not establish
+that the remote has completed verification of the local response; the fallback
+continues exploring other candidates.
+
+This fallback is runtime state tied to the signing context and collector
+admission generation. Incoming shares cannot restart its timer. Completion,
+context expiry or replacement removes its extra routes; connections opened
+solely for the fallback are retired unless another connection purpose still
+needs them. The fallback does not extend a signing window or establish a
+deterministic delivery guarantee under every Byzantine placement. Progress
+still requires an honest route to authenticate before the height-based window
+closes; rapid blocks or exhausted authentication capacity may prevent that.
+
 The authenticated P2P sender is a transport relay, not necessarily the member
 that created the share. Admission requires the relay to be an eligible
 child-key member in the active union; the transcript independently names the

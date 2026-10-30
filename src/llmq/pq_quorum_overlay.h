@@ -17,6 +17,7 @@
 #include <map>
 #include <optional>
 #include <unordered_set>
+#include <vector>
 
 class CBlockIndex;
 class CConnman;
@@ -64,6 +65,51 @@ struct PQQuorumOverlayPredecessor {
     const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
     const uint256& local_pro_tx_hash);
 
+/** Runtime-only identity of one collector generation's additional local-share routes. */
+struct PQShareRelayFallbackKey {
+    uint256 context_hash;
+    uint256 local_pro_tx_hash;
+    uint64_t admission_generation{0};
+    uint64_t collector_generation{0};
+    friend bool operator==(const PQShareRelayFallbackKey&, const PQShareRelayFallbackKey&) = default;
+};
+
+/**
+ * Bounded exploration of an already shuffled frozen eligible union. The caller
+ * owns authentication and only reannounces its own journaled shares. Remote
+ * progress cannot reset the grace period or delay the next exploration step.
+ */
+class PQShareRelayFallback final {
+public:
+    static constexpr int64_t GRACE_SECONDS{30};
+    static constexpr int64_t ROTATION_SECONDS{60};
+    static constexpr std::size_t MAX_EXTRA_CONNECTIONS{4};
+
+    bool Start(PQShareRelayFallbackKey key, std::vector<uint256> candidates,
+               int64_t now_seconds);
+    /** Advance by at most one candidate; true means the connection set changed. */
+    bool Advance(int64_t now_seconds, bool certificate_complete);
+    void Reset();
+    const std::optional<PQShareRelayFallbackKey>& Key() const { return m_key; }
+    const PQQuorumConnectionSet& Members() const { return m_members; }
+
+private:
+    std::optional<PQShareRelayFallbackKey> m_key;
+    std::vector<uint256> m_candidates;
+    std::vector<uint256> m_selected;
+    PQQuorumConnectionSet m_members;
+    std::size_t m_next{0};
+    int64_t m_started{0};
+    int64_t m_last_attempt{0};
+    bool m_attempted{false};
+    bool m_complete{false};
+};
+
+/** Frozen candidates excluding the local identity and its normal relay edges. */
+[[nodiscard]] std::vector<uint256> BuildPQShareRelayFallbackCandidates(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
+    const uint256& local_pro_tx_hash);
+
 /** Build one context-bound union group when the local signer participates. */
 [[nodiscard]] PQQuorumOverlayPlan BuildPQQuorumOverlayPlan(
     const uint256& genesis_hash,
@@ -95,7 +141,7 @@ public:
 
     PQQuorumOverlayReconciler(Install install, Remove remove);
 
-    void Apply(const PQQuorumOverlayPlan& plan);
+    void Apply(const PQQuorumOverlayPlan& plan, bool force_install = false);
     void Clear();
 
     [[nodiscard]] const PQQuorumOverlayPlan& GetInstalledPlan() const noexcept
@@ -127,8 +173,11 @@ public:
     [[nodiscard]] bool ApplyPreparedContext(
         const uint256& quorum_context_hash,
         const PQQuorumConnectionSet& relay_members,
-        const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor)
+        const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor,
+        const PQQuorumConnectionSet& fallback_members = {})
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Remove only temporary local-share routes, keeping ordinary plans intact. */
+    void ClearChainLockFallback() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     [[nodiscard]] bool ApplyPaymentAuditContext(
         const uint256& group,
         const PQQuorumConnectionSet& relay_members,
@@ -159,10 +208,11 @@ private:
         uint64_t runtime_generation{0};
     };
 
-    void ReconcileLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void ReconcileLocked(bool force_install = false) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void ClearLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     PQQuorumOverlayReconciler m_reconciler GUARDED_BY(m_mutex);
     PQQuorumOverlayPlan m_chainlock_plan GUARDED_BY(m_mutex);
+    PQQuorumOverlayPlan m_chainlock_fallback GUARDED_BY(m_mutex);
     std::optional<PaymentAuditPlan> m_payment_audit_plan
         GUARDED_BY(m_mutex);
     uint64_t m_retired_payment_audit_generation GUARDED_BY(m_mutex){0};

@@ -117,6 +117,82 @@ PQQuorumConnectionSet GetPQQuorumUnionRelayConnections(
     return GetRelayConnections(participants, local_pro_tx_hash);
 }
 
+bool PQShareRelayFallback::Start(PQShareRelayFallbackKey key,
+                                  std::vector<uint256> candidates,
+                                  int64_t now_seconds)
+{
+    if (m_key == key) return true;
+    Reset();
+    if (key.context_hash.IsNull() || key.local_pro_tx_hash.IsNull() ||
+        key.admission_generation == 0 || key.collector_generation == 0 ||
+        now_seconds < 0 || candidates.size() > pq::ACTIVE_QUORUMS * pq::QUORUM_SIZE) return false;
+    PQQuorumConnectionSet seen;
+    for (const auto& identity : candidates) {
+        if (identity.IsNull() || identity == key.local_pro_tx_hash || !seen.insert(identity).second) return false;
+    }
+    m_key = std::move(key);
+    m_candidates = std::move(candidates);
+    m_started = now_seconds;
+    return true;
+}
+
+bool PQShareRelayFallback::Advance(int64_t now_seconds, bool certificate_complete)
+{
+    if (!m_key) return false;
+    if (certificate_complete || now_seconds < m_started ||
+        (m_attempted && now_seconds < m_last_attempt)) {
+        const bool changed{!m_members.empty()};
+        m_members.clear();
+        m_selected.clear();
+        m_complete = true;
+        return changed;
+    }
+    if (m_complete || now_seconds - m_started < GRACE_SECONDS ||
+        (m_attempted && now_seconds - m_last_attempt < ROTATION_SECONDS) ||
+        m_next == m_candidates.size()) return false;
+    if (m_selected.size() == MAX_EXTRA_CONNECTIONS) {
+        m_members.erase(m_selected.front());
+        m_selected.erase(m_selected.begin());
+    }
+    const auto identity{m_candidates[m_next++]};
+    m_selected.push_back(identity);
+    m_members.insert(identity);
+    m_last_attempt = now_seconds;
+    m_attempted = true;
+    return true;
+}
+
+void PQShareRelayFallback::Reset()
+{
+    m_key.reset();
+    m_candidates.clear();
+    m_selected.clear();
+    m_members.clear();
+    m_next = 0;
+    m_started = 0;
+    m_last_attempt = 0;
+    m_attempted = false;
+    m_complete = false;
+}
+
+std::vector<uint256> BuildPQShareRelayFallbackCandidates(
+    const std::array<pq::FrozenQuorumRoster, pq::ACTIVE_QUORUMS>& rosters,
+    const uint256& local_pro_tx_hash)
+{
+    if (local_pro_tx_hash.IsNull()) return {};
+    const auto normal{GetPQQuorumUnionRelayConnections(rosters, local_pro_tx_hash)};
+    PQQuorumConnectionSet seen;
+    std::vector<uint256> candidates;
+    for (const auto& roster : rosters) {
+        for (const auto& member : roster.members) {
+            if (member.eligible && member.child_root && !member.pro_tx_hash.IsNull() &&
+                member.pro_tx_hash != local_pro_tx_hash && !normal.contains(member.pro_tx_hash) &&
+                seen.insert(member.pro_tx_hash).second) candidates.push_back(member.pro_tx_hash);
+        }
+    }
+    return candidates;
+}
+
 PQQuorumOverlayPlan BuildPQQuorumOverlayPlan(
     const uint256& genesis_hash,
     int32_t target_height,
@@ -161,18 +237,19 @@ PQQuorumOverlayReconciler::PQQuorumOverlayReconciler(Install install,
 {
 }
 
-void PQQuorumOverlayReconciler::Apply(const PQQuorumOverlayPlan& plan)
+void PQQuorumOverlayReconciler::Apply(const PQQuorumOverlayPlan& plan, bool force_install)
 {
+    // Publish replacement intent first. Retiring an old fallback group must
+    // see another group's continuing need before deciding to close its socket.
+    for (const auto& [group, connections] : plan) {
+        const auto old{m_installed.find(group)};
+        if ((force_install || old == m_installed.end() || old->second != connections) && m_install) {
+            m_install(group, connections);
+        }
+    }
     for (const auto& [group, connections] : m_installed) {
         (void)connections;
         if (plan.count(group) == 0 && m_remove) m_remove(group);
-    }
-    for (const auto& [group, connections] : plan) {
-        const auto old{m_installed.find(group)};
-        if ((old == m_installed.end() || old->second != connections) &&
-            m_install) {
-            m_install(group, connections);
-        }
     }
     m_installed = plan;
 }
@@ -193,9 +270,11 @@ CPQQuorumConnectionOverlay::CPQQuorumConnectionOverlay(
     : m_roster_cache{std::move(roster_cache)},
       m_predecessor_height{std::move(predecessor_height)},
       m_reconciler{
-          [&connman](const uint256& group,
-                     const PQQuorumConnectionSet& connections) {
-              connman.SetMasternodeQuorumNodes(group, connections);
+          [this, &connman](const uint256& group,
+                     const PQQuorumConnectionSet& connections) EXCLUSIVE_LOCKS_REQUIRED(m_mutex) {
+              const auto fallback{m_chainlock_fallback.find(group)};
+              connman.SetMasternodeQuorumNodes(group, connections,
+                  fallback == m_chainlock_fallback.end() ? PQQuorumConnectionSet{} : fallback->second);
               connman.SetMasternodeQuorumRelayMembers(group, connections);
           },
           [&connman](const uint256& group) {
@@ -209,7 +288,7 @@ CPQQuorumConnectionOverlay::~CPQQuorumConnectionOverlay()
     Clear();
 }
 
-void CPQQuorumConnectionOverlay::ReconcileLocked()
+void CPQQuorumConnectionOverlay::ReconcileLocked(bool force_install)
 {
     PQQuorumOverlayPlan combined{m_chainlock_plan};
     if (m_payment_audit_plan) {
@@ -226,7 +305,7 @@ void CPQQuorumConnectionOverlay::ReconcileLocked()
             m_payment_audit_plan.reset();
         }
     }
-    m_reconciler.Apply(combined);
+    m_reconciler.Apply(combined, force_install);
 }
 
 void CPQQuorumConnectionOverlay::ClearLocked()
@@ -234,6 +313,7 @@ void CPQQuorumConnectionOverlay::ClearLocked()
     ++m_revision;
     m_context.reset();
     m_chainlock_plan.clear();
+    m_chainlock_fallback.clear();
     m_payment_audit_plan.reset();
     m_reconciler.Clear();
 }
@@ -247,8 +327,12 @@ void CPQQuorumConnectionOverlay::Clear()
 bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
     const uint256& quorum_context_hash,
     const PQQuorumConnectionSet& relay_members,
-    const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor)
+    const std::optional<PQQuorumOverlayPredecessor>& accepted_predecessor,
+    const PQQuorumConnectionSet& fallback_members)
 {
+    if (fallback_members.size() > PQShareRelayFallback::MAX_EXTRA_CONNECTIONS ||
+        !std::all_of(fallback_members.begin(), fallback_members.end(),
+                     [&](const auto& member) { return relay_members.contains(member); })) return false;
     const auto plan{BuildPreparedPQQuorumOverlayPlan(
         quorum_context_hash, relay_members)};
     if (plan.empty()) return false;
@@ -273,18 +357,37 @@ bool CPQQuorumConnectionOverlay::ApplyPreparedContext(
     }
     LOCK(m_mutex);
     if (m_revision != observed_revision) return false;
-    if (m_chainlock_plan == plan) return true;
+    const PQQuorumOverlayPlan fallback{fallback_members.empty()
+        ? PQQuorumOverlayPlan{} : PQQuorumOverlayPlan{{quorum_context_hash, fallback_members}}};
+    if (m_chainlock_plan == plan && m_chainlock_fallback == fallback) return true;
     if (m_payment_audit_plan &&
         plan.count(m_payment_audit_plan->group) != 0) {
         return false;
     }
+    const bool fallback_changed{m_chainlock_fallback != fallback};
     m_chainlock_plan = plan;
-    ReconcileLocked();
+    m_chainlock_fallback = fallback;
+    ReconcileLocked(fallback_changed);
     // A later tip callback must compare its accepted context against the
     // prepared plan instead of skipping on an older accepted-context cache.
     m_context.reset();
     ++m_revision;
     return true;
+}
+
+void CPQQuorumConnectionOverlay::ClearChainLockFallback()
+{
+    LOCK(m_mutex);
+    if (m_chainlock_fallback.empty()) return;
+    for (const auto& [group, members] : m_chainlock_fallback) {
+        const auto plan{m_chainlock_plan.find(group)};
+        if (plan != m_chainlock_plan.end()) {
+            for (const auto& member : members) plan->second.erase(member);
+        }
+    }
+    m_chainlock_fallback.clear();
+    ReconcileLocked(/*force_install=*/true);
+    ++m_revision;
 }
 
 bool CPQQuorumConnectionOverlay::ApplyPaymentAuditContext(
@@ -477,8 +580,10 @@ void CPQQuorumConnectionOverlay::UpdatedBlockTip(
             m_payment_audit_plan->runtime_generation);
         m_payment_audit_plan.reset();
     }
+    const bool fallback_changed{!m_chainlock_fallback.empty()};
     m_chainlock_plan = plan;
-    ReconcileLocked();
+    m_chainlock_fallback.clear();
+    ReconcileLocked(fallback_changed);
     m_context = context;
     LogPrint(BCLog::NET_NETCONN,
              "PQ overlay updated at target=%d epoch=%u groups=%u\n",

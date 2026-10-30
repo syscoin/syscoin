@@ -2981,6 +2981,7 @@ void CConnman::ThreadOpenMasternodeConnections()
 
         MasternodeProbeConn isProbe = MasternodeProbeConn::Is_Not_Connection;
         bool direct_pending{false};
+        uint256 fallback_identity;
 
         const auto getPendingQuorumNodes = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_vPendingMasternodes) {
             AssertLockHeld(cs_vPendingMasternodes);
@@ -3143,6 +3144,7 @@ void CConnman::ThreadOpenMasternodeConnections()
             if (const auto pending = getPendingQuorumNodes(); !pending.empty()) {
                 // not-null
                 auto dmn = pending[GetRand(pending.size())];
+                if (IsMasternodeFallbackOnly(dmn->proTxHash)) fallback_identity = dmn->proTxHash;
                 LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- opening quorum connection to %s, service=%s\n",
                          _func_, dmn->proTxHash.ToString(), dmn->pdmnState->addr.ToStringAddrPort());
                 return dmn;
@@ -3170,7 +3172,12 @@ void CConnman::ThreadOpenMasternodeConnections()
         mmetaman->GetMetaInfo(connectToDmn->proTxHash)->SetLastOutboundAttempt(nANow);
 
         const bool connected{OpenMasternodeConnection(
-            CAddress(connectToDmn->pdmnState->addr, NODE_NETWORK), isProbe)};
+            CAddress(connectToDmn->pdmnState->addr, NODE_NETWORK), isProbe, fallback_identity)};
+        // The plan may have expired while the network connection was opening.
+        if (!fallback_identity.IsNull()) {
+            AssertLockNotHeld(cs_vPendingMasternodes);
+            RetireMasternodeFallbackConnections();
+        }
         if (connected && (direct_pending ||
                           isProbe == MasternodeProbeConn::Is_Connection)) {
             LOCK(cs_vPendingMasternodes);
@@ -3296,7 +3303,7 @@ void CConnman::ThreadOpenAddedConnections()
 }
 
 // SYSCOIN if successful, this moves the passed grant to the constructed node
-void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char *pszDest, ConnectionType conn_type, bool use_v2transport, MasternodeConn masternode_connection, MasternodeProbeConn masternode_probe_connection)
+void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char *pszDest, ConnectionType conn_type, bool use_v2transport, MasternodeConn masternode_connection, MasternodeProbeConn masternode_probe_connection, const uint256& fallback_identity)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -3359,6 +3366,7 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     // SYSCOIN
     if (masternode_connection == MasternodeConn::Is_Connection) {
         pnode->m_masternode_connection = true;
+        pnode->m_masternode_fallback_identity = fallback_identity;
     }
     if (masternode_probe_connection == MasternodeProbeConn::Is_Connection)
         pnode->m_masternode_probe_connection = true;
@@ -3373,7 +3381,7 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     }
 }
 // SYSCOIN
-bool CConnman::OpenMasternodeConnection(const CAddress &addrConnect, MasternodeProbeConn probe) {
+bool CConnman::OpenMasternodeConnection(const CAddress &addrConnect, MasternodeProbeConn probe, const uint256& fallback_identity) {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     const auto existing{GetMasternodeConnectionStatus(addrConnect)};
     if (existing == MasternodeConnectionStatus::DEDICATED) {
@@ -3386,7 +3394,7 @@ bool CConnman::OpenMasternodeConnection(const CAddress &addrConnect, MasternodeP
     }
     if (existing != MasternodeConnectionStatus::NONE) return false;
 
-    OpenNetworkConnection(addrConnect, false, CSemaphoreGrant(), nullptr, ConnectionType::OUTBOUND_FULL_RELAY, /*use_v2transport=*/false, MasternodeConn::Is_Connection, probe);
+    OpenNetworkConnection(addrConnect, false, CSemaphoreGrant(), nullptr, ConnectionType::OUTBOUND_FULL_RELAY, /*use_v2transport=*/false, MasternodeConn::Is_Connection, probe, fallback_identity);
     return ForNode(addrConnect, AllNodes, [&](CNode* pnode) {
         return !pnode->fDisconnect && pnode->m_masternode_connection &&
                (probe == MasternodeProbeConn::Is_Connection ||
@@ -3999,13 +4007,50 @@ bool CConnman::AddPendingMasternode(const uint256& proTxHash)
     return true;
 }
 
-void CConnman::SetMasternodeQuorumNodes(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes)
+bool CConnman::IsMasternodeFallbackOnly(const uint256& identity) const
 {
-    LOCK(cs_vPendingMasternodes);
-    auto it = masternodeQuorumNodes.emplace(quorumHash, proTxHashes);
-    if (!it.second) {
-        it.first->second = proTxHashes;
+    AssertLockHeld(cs_vPendingMasternodes);
+    if (masternodePendingProbes.contains(identity) ||
+        std::find(vPendingMasternodes.begin(), vPendingMasternodes.end(), identity) != vPendingMasternodes.end()) return false;
+    bool fallback{false};
+    for (const auto& [group, members] : masternodeQuorumNodes) {
+        if (!members.contains(identity)) continue;
+        const auto extras{m_masternode_fallback_members.find(group)};
+        if (extras == m_masternode_fallback_members.end() || !extras->second.contains(identity)) return false;
+        fallback = true;
     }
+    return fallback;
+}
+
+void CConnman::RetireMasternodeFallbackConnections()
+{
+    // Take references before the intent lock: the connector can take the node
+    // lock while reading intent. Never close pre-existing shared connections.
+    const NodesSnapshot snapshot{*this, AllNodes};
+    LOCK(cs_vPendingMasternodes);
+    for (CNode* node : snapshot.Nodes()) {
+        const auto& identity{node->m_masternode_fallback_identity};
+        if (identity.IsNull() || node->IsInboundConn() || node->IsManualConn() ||
+            node->m_masternode_probe_connection ||
+            masternodePendingProbes.contains(identity) ||
+            std::find(vPendingMasternodes.begin(), vPendingMasternodes.end(), identity) != vPendingMasternodes.end()) continue;
+        const bool needed{std::any_of(masternodeQuorumNodes.begin(), masternodeQuorumNodes.end(),
+            [&](const auto& group) { return group.second.contains(identity); })};
+        if (!needed) node->fDisconnect = true;
+    }
+}
+
+void CConnman::SetMasternodeQuorumNodes(const uint256& quorumHash,
+    const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes,
+    const std::unordered_set<uint256, StaticSaltedHasher>& fallback_members)
+{
+    {
+        LOCK(cs_vPendingMasternodes);
+        masternodeQuorumNodes[quorumHash] = proTxHashes;
+        if (fallback_members.empty()) m_masternode_fallback_members.erase(quorumHash);
+        else m_masternode_fallback_members[quorumHash] = fallback_members;
+    }
+    RetireMasternodeFallbackConnections();
 }
 
 void CConnman::SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const std::unordered_set<uint256, StaticSaltedHasher>& proTxHashes)
@@ -4033,9 +4078,13 @@ void CConnman::SetMasternodeQuorumRelayMembers(const uint256& quorumHash, const 
 
 void CConnman::RemoveMasternodeQuorumNodes(const uint256& quorumHash)
 {
-    LOCK(cs_vPendingMasternodes);
-    masternodeQuorumNodes.erase(quorumHash);
-    masternodeQuorumRelayMembers.erase(quorumHash);
+    {
+        LOCK(cs_vPendingMasternodes);
+        masternodeQuorumNodes.erase(quorumHash);
+        masternodeQuorumRelayMembers.erase(quorumHash);
+        m_masternode_fallback_members.erase(quorumHash);
+    }
+    RetireMasternodeFallbackConnections();
 }
 
 bool CConnman::IsMasternodeQuorumNode(const CNode* pnode)

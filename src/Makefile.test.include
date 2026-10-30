@@ -181,6 +181,7 @@ SYSCOIN_TESTS =\
   test/pq_quorum_builder_tests.cpp \
   test/pq_recovery_refresh_tests.cpp \
   test/pq_quorum_overlay_tests.cpp \
+  test/pq_relay_fallback_tests.cpp \
   test/pq_signer_journal_tests.cpp \
   test/prevector_tests.cpp \
   test/raii_event_tests.cpp \

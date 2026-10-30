@@ -441,6 +441,76 @@ BOOST_AUTO_TEST_CASE(masternode_connection_status_is_role_exact)
                 CConnman::MasternodeConnectionStatus::NONE);
 }
 
+BOOST_AUTO_TEST_CASE(fallback_connection_retirement_preserves_shared_and_preexisting_peers)
+{
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const uint256 group{uint256S("a1")}, other_group{uint256S("a2")};
+    const uint256 first{uint256S("b1")}, second{uint256S("b2")}, next{uint256S("b3")};
+    connman.SetMasternodeQuorumNodes(group, {first, second}, {first});
+    BOOST_CHECK(connman.IsTestMasternodeFallbackOnly(first));
+    BOOST_CHECK(!connman.IsTestMasternodeFallbackOnly(second));
+    std::vector<CNode*> peers;
+    const auto add = [&](ConnectionType type, const uint256& owner, bool probe = false) {
+        in_addr ipv4_addr;
+        ipv4_addr.s_addr = 0xa0b0c000 + peers.size();
+        auto* peer = new CNode{1100 + static_cast<NodeId>(peers.size()), nullptr,
+            CAddress{CService{ipv4_addr, 7799}, NODE_NETWORK},
+            1, peers.size() + 1, CAddress{}, std::string{}, type, false};
+        peer->m_masternode_connection = true;
+        peer->m_masternode_probe_connection = probe;
+        peer->m_masternode_fallback_identity = owner;
+        connman.AddTestNode(*peer);
+        peers.push_back(peer);
+        return peer;
+    };
+    // The first is still authenticating; retirement must not wait for proof.
+    auto* pending = add(ConnectionType::OUTBOUND_FULL_RELAY, first);
+    auto* shared = add(ConnectionType::OUTBOUND_FULL_RELAY, second);
+    shared->fSuccessfullyConnected = true;
+    auto* existing = add(ConnectionType::OUTBOUND_FULL_RELAY, uint256{});
+    auto* downgraded = add(ConnectionType::OUTBOUND_FULL_RELAY, first);
+    downgraded->m_masternode_connection = false;
+    auto* inbound = add(ConnectionType::INBOUND, first);
+    auto* probe = add(ConnectionType::OUTBOUND_FULL_RELAY, first, true);
+    auto* manual = add(ConnectionType::MANUAL, first);
+    connman.SetMasternodeQuorumNodes(other_group, {first});
+    BOOST_CHECK(!connman.IsTestMasternodeFallbackOnly(first));
+    connman.SetMasternodeQuorumNodes(group, {next}, {next});
+    BOOST_CHECK(!pending->fDisconnect);
+    BOOST_CHECK(shared->fDisconnect);
+    connman.RemoveMasternodeQuorumNodes(other_group);
+    BOOST_CHECK(pending->fDisconnect);
+    BOOST_CHECK(downgraded->fDisconnect);
+    BOOST_CHECK(!existing->fDisconnect);
+    BOOST_CHECK(!inbound->fDisconnect);
+    BOOST_CHECK(!probe->fDisconnect);
+    BOOST_CHECK(!manual->fDisconnect);
+    connman.RemoveMasternodeQuorumNodes(group);
+    connman.ClearTestNodes();
+}
+
+BOOST_AUTO_TEST_CASE(fallback_connection_finishing_after_context_expiry_is_retired)
+{
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const uint256 group{uint256S("c1")}, identity{uint256S("d1")};
+    connman.SetMasternodeQuorumNodes(group, {identity}, {identity});
+    BOOST_REQUIRE(connman.IsTestMasternodeFallbackOnly(identity));
+    // The connector captured this intent, then blocked opening its socket.
+    connman.RemoveMasternodeQuorumNodes(group);
+    in_addr ipv4_addr;
+    ipv4_addr.s_addr = 0xa0b0c0ee;
+    auto* peer = new CNode{1200, nullptr,
+        CAddress{CService{ipv4_addr, 7799}, NODE_NETWORK},
+        1, 1, CAddress{}, std::string{}, ConnectionType::OUTBOUND_FULL_RELAY, false};
+    peer->m_masternode_connection = true;
+    peer->m_masternode_fallback_identity = identity;
+    connman.AddTestNode(*peer);
+    // This is the same post-publication guard used by the real connector.
+    connman.RetireTestMasternodeFallbackConnections();
+    BOOST_CHECK(peer->fDisconnect);
+    connman.ClearTestNodes();
+}
+
 BOOST_AUTO_TEST_CASE(cinv_pq_chainlock_command)
 {
     const CInv inv(MSG_CLSIG, uint256::ONEV);
