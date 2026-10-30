@@ -6,6 +6,7 @@
 #ifndef SYSCOIN_FLATFILE_H
 #define SYSCOIN_FLATFILE_H
 
+#include <cstdint>
 #include <string>
 
 #include <serialize.h>
@@ -14,13 +15,13 @@
 struct FlatFilePos
 {
     int nFile{-1};
-    unsigned int nPos{0};
+    uint64_t nPos{0};
 
     SERIALIZE_METHODS(FlatFilePos, obj) { READWRITE(VARINT_MODE(obj.nFile, VarIntMode::NONNEGATIVE_SIGNED), VARINT(obj.nPos)); }
 
     FlatFilePos() {}
 
-    FlatFilePos(int nFileIn, unsigned int nPosIn) :
+    FlatFilePos(int nFileIn, uint64_t nPosIn) :
         nFile(nFileIn),
         nPos(nPosIn)
     {}
