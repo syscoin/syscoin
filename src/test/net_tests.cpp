@@ -4695,6 +4695,57 @@ BOOST_AUTO_TEST_CASE(cnode_listen_port)
     BOOST_CHECK(port == altPort);
 }
 
+BOOST_AUTO_TEST_CASE(paused_current_protocol_peer_retains_ping_timeout)
+{
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& peerman{*m_node.peerman};
+    const auto original_mock_time{GetMockTime()};
+    SetMockTime(1'700'000'000s);
+    CNode node{1, nullptr, CAddress{LookupNumeric("198.51.100.1", 8369), NODE_NETWORK},
+               1, 1, CAddress{}, std::string{}, ConnectionType::INBOUND, false};
+    struct Restore {
+        PeerManager& peerman;
+        CNode& node;
+        std::chrono::seconds mock_time;
+        ~Restore()
+        {
+            if (peerman.GetPeerRef(node.GetId())) peerman.FinalizeNode(node);
+            TestOnlyResetTimeData();
+            SetMockTime(mock_time);
+        }
+    } restore{peerman, node, original_mock_time};
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    connman.Handshake(node, true, ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                      ServiceFlags(NODE_NETWORK | NODE_WITNESS), 70017, true);
+    BOOST_REQUIRE(!node.fDisconnect);
+    BOOST_REQUIRE(node.fSuccessfullyConnected);
+    const auto peer{peerman.GetPeerRef(node.GetId())};
+    BOOST_REQUIRE(peer);
+    const auto nonce{peer->m_ping_nonce_sent.load()};
+    BOOST_REQUIRE_NE(nonce, 0U);
+    const auto ping_start{std::chrono::duration_cast<std::chrono::seconds>(peer->m_ping_start.load())};
+    connman.FlushSendBuffer(node);
+
+    node.fPauseSend = true;
+    SetMockTime(ping_start + TIMEOUT_INTERVAL / 2);
+    const CNetMsgMaker maker{node.GetCommonVersion()};
+    // Even a cancelling pong must stay queued while send backpressure stops
+    // message processing; it cannot keep the paused connection alive forever.
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(node, maker.Make(NetMsgType::PONG, uint64_t{0})));
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(node, maker.Make(NetMsgType::PONG, nonce)));
+    connman.ProcessMessagesOnce(node);
+    BOOST_CHECK_EQUAL(peer->m_ping_nonce_sent.load(), nonce);
+
+    SetMockTime(ping_start + TIMEOUT_INTERVAL);
+    peerman.SendMessages(&node);
+    BOOST_CHECK(!node.fDisconnect);
+    SetMockTime(ping_start + TIMEOUT_INTERVAL + 1s);
+    peerman.SendMessages(&node);
+    BOOST_CHECK(node.fPauseSend);
+    BOOST_CHECK(node.fDisconnect);
+}
+
 BOOST_AUTO_TEST_CASE(cnode_simple_test)
 {
     NodeId id = 0;
