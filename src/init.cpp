@@ -1419,6 +1419,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     GetMainSignals().RegisterBackgroundSignalScheduler(*node.scheduler);
 
+    auto log_limiter{std::make_shared<BCLog::LogRateLimiter>()};
+    LogInstance().SetRateLimiting(log_limiter);
+    // A replaced test logger must not leave a scheduler callback owning it.
+    node.scheduler->scheduleEvery([weak = std::weak_ptr{log_limiter}] {
+        if (auto limiter = weak.lock()) limiter->Reset();
+    }, log_limiter->m_reset_window);
+
     // Create client interfaces for wallets that are supposed to be loaded
     // according to -wallet and -disablewallet options. This only constructs
     // the interfaces, it doesn't load wallet data. Wallets actually get loaded
