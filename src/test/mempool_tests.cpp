@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chainparams.h>
+#include <common/args.h>
 #include <common/system.h>
 #include <evo/deterministicmns.h> // SYSCOIN: deterministic provider-state fixtures.
 #include <evo/pq_providertx.h> // SYSCOIN: PQ provider transaction fixtures.
@@ -10,11 +12,13 @@
 #include <evo/specialtx.h> // SYSCOIN: special-transaction mempool fixtures.
 #include <llmq/quorums_commitment.h>
 #include <netbase.h> // SYSCOIN: provider service fixtures.
+#include <node/mempool_args.h>
 #include <policy/policy.h>
 #include <test/util/logging.h>
 #include <test/util/pq_registry_read_error.h>
 #include <test/util/txmempool.h>
 #include <txmempool.h>
+#include <util/error.h>
 #include <util/time.h>
 #include <validation.h> // SYSCOIN: branch-bound provider admission fixtures.
 
@@ -1475,6 +1479,33 @@ BOOST_FIXTURE_TEST_CASE(PQRegistryRebuildWithoutReservationsDoesNotRead,
 }
 
 // SYSCOIN END: PQ provider mempool conflict and reservation tests.
+
+BOOST_AUTO_TEST_CASE(MempoolSizeArgs)
+{
+    ArgsManager args;
+    CTxMemPool::Options defaults;
+    BOOST_REQUIRE(ApplyArgsManOptions(args, Params(), defaults));
+    BOOST_CHECK_EQUAL(defaults.max_size_bytes, 300'000'000);
+
+    for (const int64_t mb : {500, 501, 4096}) {
+        BOOST_TEST_CONTEXT("maxmempool=" << mb) {
+            args.ForceSetArg("-maxmempool", ToString(mb));
+            CTxMemPool::Options options;
+            const auto result{ApplyArgsManOptions(args, Params(), options)};
+            if (sizeof(void*) == 4 && mb > 500) {
+                BOOST_CHECK(!result);
+                if (!result) {
+                    BOOST_CHECK_EQUAL(util::ErrorString(result).original, strprintf(
+                        "-maxmempool is set to %i but can't be over 500 MB on 32-bit systems", mb));
+                }
+                BOOST_CHECK_EQUAL(options.max_size_bytes, defaults.max_size_bytes);
+            } else {
+                BOOST_REQUIRE(result);
+                BOOST_CHECK_EQUAL(options.max_size_bytes, mb * 1'000'000);
+            }
+        }
+    }
+}
 
 BOOST_AUTO_TEST_CASE(MempoolRemoveTest)
 {
