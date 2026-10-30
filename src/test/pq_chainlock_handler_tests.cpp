@@ -11554,6 +11554,8 @@ BOOST_FIXTURE_TEST_CASE(published_rotate_fallback_survives_real_mnauth_and_tip_c
             SyncWithValidationInterfaceQueue();
             for (auto* peer : peers) peerman.FinalizeNode(*peer);
             connman.ClearTestNodes();
+            // VERSION adds a global clock sample even for this test peer.
+            TestOnlyResetTimeData();
             llmq::chainLocksHandler = handler;
             llmq::pqQuorumConnectionOverlay = overlay;
             WITH_LOCK(::cs_main, chainman.ActiveChainstate().m_chain.SetTip(*tip));
