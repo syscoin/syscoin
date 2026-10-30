@@ -3579,10 +3579,10 @@ bool PQRegistryManager::PrepareBlockInternal(
         return SetError(error, PQRegistryResult::INVALID_SCHEDULE);
     }
 
+    // Decoded payloads contain large authorization signatures. Grow these
+    // containers only for actual registry updates, not ordinary transactions.
     std::vector<DecodedUpdate> updates;
-    updates.reserve(block.vtx.size());
     std::unordered_set<uint256, StaticSaltedHasher> updated_operators;
-    updated_operators.reserve(block.vtx.size());
     for (std::size_t index{0}; index < block.vtx.size(); ++index) {
         if (!block.vtx[index]) {
             return SetError(error, PQRegistryResult::INVALID_BLOCK, index);
