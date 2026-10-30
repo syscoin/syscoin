@@ -302,6 +302,25 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
     return true;
 }
 
+bool SpendsWitnessProgram(const CTransaction& tx, const CCoinsViewCache& prevouts)
+{
+    if (tx.IsCoinBase()) return false;
+    int version;
+    std::vector<unsigned char> program;
+    for (const auto& txin : tx.vin) {
+        const auto& script{prevouts.AccessCoin(txin.prevout).out.scriptPubKey};
+        if (script.IsWitnessProgram(version, program)) return true;
+        // Only evaluate pushes, including when standardness policy is disabled.
+        if (script.IsPayToScriptHash() && txin.scriptSig.IsPushOnly()) {
+            std::vector<std::vector<unsigned char>> stack;
+            if (!EvalScript(stack, txin.scriptSig, SCRIPT_VERIFY_NONE, BaseSignatureChecker{}, SigVersion::BASE) || stack.empty()) continue;
+            const CScript redeem{stack.back().begin(), stack.back().end()};
+            if (redeem.IsWitnessProgram(version, program)) return true;
+        }
+    }
+    return false;
+}
+
 int64_t GetVirtualTransactionSize(int64_t nWeight, int64_t nSigOpCost, unsigned int bytes_per_sigop)
 {
     return (std::max(nWeight, nSigOpCost * bytes_per_sigop) + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR;

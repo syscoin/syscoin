@@ -164,7 +164,7 @@ class BIP65Test(SyscoinTestFramework):
                     'txid': spendtx.hash,
                     'wtxid': spendtx.getwtxid(),
                     'allowed': False,
-                    'reject-reason': expected_cltv_reject_reason,
+                    'reject-reason': expected_cltv_reject_reason.replace('mandatory-script', 'mempool-script'),
                 }],
                 self.nodes[0].testmempoolaccept(rawtxs=[spendtx.serialize().hex()], maxfeerate=0),
             )

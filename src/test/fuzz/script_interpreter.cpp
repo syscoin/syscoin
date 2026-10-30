@@ -7,6 +7,7 @@
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
+#include <util/check.h>
 
 #include <cstdint>
 #include <optional>
@@ -37,5 +38,26 @@ FUZZ_TARGET(script_interpreter)
     }
     {
         (void)CastToBool(ConsumeRandomLengthByteVector(fuzzed_data_provider));
+    }
+}
+
+/** Differential fuzzing of cached ECDSA signature hashes. */
+FUZZ_TARGET(sighash_cache)
+{
+    FuzzedDataProvider provider(buffer.data(), buffer.size());
+    const auto tx{ConsumeTransaction(provider, std::nullopt)};
+    if (tx.vin.empty()) return;
+    const auto input{provider.ConsumeIntegralInRange<unsigned int>(0, tx.vin.size() - 1)};
+    const auto amount{ConsumeMoney(provider)};
+    const auto script{ConsumeScript(provider)};
+    const auto other_script{ConsumeScript(provider)};
+    SigHashCache cache;
+    for (int i = 0; i < 100; ++i) {
+        const auto hash_type{i % 2 ? provider.ConsumeIntegral<int8_t>() : provider.ConsumeIntegral<int>()};
+        const auto sigversion{provider.PickValueInArray({SigVersion::BASE, SigVersion::WITNESS_V0})};
+        const auto& script_code{i % 3 ? script : other_script};
+        const auto expected{SignatureHash(script_code, tx, input, hash_type, amount, sigversion)};
+        Assert(expected == SignatureHash(script_code, tx, input, hash_type, amount, sigversion, nullptr, &cache));
+        Assert(expected == SignatureHash(script_code, tx, input, hash_type, amount, sigversion, nullptr, &cache));
     }
 }

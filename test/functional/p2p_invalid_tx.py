@@ -73,17 +73,12 @@ class InvalidTxRequestTest(SyscoinTestFramework):
             tx = template.get_tx()
             node.p2ps[0].send_txs_and_test(
                 [tx], node, success=False,
-                expect_disconnect=template.expect_disconnect,
                 reject_reason=template.reject_reason,
             )
 
-            if template.expect_disconnect:
-                self.log.info("Reconnecting to peer")
-                self.reconnect_p2p()
-
         # Make two p2p connections to provide the node with orphans
         # * p2ps[0] will send valid orphan txs (one with low fee)
-        # * p2ps[1] will send an invalid orphan tx (and is later disconnected for that)
+        # * p2ps[1] will send an invalid orphan tx and remain connected
         self.reconnect_p2p(num_connections=2)
 
         self.log.info('Test orphan transaction handling ... ')
@@ -142,9 +137,11 @@ class InvalidTxRequestTest(SyscoinTestFramework):
         }
         # Transactions that do not end up in the mempool:
         # tx_orphan_2_no_fee, because it has too low fee (p2ps[0] is not disconnected for relaying that tx)
-        # tx_orphan_2_invalid, because it has negative fee (p2ps[1] is disconnected for relaying that tx)
+        # tx_orphan_2_invalid, because it has negative fee (p2ps[1] remains connected)
 
-        self.wait_until(lambda: 1 == len(node.getpeerinfo()), timeout=12)  # p2ps[1] is no longer connected
+        for peer in node.p2ps:
+            peer.sync_with_ping()
+        assert_equal(2, len(node.getpeerinfo()))
         assert_equal(expected_mempool, set(node.getrawmempool()))
 
         self.log.info('Test orphan pool overflow')
@@ -165,7 +162,8 @@ class InvalidTxRequestTest(SyscoinTestFramework):
             node.p2ps[0].send_txs_and_test([rejected_parent], node, success=False)
 
         self.log.info('Test that a peer disconnection causes erase its transactions from the orphan pool')
-        with node.assert_debug_log(['Erased 100 orphan tx from peer=25']):
+        orphan_peer_id = node.getpeerinfo()[0]['id']
+        with node.assert_debug_log([f'Erased 100 orphan tx from peer={orphan_peer_id}']):
             self.reconnect_p2p(num_connections=1)
 
         self.log.info('Test that a transaction in the orphan pool is included in a new tip block causes erase this transaction from the orphan pool')

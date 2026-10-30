@@ -4,6 +4,7 @@
 
 #include <consensus/validation.h>
 #include <key.h>
+#include <policy/policy.h>
 #include <random.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
@@ -381,6 +382,38 @@ BOOST_FIXTURE_TEST_CASE(checkinputs_test, Dersig100Setup)
         // Should get 2 script checks back -- caching is on a whole-transaction basis.
         BOOST_CHECK_EQUAL(scriptchecks.size(), 2U);
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(script_policy_failure_reports_first_error, TestingSetup)
+{
+    CCoinsView dummy;
+    CCoinsViewCache coins{&dummy};
+    CMutableTransaction funding;
+    funding.vout.emplace_back(1, CScript{} << OP_CODESEPARATOR << OP_RETURN);
+    AddCoins(coins, CTransaction{funding}, 0, false);
+    CMutableTransaction spending;
+    spending.vin.emplace_back(funding.GetHash(), 0);
+    spending.vout.emplace_back(0, CScript{} << OP_TRUE);
+    const CTransaction tx{spending};
+
+    LOCK(cs_main);
+    TxValidationState policy_state;
+    PrecomputedTransactionData policy_data;
+    BOOST_CHECK(!CheckInputScripts(tx, policy_state, coins, STANDARD_SCRIPT_VERIFY_FLAGS,
+        false, false, policy_data, nullptr));
+    BOOST_CHECK(policy_state.GetResult() == TxValidationResult::TX_NOT_STANDARD);
+    BOOST_CHECK_EQUAL(policy_state.GetRejectReason(),
+        "mempool-script-verify-flag-failed (Using OP_CODESEPARATOR in non-witness script)");
+
+    // The same script is still consensus-invalid. Checking it as a block input
+    // reports the consensus error without changing any acceptance rules.
+    TxValidationState consensus_state;
+    PrecomputedTransactionData consensus_data;
+    BOOST_CHECK(!CheckInputScripts(tx, consensus_state, coins, MANDATORY_SCRIPT_VERIFY_FLAGS,
+        false, false, consensus_data, nullptr));
+    BOOST_CHECK(consensus_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+    BOOST_CHECK_EQUAL(consensus_state.GetRejectReason(),
+        "mandatory-script-verify-flag-failed (OP_RETURN was encountered)");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
