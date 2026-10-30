@@ -7024,6 +7024,7 @@ bool Chainstate::FlushStateToDisk(
     assert(this->CanFlushToDisk());
     std::set<int> setFilesToPrune;
     bool full_flush_completed = false;
+    std::optional<std::string> deferred_prune_error;
 
     const size_t coins_count = CoinsTip().GetCacheSize();
     const size_t coins_mem_usage = CoinsTip().DynamicMemoryUsage();
@@ -7036,7 +7037,11 @@ bool Chainstate::FlushStateToDisk(
         WAIT_LOCK(m_blockman.cs_LastBlockFile, blockfile_lock);
         std::optional<int> nevm_prune_height;
         const bool previous_prune_request{m_blockman.m_check_for_pruning};
-        if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && !fReindex) {
+        // A recent engine failure delays only automatic file selection; it
+        // must not rescan an archive on each tick or suppress required flushing.
+        if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && !fReindex &&
+            (nManualPruneHeight > 0 || m_chainman.m_nevm_prune_retry_after == SteadyClock::time_point{} ||
+             SteadyClock::now() >= m_chainman.m_nevm_prune_retry_after)) {
             // make sure we don't prune above any of the prune locks bestblocks
             // pruning is height-based
             int last_prune{m_chain.Height()}; // last height we can prune
@@ -7072,14 +7077,32 @@ bool Chainstate::FlushStateToDisk(
             // new tip. Wait for that publication before binding a pruning
             // fence to the active branch; the normal post-activation flush
             // will retry with the same retained files.
-            const bool defer_pruning{!setFilesToPrune.empty() && m_chain.Tip() &&
+            bool defer_pruning{!setFilesToPrune.empty() && m_chain.Tip() &&
                 CoinsTip().GetBestBlock() != m_chain.Tip()->GetBlockHash()};
+            if (!defer_pruning && !setFilesToPrune.empty()) {
+                nevm_prune_height = GetNEVMPruneHeight(m_chainman, setFilesToPrune);
+                if (nevm_prune_height) {
+                    // Known unavailability and a recent failed attempt do not
+                    // justify forcing another full coins flush. Ordinary cache
+                    // pressure, periodic work and explicit ALWAYS still apply.
+                    const bool unavailable{!fNEVMConnection || m_chainman.m_interrupt};
+                    defer_pruning = unavailable;
+                    if (unavailable) {
+                        // Bound selector work too while an offline engine
+                        // leaves the same files eligible on every mempool tick.
+                        m_chainman.m_nevm_prune_retry_after =
+                            SteadyClock::now() + std::chrono::seconds{5};
+                        if (nManualPruneHeight > 0) {
+                            deferred_prune_error = "nevm-prune-engine-unavailable";
+                        }
+                    }
+                }
+            }
             if (defer_pruning) {
                 setFilesToPrune.clear();
                 m_blockman.m_check_for_pruning = true;
             }
             if (!setFilesToPrune.empty()) {
-                nevm_prune_height = GetNEVMPruneHeight(m_chainman, setFilesToPrune);
                 fFlushForPrune = true;
                 m_blockman.m_check_for_pruning = true;
                 // SYSCOIN BEGIN: Publish Bitcoin's pruned flag after the coins barrier below.
@@ -7325,12 +7348,18 @@ bool Chainstate::FlushStateToDisk(
                     durable = MakeNEVMPruneInputsDurable(m_chainman, *nevm_prune_height, error);
                 }
                 if (!durable) {
+                    // Start the delay after the synchronous engine request:
+                    // its timeout may itself be longer than the retry delay.
+                    m_chainman.m_nevm_prune_retry_after =
+                        SteadyClock::now() + std::chrono::seconds{5};
                     // Pruning is optional: a temporary engine fault must not
                     // turn an otherwise successful block connection into an
                     // error. Keep all files, indexes and the retry request.
                     LogPrint(BCLog::PRUNE, "Deferring block pruning: %s\n", error);
-                    if (nManualPruneHeight > 0) return state.Error(error);
+                    if (nManualPruneHeight > 0) deferred_prune_error = error;
                     fFlushForPrune = false;
+                } else {
+                    m_chainman.m_nevm_prune_retry_after = {};
                 }
             }
             if (fFlushForPrune) {
@@ -7373,7 +7402,7 @@ bool Chainstate::FlushStateToDisk(
     } catch (const std::runtime_error& e) {
         return FatalError(m_chainman.GetNotifications(), state, std::string("System error while flushing: ") + e.what());
     }
-    return true;
+    return deferred_prune_error ? state.Error(*deferred_prune_error) : true;
 }
 
 void Chainstate::ForceFlushStateToDisk()

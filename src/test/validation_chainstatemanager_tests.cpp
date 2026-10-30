@@ -211,6 +211,18 @@ public:
 };
 class NEVMMiningTestAccess {
 public:
+    static SteadyClock::time_point PruneRetryAfter(const ChainstateManager& chainman)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return chainman.m_nevm_prune_retry_after;
+    }
+
+    static void SetPruneRetryAfter(ChainstateManager& chainman, SteadyClock::time_point retry_after)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        chainman.m_nevm_prune_retry_after = retry_after;
+    }
+
     static std::optional<SteadyClock::time_point> StartupStatusWaitStarted(
         const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
@@ -9745,6 +9757,7 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
         for (const auto fault : {EngineFault::OFFLINE, EngineFault::FLUSH,
              EngineFault::STATUS, EngineFault::COUNT, EngineFault::COUNT_OVERFLOW,
              EngineFault::BRANCH, EngineFault::BEHIND, EngineFault::FENCE}) {
+            node::test::NEVMMiningTestAccess::SetPruneRetryAfter(chainman, {});
             nevm->command_trace.clear();
             nevm->reported_pair_override.reset();
             nevm->flush_available = fault != EngineFault::FLUSH;
@@ -9804,6 +9817,7 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
         nevm->block_info_error.clear();
         nevm->reported_pair_override.reset();
         nevm->durable_pair_response = {};
+        node::test::NEVMMiningTestAccess::SetPruneRetryAfter(chainman, {});
 
         // An authenticated engine endpoint may lag the tip, but must include
         // the last active NEVM body in every selected file.
@@ -9843,6 +9857,13 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
             AddPrunePressure();
             node::test::BlockManagerPruningTestAccess::Request(blockman);
         }
+        nevm->connect_response = [&](const uint256&, uint32_t height)
+            EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            // Isolate the unpublished-tip guard from the independent retry
+            // cooldown established by AcceptBlock's B500 prune attempt.
+            if (height == 501) node::test::NEVMMiningTestAccess::SetPruneRetryAfter(chainman, {});
+            return std::string{};
+        };
         nevm->durable_pair_response = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
             node::test::BlockManagerPruningTestAccess::AssertFileLockNotHeld(blockman);
             // AcceptBlock may prune the existing B500 prefix before applying
@@ -9869,6 +9890,8 @@ struct PruningNEVMRootPublicationSetup : NEVMRootRollbackSetup {
         BOOST_CHECK_EQUAL_COLLECTIONS(nevm->command_trace.begin(), nevm->command_trace.end(),
                                       connect_expected.begin(), connect_expected.end());
         nevm->durable_pair_response = {};
+        nevm->connect_response = {};
+        node::test::NEVMMiningTestAccess::SetPruneRetryAfter(chainman, {});
         nevm->command_trace.clear();
         chainman.ActiveChainstate().PruneAndFlush();
         BOOST_CHECK(blockman.IsBlockPruned(victim));
@@ -15615,6 +15638,174 @@ BOOST_FIXTURE_TEST_CASE(nevm_prune_pre_activation_files_need_no_engine,
                         PruningNEVMRootPublicationSetup)
 {
     CheckPrunePreNEVMFiles();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_offline_retry_does_not_force_ordinary_flushes,
+                        PruningNEVMRootPublicationSetup)
+{
+    PreparePruningGap();
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    auto& blockman{chainman.m_blockman};
+    LOCK(::cs_main);
+    // Start with a fully flushed, unchanged tip and healthy cache pressure.
+    // Any later sync is attributable to the blocked prune request itself.
+    BlockValidationState baseline;
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(baseline, FlushStateMode::ALWAYS));
+    AddPrunePressure();
+    std::size_t coins_writes{0}, coins_syncs{0};
+    struct Restore {
+        Chainstate& chainstate;
+        bool connection{fNEVMConnection};
+        ~Restore()
+        {
+            LOCK(::cs_main);
+            chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+            chainstate.CoinsDB().SetSyncCallbackForTesting({});
+            fNEVMConnection = connection;
+        }
+    } restore{chainstate};
+    chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+        ++coins_writes;
+        return true;
+    });
+    chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+        ++coins_syncs;
+        return true;
+    });
+    fNEVMConnection = false;
+    nevm->command_trace.clear();
+    node::test::BlockManagerPruningTestAccess::Request(blockman);
+    std::optional<SteadyClock::time_point> first_retry;
+    // PERIODIC is also the mempool-acceptance maintenance path. Neither it
+    // nor IF_NEEDED should keep syncing clean coins while Geth is absent.
+    for (const auto mode : {FlushStateMode::IF_NEEDED, FlushStateMode::PERIODIC,
+                            FlushStateMode::IF_NEEDED, FlushStateMode::PERIODIC}) {
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(state, mode));
+        BOOST_CHECK(!state.IsError());
+        BOOST_CHECK_EQUAL(coins_writes, 0U);
+        BOOST_CHECK_EQUAL(coins_syncs, 0U);
+        BOOST_CHECK(node::test::BlockManagerPruningTestAccess::Requested(blockman));
+        CheckRetainedFiles(*victim);
+        BOOST_CHECK(nevm->command_trace.empty());
+        const auto retry{node::test::NEVMMiningTestAccess::PruneRetryAfter(chainman)};
+        if (!first_retry) {
+            BOOST_CHECK(retry > SteadyClock::now());
+            node::test::NEVMMiningTestAccess::SetPruneRetryAfter(
+                chainman, SteadyClock::now() + std::chrono::hours{1});
+            first_retry = node::test::NEVMMiningTestAccess::PruneRetryAfter(chainman);
+        } else {
+            // Calls inside the window skip selection entirely, rather than
+            // walking every old file and extending the deadline forever.
+            BOOST_CHECK(retry == *first_retry);
+        }
+    }
+    BlockValidationState manual;
+    BOOST_CHECK(!chainstate.FlushStateToDisk(manual, FlushStateMode::NONE, 500));
+    BOOST_CHECK_EQUAL(manual.GetRejectReason(), "nevm-prune-engine-unavailable");
+    BOOST_CHECK_EQUAL(coins_writes, 0U);
+    BOOST_CHECK_EQUAL(coins_syncs, 0U);
+    BOOST_CHECK(nevm->command_trace.empty());
+    CheckRetainedFiles(*victim);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_prune_attached_retry_is_bounded_without_suppressing_required_flushes,
+                        PruningNEVMRootPublicationSetup)
+{
+    PreparePruningGap();
+    auto& chainman{*m_node.chainman};
+    auto& chainstate{chainman.ActiveChainstate()};
+    auto& blockman{chainman.m_blockman};
+    LOCK(::cs_main);
+    BlockValidationState baseline;
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(baseline, FlushStateMode::ALWAYS));
+    AddPrunePressure();
+    std::size_t coins_writes{0}, coins_syncs{0};
+    SteadyClock::time_point failed_at;
+    struct Restore {
+        Chainstate& chainstate;
+        StartupNEVMSubscriber& nevm;
+        ~Restore()
+        {
+            LOCK(::cs_main);
+            chainstate.CoinsDB().SetWriteBatchCallbackForTesting({});
+            chainstate.CoinsDB().SetSyncCallbackForTesting({});
+            nevm.durable_pair_response = {};
+        }
+    } restore{chainstate, *nevm};
+    chainstate.CoinsDB().SetWriteBatchCallbackForTesting([&](bool) {
+        ++coins_writes;
+        return true;
+    });
+    chainstate.CoinsDB().SetSyncCallbackForTesting([&] {
+        ++coins_syncs;
+        return true;
+    });
+    nevm->durable_pair_response = [&] {
+        failed_at = SteadyClock::now();
+        return false;
+    };
+    nevm->command_trace.clear();
+    node::test::BlockManagerPruningTestAccess::Request(blockman);
+    BlockValidationState first;
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(first, FlushStateMode::IF_NEEDED));
+    BOOST_CHECK_GT(coins_syncs, 0U);
+    BOOST_CHECK(node::test::NEVMMiningTestAccess::PruneRetryAfter(chainman) >=
+                failed_at + std::chrono::seconds{5});
+    const std::vector<std::string> attempted{"flush", "blockinfo",
+        "durable-pair-v1:400:" + cached_block->GetHash().GetHex()};
+    BOOST_CHECK(nevm->command_trace == attempted);
+    CheckRetainedFiles(*victim);
+    const auto initial_writes{coins_writes}, initial_syncs{coins_syncs};
+    // Advance/expire the retry deadline explicitly instead of sleeping or
+    // relying on how quickly this host runs the subsequent assertions.
+    node::test::NEVMMiningTestAccess::SetPruneRetryAfter(
+        chainman, SteadyClock::now() + std::chrono::hours{1});
+    nevm->command_trace.clear();
+    for (const auto mode : {FlushStateMode::IF_NEEDED, FlushStateMode::PERIODIC,
+                            FlushStateMode::IF_NEEDED, FlushStateMode::PERIODIC}) {
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(state, mode));
+        BOOST_CHECK_EQUAL(coins_writes, initial_writes);
+        BOOST_CHECK_EQUAL(coins_syncs, initial_syncs);
+        BOOST_CHECK(nevm->command_trace.empty());
+        BOOST_CHECK(node::test::BlockManagerPruningTestAccess::Requested(blockman));
+        CheckRetainedFiles(*victim);
+    }
+
+    // A real independent coins mutation must still reach disk on ALWAYS,
+    // while the optional engine retry remains suppressed.
+    const COutPoint saved_coin{GetRandHash(), 0};
+    chainstate.CoinsTip().AddCoin(saved_coin,
+        Coin{CTxOut{1, CScript{} << OP_TRUE}, 500, false}, false);
+    BlockValidationState required;
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(required, FlushStateMode::ALWAYS));
+    BOOST_CHECK(chainstate.CoinsDB().HaveCoin(saved_coin));
+    BOOST_CHECK_GT(coins_writes, initial_writes);
+    BOOST_CHECK_EQUAL(coins_syncs, initial_syncs);
+    BOOST_CHECK(nevm->command_trace.empty());
+    CheckRetainedFiles(*victim);
+
+    // An explicit manual attempt ignores the automatic cooldown and reports
+    // its own failure immediately, retaining a fresh automatic retry window.
+    BlockValidationState manual;
+    BOOST_CHECK(!chainstate.FlushStateToDisk(manual, FlushStateMode::NONE, 500));
+    BOOST_CHECK_EQUAL(manual.GetRejectReason(), "nevm-prune-durability-unavailable");
+    BOOST_CHECK(nevm->command_trace == attempted);
+    BOOST_CHECK_GT(coins_syncs, initial_syncs);
+    CheckRetainedFiles(*victim);
+
+    nevm->durable_pair_response = {};
+    nevm->command_trace.clear();
+    node::test::NEVMMiningTestAccess::SetPruneRetryAfter(chainman, {});
+    BlockValidationState recovered;
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(recovered, FlushStateMode::IF_NEEDED));
+    BOOST_CHECK(nevm->command_trace == attempted);
+    BOOST_CHECK(blockman.IsBlockPruned(victim));
+    BOOST_CHECK(!node::test::BlockManagerPruningTestAccess::Requested(blockman));
+    BOOST_CHECK(node::test::NEVMMiningTestAccess::PruneRetryAfter(chainman) ==
+                SteadyClock::time_point{});
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_full_flush_publishes_root_branch_before_coins,
