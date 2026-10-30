@@ -78,6 +78,7 @@ public:
 } // namespace kernel
 
 namespace node {
+// SYSCOIN: Test access to deferred pruning state and read-only file selection.
 namespace test {
 class BlockManagerPruningTestAccess;
 }
@@ -156,6 +157,7 @@ class BlockManager
 {
     friend Chainstate;
     friend ChainstateManager;
+    // SYSCOIN: Exercise the pruning durability boundary without a public test API.
     friend class test::BlockManagerPruningTestAccess;
 
 private:

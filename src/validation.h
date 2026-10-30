@@ -1362,7 +1362,7 @@ private:
     // A template request can flush buffered blocks while mining holds cs_main.
     // Retain its verdict until the recovery worker can reconcile with activation excluded.
     std::optional<NEVMBlockReject> m_nevm_template_rejection GUARDED_BY(::cs_main);
-    // Shared by both chainstates: a failed optional prune fence must not
+    // SYSCOIN: Shared by both chainstates: a failed optional prune fence must not
     // repeatedly scan block files, force coins synchronization or block on it.
     SteadyClock::time_point m_nevm_prune_retry_after GUARDED_BY(::cs_main){};
     // SYSCOIN: One durable external attempt, never publication or fork-choice authority.

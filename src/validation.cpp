@@ -6942,6 +6942,7 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     return CoinsCacheSizeState::OK;
 }
 
+// SYSCOIN BEGIN: Fence selected NEVM replay inputs before pruning.
 // A normal Geth connect acknowledgement can leave only an in-memory applied
 // prefix. Before removing its replay inputs, authenticate and durably fence an
 // active endpoint that includes every selected active-chain NEVM block.
@@ -7014,6 +7015,7 @@ static bool MakeNEVMPruneInputsDurable(
     }
     return true;
 }
+// SYSCOIN END: Fence selected NEVM replay inputs before pruning.
 
 bool Chainstate::FlushStateToDisk(
     BlockValidationState &state,
@@ -7024,6 +7026,7 @@ bool Chainstate::FlushStateToDisk(
     assert(this->CanFlushToDisk());
     std::set<int> setFilesToPrune;
     bool full_flush_completed = false;
+    // SYSCOIN: Report manual prune failures after independently required flushing.
     std::optional<std::string> deferred_prune_error;
 
     const size_t coins_count = CoinsTip().GetCacheSize();
@@ -7034,10 +7037,12 @@ bool Chainstate::FlushStateToDisk(
         bool fDoFullFlush = false;
 
         CoinsCacheSizeState cache_state = GetCoinsCacheSizeState();
+        // SYSCOIN: Release only the block-file lock around the engine barrier.
         WAIT_LOCK(m_blockman.cs_LastBlockFile, blockfile_lock);
+        // SYSCOIN: Track selected NEVM inputs and preserve automatic retry intent.
         std::optional<int> nevm_prune_height;
         const bool previous_prune_request{m_blockman.m_check_for_pruning};
-        // A recent engine failure delays only automatic file selection; it
+        // SYSCOIN: A recent engine failure delays only automatic file selection; it
         // must not rescan an archive on each tick or suppress required flushing.
         if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && !fReindex &&
             (nManualPruneHeight > 0 || m_chainman.m_nevm_prune_retry_after == SteadyClock::time_point{} ||
@@ -7073,6 +7078,7 @@ bool Chainstate::FlushStateToDisk(
 
                 m_blockman.FindFilesToPrune(setFilesToPrune, last_prune, *this, m_chainman);
             }
+            // SYSCOIN BEGIN: Defer unsafe pruning without suppressing ordinary flushes.
             // ConnectTip flushes its coins view before publishing m_chain's
             // new tip. Wait for that publication before binding a pruning
             // fence to the active branch; the normal post-activation flush
@@ -7113,6 +7119,7 @@ bool Chainstate::FlushStateToDisk(
                 // SYSCOIN END: Publish Bitcoin's pruned flag after the coins barrier below.
             }
             else if (!defer_pruning && nManualPruneHeight <= 0) m_blockman.m_check_for_pruning = false;
+            // SYSCOIN END: Defer unsafe pruning without suppressing ordinary flushes.
         }
         const auto nNow{SteadyClock::now()};
         // Avoid writing/flushing immediately after startup.
@@ -7402,6 +7409,7 @@ bool Chainstate::FlushStateToDisk(
     } catch (const std::runtime_error& e) {
         return FatalError(m_chainman.GetNotifications(), state, std::string("System error while flushing: ") + e.what());
     }
+    // SYSCOIN: Preserve a deferred manual-pruning error after the normal flush path.
     return deferred_prune_error ? state.Error(*deferred_prune_error) : true;
 }
 
