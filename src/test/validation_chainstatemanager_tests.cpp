@@ -13946,8 +13946,142 @@ BOOST_FIXTURE_TEST_CASE(nevm_template_failure_reconciles_buffered_verdict,
     std::string error;
     BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
     CheckReconciled();
+    BOOST_CHECK(nevm->connected_blocks.empty());
     BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
     BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_rejection_recovers_empty_checkpoint,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(VerdictFor(*prefix[1]));
+    nevm->applied_count = 0;
+    nevm->applied_hash.SetNull();
+    nevm->applied_pairs.clear();
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    CheckReconciled();
+    BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>{prefix.front()->GetHash()});
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_rejection_recovers_nonempty_checkpoint,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(VerdictFor(*prefix[2]));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>{prefix[1]->GetHash()});
+    BOOST_CHECK_EQUAL(nevm->applied_count, 2U);
+    BOOST_CHECK(nevm->applied_hash == prefix[1]->GetHash());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->ActiveTip()->GetBlockHash()) == prefix[1]->GetHash());
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_rejection_replay_interruption_retries,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(VerdictFor(*prefix[1]));
+    nevm->applied_count = 0;
+    nevm->applied_hash.SetNull();
+    nevm->applied_pairs.clear();
+    nevm->connect_response = [&](const uint256&, uint32_t) {
+        m_node.kernel->interrupt();
+        return std::string{"shutdown"};
+    };
+    std::string error;
+    BOOST_CHECK(!m_node.chainman->MaybeRecoverNEVMBlockProduction(error));
+    BOOST_CHECK(error.find("shutdown") != std::string::npos);
+    m_node.kernel->interrupt.reset();
+    nevm->connect_response = {};
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+    CheckLocalState(/*connected=*/false);
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    CheckReconciled();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_rejection_requires_matching_checkpoint,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(VerdictFor(*prefix[1]));
+    nevm->reported_pair_override = StartupNEVMSubscriber::AppliedPair{1, uint256S("deadbeef")};
+    std::string error;
+    BOOST_CHECK(!m_node.chainman->MaybeRecoverNEVMBlockProduction(error));
+    BOOST_CHECK_EQUAL(error, "nevm-live-recovery-applied-pair-mismatch");
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    CheckLocalState(/*connected=*/false);
+    nevm->reported_pair_override.reset();
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    CheckReconciled();
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_rejection_authenticates_commitment_before_replay,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    auto rejection{VerdictFor(*prefix[1])};
+    rejection.nevm_hash = uint256S("deadbeef");
+    FailTemplate(rejection);
+    nevm->applied_count = 0;
+    nevm->applied_hash.SetNull();
+    nevm->applied_pairs.clear();
+    const auto commands{nevm->command_trace};
+    std::string error;
+    BOOST_CHECK(!m_node.chainman->MaybeRecoverNEVMBlockProduction(error));
+    BOOST_CHECK_EQUAL(error, "nevm-rejected-block-pair-mismatch");
+    BOOST_CHECK(nevm->command_trace == commands);
+    BOOST_CHECK(nevm->connected_blocks.empty());
+    CheckLocalState(/*connected=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_rejection_prioritizes_earlier_consensus_fault,
+                        RejectedNEVMPrefixSetup)
+{
+    PrepareRejection();
+    FailTemplate(VerdictFor(*prefix[2]));
+    nevm->applied_count = 0;
+    nevm->applied_hash.SetNull();
+    nevm->applied_pairs.clear();
+    const auto earlier{VerdictFor(*prefix[1])};
+    nevm->connect_verdict = [&](const uint256& hash) -> std::optional<NEVMBlockReject> {
+        if (hash == prefix[1]->GetHash()) return earlier;
+        return std::nullopt;
+    };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    CheckReconciled();
+    BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>({prefix[0]->GetHash(), prefix[1]->GetHash()}));
+    // The original queued third-block verdict is now on the retired branch.
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->MaybeRecoverNEVMBlockProduction(error), error);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
+}
+
+BOOST_FIXTURE_TEST_CASE(nevm_template_rejection_prioritizes_earlier_payload_fault,
+                        NEVMPayloadRepairSetup)
+{
+    PreparePayloadFixture();
+    FailTemplate(VerdictFor(*prefix[2]));
+    nevm->applied_count = 0;
+    nevm->applied_hash.SetNull();
+    nevm->applied_pairs.clear();
+    nevm->connect_verdict = [&](const uint256& hash) -> std::optional<NEVMBlockReject> {
+        if (hash == prefix[1]->GetHash()) return payload_verdict;
+        return std::nullopt;
+    };
+    std::string error;
+    BOOST_CHECK(!m_node.chainman->MaybeRecoverNEVMBlockProduction(error));
+    BOOST_CHECK_EQUAL(error, "nevm-payload-repair-pending");
+    const auto request{Request()};
+    BOOST_CHECK(request.rejection == payload_verdict);
+    BOOST_CHECK(nevm->connected_blocks == std::vector<uint256>({prefix[0]->GetHash(), prefix[1]->GetHash()}));
+    CheckLocalState(/*connected=*/false);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->PrepareNEVMBlockProduction()));
 }
 
 BOOST_FIXTURE_TEST_CASE(nevm_template_failure_retains_verdict_after_status_error,

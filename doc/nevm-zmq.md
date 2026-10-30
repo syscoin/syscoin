@@ -150,6 +150,14 @@ the guard armed. The recovery scheduler verifies the resulting active prefix
 before a later mining request can proceed. Successful block extensions do not
 add a preflight or recovery probe.
 
+A saved consensus rejection from template creation remains pending across an
+engine-only restart. If Geth reopens at an older checkpoint, Core authenticates
+the rejected block's stored commitment and replays only through its parent
+before reconciling the rejection. A separate replay result preserves the saved
+verdict; an earlier rejection takes priority. Unavailable replay inputs or an
+operational failure keep mining gated for retry. Payload rejections retain the
+existing payload-repair path.
+
 ## Startup status timeout
 
 Ordinary nodes can continue with NEVM offline when managed Geth fails to start

@@ -3474,6 +3474,34 @@ bool ChainstateManager::MaybeRecoverNEVMBlockProduction(std::string& error)
                 if (!rejected || !chainstate->m_chain.Contains(rejected)) {
                     m_nevm_template_rejection.reset();
                     rejection.reset();
+                } else if (!rejection->IsPayload()) {
+                    // Geth may have reopened at an older durable checkpoint
+                    // after returning this verdict. Authenticate its bound
+                    // commitment before restoring only the rejected parent.
+                    if (!rejected->pprev || rejected->nHeight < GetConsensus().nNEVMStartBlock) {
+                        error = "nevm-rejected-block-before-activation";
+                        return false;
+                    }
+                    CBlock block;
+                    CNEVMHeader header;
+                    BlockValidationState state;
+                    if (!m_blockman.ReadBlockFromDisk(block, *rejected)) {
+                        error = "nevm-rejected-block-read-failed";
+                        return false;
+                    }
+                    if (!GetNEVMData(state, block, header) ||
+                        header.nBlockHash != rejection->nevm_hash) {
+                        error = "nevm-rejected-block-pair-mismatch";
+                        return false;
+                    }
+                    std::optional<NEVMBlockReject> predecessor_rejection;
+                    if (!chainstate->RecoverNEVMPrefixThrough(
+                            *rejected->pprev, nullptr, error, predecessor_rejection)) {
+                        if (!predecessor_rejection) return false;
+                        // An earlier rejection takes precedence. Keep the
+                        // original queued until its branch retires or retries.
+                        rejection = predecessor_rejection;
+                    }
                 }
             }
             if (!rejection) {
