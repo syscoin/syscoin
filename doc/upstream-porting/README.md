@@ -6,8 +6,9 @@ Use this history when identifying Syscoin adaptations. A normal merge-base point
 
 ## Audit and annotation status
 
+- [Latest source scan at bf075a1b](audits/bf075a1b/README.md): 3,582 files inventoried, 1,403 remaining production marker candidates, and no marker-structure issues. The final pruning-marker pass reduced the queue by seven candidates without changing executable C++ tokens.
 - [Historical audit at d5fc88ad](audits/d5fc88ad/README.md): 3,454 files inventoried, with hunk analysis of shared C/C++ production and test code. It records 38 manually verified groups of missing or ambiguous marker boundaries and a broader candidate queue.
-- [Annotation status](annotation-status.md): disposition of those 38 groups, the comments-only change, verification, and the remaining candidate counts.
+- [Annotation status](annotation-status.md): the latest pinned marker refresh and the preserved disposition, verification, and candidate counts of the original 38-group annotation pass.
 - [Porting ledger](audits/d5fc88ad/results/porting-ledger.md): removed/moved Bitcoin operations, unmatched paths, and non-C++ files that need a separate review.
 - [Full historical inventory](audits/d5fc88ad/results/audit.json.gz): exact before/after source and pinned line locations, stored with deterministic gzip compression. This remains the original pre-annotation evidence.
 

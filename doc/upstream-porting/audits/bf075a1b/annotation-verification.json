@@ -1,0 +1,16 @@
+{
+  "baseline": "ece75c4059cc2d48c4f9a0a390ad5ad328c9aa55",
+  "target": "bf075a1b7848be48d856338cacd5ac53f4cca9f9",
+  "files_checked": 3,
+  "non_comment_cpp_tokens_unchanged": 95541,
+  "files": {
+    "src/node/blockstorage.h": 1896,
+    "src/validation.cpp": 85663,
+    "src/validation.h": 7982
+  },
+  "marker_issues": [],
+  "method": "Compare ordered lexical C/C++ tokens after removing comments, without product-name normalization; check all modified source files for unmatched markers.",
+  "scanner_sha256": "18ae0df60c6cfe070fa80e7ccc25a059f2feee011a8108c5919a11866b023d96",
+  "uncompressed_audit_sha256": "a5d8b02275e60598c921b4403fbcdcaf8e75a3a42c915dc3783354621d86fb91",
+  "compressed_audit_sha256": "bd33fb97920d013f597fe6168b9e6af9f5371e275e537df37436d8f086f6cb86"
+}

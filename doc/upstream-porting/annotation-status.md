@@ -1,10 +1,45 @@
 # Verified annotation status
 
+## Current source snapshot
+
+The latest [marker-coverage scan](audits/bf075a1b/README.md) is pinned to
+`bf075a1b7848be48d856338cacd5ac53f4cca9f9`, using the same Bitcoin 26.0rc3
+comparison baseline, `e4fef4ae65c68ebd34774700dc4801c24313d469`.
+It inventories 3,582 files and reports no marker-structure issues.
+
+The immediate comparison below isolates the comment-only pruning markers from
+`ece75c4059cc2d48c4f9a0a390ad5ad328c9aa55` to `bf075a1b`. It is separate from
+the original annotation pass and its historical counts further below.
+
+| Production hunk classification | Before pruning markers | After pruning markers |
+| --- | ---: | ---: |
+| No detected marker | 809 | 803 |
+| Partly marked or ambiguous | 507 | 506 |
+| Removed code without marker context | 94 | 94 |
+| **Total review candidates** | **1410** | **1403** |
+
+All 95,541 non-comment C++ tokens in the three edited files are unchanged.
+The [verification record](audits/bf075a1b/annotation-verification.json) records
+the exact endpoints, per-file token counts, scanner hash, and report hashes.
+The scanner's 13 regression tests pass. The
+[current summary](audits/bf075a1b/results/summary.json),
+[candidate file index](audits/bf075a1b/results/inventory.md), and
+[full compressed inventory](audits/bf075a1b/results/audit.json.gz) are preserved
+alongside the [pre-marker summary](audits/bf075a1b/results/pre-marker-summary.json).
+
+These are heuristic marker-review candidates, not confirmed missing tags,
+runtime defects, or a measurement of test coverage. Hunk segmentation changes
+with source edits, so totals from different source generations are not a count
+of introduced or resolved defects. Runtime test coverage is unchanged by this
+comment-only pass.
+
+## Original annotation pass
+
 All **38 manually verified groups** from the [d5fc88ad audit](audits/d5fc88ad/README.md) were annotated in commit [`6f325c40e36e907cca735f70dc47ad00e4322f4b`](https://github.com/syscoin/syscoin/commit/6f325c40e36e907cca735f70dc47ad00e4322f4b). This commit changes comments in 33 source files; it does not change executable C++ tokens.
 
 The original audit is retained unchanged as a source comparison, with its human ledger corrected where review clarified provenance. Its old missing-marker descriptions and line numbers describe the pre-annotation target. The larger automated queue still needs manual provenance review.
 
-## Verification
+## Original-pass verification
 
 - All 335,734 non-comment lexical C/C++ tokens across the 33 edited files match the original target, without Bitcoin/Syscoin name normalization.
 - All edited files have balanced markers. The legacy payment/NEVM marker pair in validation.cpp was normalized after confirming its original scope.
@@ -15,7 +50,7 @@ The original audit is retained unchanged as a source comparison, with its human 
 
 Per-file token counts and the pinned verification endpoints are recorded in [annotation-verification.json](annotation-verification.json).
 
-## Remaining candidate queue
+## Original remaining candidate queue
 
 | Production hunk classification | Before annotation | After annotation |
 | --- | ---: | ---: |
