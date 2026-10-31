@@ -169,6 +169,7 @@ BASE_SCRIPTS = [
     # SYSCOIN: Provider-transaction admission, replay, and package regressions.
     'feature_protx_conflicts.py --descriptors',
     'feature_protx_packages.py --descriptors',
+    'feature_protx_collateral_spend.py --descriptors',
     'feature_nevm_data.py --descriptors',
     'feature_nevm_connect_after_consensus.py --descriptors',
     'rpc_signer.py',
