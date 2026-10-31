@@ -378,6 +378,23 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     AssertLockHeld(cs_main);
     AssertLockHeld(m_mempool->cs);
+
+    // SYSCOIN: Independently funded provider transactions can outlive the
+    // registration or MN state they were validated against. Remove them before
+    // replay, so their property indexes cannot block valid disconnected ProTxs.
+    // Keep ordinary lockpoint/maturity filtering after ancestor resurrection.
+    std::vector<CTransactionRef> invalid_provider_txs;
+    for (const auto& entry : m_mempool->mapTx) {
+        TxValidationState state;
+        if (!CheckSpecialTx(m_blockman, entry.GetTx(), m_chain.Tip(), state, CoinsTip(),
+                            /*fJustCheck=*/true, /*check_sigs=*/true)) {
+            invalid_provider_txs.push_back(entry.GetSharedTx());
+        }
+    }
+    for (const auto& tx : invalid_provider_txs) {
+        m_mempool->removeRecursive(*tx, MemPoolRemovalReason::REORG);
+    }
+
     std::vector<uint256> vHashUpdate;
     {
         // disconnectpool is ordered so that the front is the most recently-confirmed
