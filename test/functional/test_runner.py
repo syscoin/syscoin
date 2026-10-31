@@ -167,6 +167,7 @@ BASE_SCRIPTS = [
     'feature_llmqdkgerrors.py --descriptors',
     'feature_deterministicmns.py --descriptors',
     'feature_protx_conflicts.py --descriptors',
+    'feature_protx_packages.py --descriptors',
     'feature_nevm_data.py --descriptors',
     'feature_nevm_connect_after_consensus.py --descriptors',
     'rpc_signer.py',

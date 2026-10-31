@@ -1328,7 +1328,61 @@ TxMempoolInfo CTxMemPool::info(const GenTxid& gtxid) const
 }
 // SYSCOIN
 
-bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIndex* pindexTip) const {
+void CTxMemPool::ProviderTxConflictTracker::Add(const CTransaction& tx, const CBlockIndex* pindexTip)
+{
+    AssertLockHeld(cs_main);
+    assert(pindexTip != nullptr);
+
+    const uint256 tx_hash{tx.GetHash()};
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
+        CProRegTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            addresses.insert(proTx.addr);
+            owner_keys.insert(proTx.keyIDOwner);
+            operator_keys.insert(proTx.pubKeyOperator.GetHash());
+            if (!proTx.collateralOutpoint.hash.IsNull()) {
+                referenced_mns.insert(tx_hash);
+                collaterals.insert(proTx.collateralOutpoint);
+            } else {
+                collaterals.emplace(tx_hash, proTx.collateralOutpoint.n);
+            }
+        }
+    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
+        CProUpServTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            referenced_mns.insert(proTx.proTxHash);
+            addresses.insert(proTx.addr);
+            if (!proTx.vchNEVMAddress.empty()) {
+                nevm_addresses.insert(proTx.vchNEVMAddress);
+            }
+        }
+    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
+        CProUpRegTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            referenced_mns.insert(proTx.proTxHash);
+            operator_keys.insert(proTx.pubKeyOperator.GetHash());
+            const auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
+            if (dmn && dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
+                key_changed_mns.insert(proTx.proTxHash);
+            }
+        }
+    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+        CProUpRevTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            referenced_mns.insert(proTx.proTxHash);
+            const auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
+            if (dmn && dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey()) {
+                key_changed_mns.insert(proTx.proTxHash);
+            }
+        }
+    }
+    for (const auto& txin : tx.vin) {
+        spent_outpoints.insert(txin.prevout);
+    }
+}
+
+bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIndex* pindexTip,
+                                        const ProviderTxConflictTracker* package) const {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
     assert(pindexTip != nullptr);
@@ -1336,6 +1390,9 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIn
     auto hasKeyChangeInMempool = [&](const uint256& proTxHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main) {
         AssertLockHeld(cs_main);
         AssertLockHeld(cs);
+        if (package && package->key_changed_mns.count(proTxHash)) {
+            return true;
+        }
         for (auto its = mapProTxRefs.equal_range(proTxHash); its.first != its.second; ++its.first) {
             auto txit = mapTx.find(its.first->second);
             if (txit == mapTx.end()) {
@@ -1354,21 +1411,23 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIn
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return true; // i.e. can't decode payload == conflict
         }
-        if (mapProTxAddresses.count(proTx.addr) || mapProTxPubKeyIDs.count(proTx.keyIDOwner) || mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()))
+        if (mapProTxAddresses.count(proTx.addr) || mapProTxPubKeyIDs.count(proTx.keyIDOwner) || mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()) ||
+            (package && (package->addresses.count(proTx.addr) || package->owner_keys.count(proTx.keyIDOwner) || package->operator_keys.count(proTx.pubKeyOperator.GetHash()))))
             return true;
         if (!proTx.collateralOutpoint.hash.IsNull()) {
-            if (mapProTxCollaterals.count(proTx.collateralOutpoint)) {
+            if (mapProTxCollaterals.count(proTx.collateralOutpoint) || (package && package->collaterals.count(proTx.collateralOutpoint))) {
                 // there is another ProRegTx that refers to the same collateral
                 return true;
             }
-            if (mapNextTx.count(proTx.collateralOutpoint)) {
+            if (mapNextTx.count(proTx.collateralOutpoint) || (package && package->spent_outpoints.count(proTx.collateralOutpoint))) {
                 // there is another tx that spends the collateral
                 return true;
             }
             // A replacement can remove the old MN before its update is
             // processed. Keep the first-seen transaction in the mempool.
             const auto replaced = deterministicMNManager->GetListForBlock(pindexTip).GetMNByCollateral(proTx.collateralOutpoint);
-            if (replaced && mapProTxRefs.find(replaced->proTxHash) != mapProTxRefs.end()) {
+            if (replaced && (mapProTxRefs.find(replaced->proTxHash) != mapProTxRefs.end() ||
+                             (package && package->referenced_mns.count(replaced->proTxHash)))) {
                 return true;
             }
         }
@@ -1380,18 +1439,18 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIn
             return true; // i.e. can't decode payload == conflict
         }
         const auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
-        if (dmn && mapProTxCollaterals.count(dmn->collateralOutpoint)) {
+        if (dmn && (mapProTxCollaterals.count(dmn->collateralOutpoint) || (package && package->collaterals.count(dmn->collateralOutpoint)))) {
             return true;
         }
         if(proTx.addr != CService()) {
-            if(mapProTxAddresses.count(proTx.addr)) {
+            if(mapProTxAddresses.count(proTx.addr) || (package && package->addresses.count(proTx.addr))) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx_hash.ToString());
                 return true;
             }
         }
         if(!proTx.vchNEVMAddress.empty()) {
             // Check NEVM address uniqueness
-            if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
+            if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress) || (package && package->nevm_addresses.count(proTx.vchNEVMAddress))) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx_hash.ToString());
                 return true;
             }
@@ -1408,7 +1467,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIn
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
             return true;
         }
-        if (mapProTxCollaterals.count(dmn->collateralOutpoint)) {
+        if (mapProTxCollaterals.count(dmn->collateralOutpoint) || (package && package->collaterals.count(dmn->collateralOutpoint))) {
             return true;
         }
         // only allow one operator key change in the mempool
@@ -1419,7 +1478,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIn
             }
         }
         if(proTx.pubKeyOperator.Get().IsValid()) {
-            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
+            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()) || (package && package->operator_keys.count(proTx.pubKeyOperator.GetHash()))) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx_hash.ToString());
                 return true;
             }
@@ -1437,7 +1496,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIn
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
             return true; // i.e. failed to find validated ProTx == conflict
         }
-        if (mapProTxCollaterals.count(dmn->collateralOutpoint)) {
+        if (mapProTxCollaterals.count(dmn->collateralOutpoint) || (package && package->collaterals.count(dmn->collateralOutpoint))) {
             return true;
         }
         // only allow one operator key change in the mempool

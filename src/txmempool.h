@@ -414,6 +414,21 @@ public:
 
     using Limits = kernel::MemPoolLimits;
 
+    /** Attempt-local provider indexes for transactions checked but not yet inserted. */
+    struct ProviderTxConflictTracker {
+        std::set<CService> addresses;
+        std::set<std::vector<unsigned char>> nevm_addresses;
+        std::set<CKeyID> owner_keys;
+        std::set<uint256> operator_keys;
+        std::set<COutPoint> collaterals;
+        std::set<uint256> referenced_mns;
+        std::set<uint256> key_changed_mns;
+        std::set<COutPoint> spent_outpoints;
+
+        /** Mirror the provider indexes populated by addUnchecked, after validation succeeds. */
+        void Add(const CTransaction& tx, const CBlockIndex* pindexTip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    };
+
     uint64_t CalculateDescendantMaximum(txiter entry) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 private:
     typedef std::map<txiter, setEntries, CompareIteratorByHash> cacheMap;
@@ -732,7 +747,8 @@ public:
 
     std::vector<TxMempoolInfo> infoAll() const;
     // SYSCOIN
-    bool existsProviderTxConflict(const CTransaction &tx, const CBlockIndex* pindexTip) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    bool existsProviderTxConflict(const CTransaction &tx, const CBlockIndex* pindexTip,
+                                  const ProviderTxConflictTracker* package = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     size_t DynamicMemoryUsage() const;
 
     /** Adds a transaction to the unbroadcast set */

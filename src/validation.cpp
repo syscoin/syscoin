@@ -716,7 +716,8 @@ private:
     // Looks up inputs, calculates feerate, considers replacement, evaluates
     // package limits, etc. As this function can be invoked for "free" by a peer,
     // only tests that are fast should be done here (to avoid CPU DoS).
-    bool PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+    bool PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs,
+                   const CTxMemPool::ProviderTxConflictTracker* provider_package = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
     // Run checks for mempool replace-by-fee.
     bool ReplacementChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
@@ -778,7 +779,8 @@ private:
     bool m_rbf{false};
 };
 
-bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs)
+bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs,
+                            const CTxMemPool::ProviderTxConflictTracker* provider_package)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(m_pool.cs);
@@ -1105,7 +1107,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip(), state, m_active_chainstate.CoinsTip(), true, true))
         return false;
 
-    if (m_pool.existsProviderTxConflict(tx, m_active_chainstate.m_chain.Tip())) {
+    if (m_pool.existsProviderTxConflict(tx, m_active_chainstate.m_chain.Tip(), provider_package)) {
         return state.Invalid(TxValidationResult::TX_CONFLICT, "protx-dup");
     }
     ws.m_ancestors = *ancestors;
@@ -1425,14 +1427,18 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
 
     // Each attempt owns its reservations; failed subpackages may be retried with different fees.
     NEVMMintTxSet mint_txs;
+    CTxMemPool::ProviderTxConflictTracker provider_package;
     // Do all PreChecks first and fail fast to avoid running expensive script checks when unnecessary.
     for (Workspace& ws : workspaces) {
-        if (!PreChecks(args, ws, mint_txs)) {
+        if (!PreChecks(args, ws, mint_txs, &provider_package)) {
             package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
         }
+        // Earlier package members are not in the mempool yet. Reserve their provider
+        // properties locally so dry runs and submission enforce the same conflict rules.
+        provider_package.Add(*ws.m_ptx, m_active_chainstate.m_chain.Tip());
         // Make the coins created by this transaction available for subsequent transactions in the
         // package to spend. Since we already checked conflicts in the package and we don't allow
         // replacements, we don't need to track the coins spent. Note that this logic will need to be
