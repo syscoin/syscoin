@@ -565,7 +565,7 @@ void FuncTestMempoolReorg(TestChain100Setup& setup)
     // Check mempool as if a new block with tx_reg_ds was connected instead of the old one with tx_reg
     std::vector<CTransactionRef> block_reorg;
     block_reorg.emplace_back(std::make_shared<CTransaction>(tx_reg_ds));
-    testPool.removeForBlock(block_reorg, nHeight + 2);
+    testPool.removeForBlock(block_reorg, nHeight + 2, setup.m_node.chainman->ActiveChain().Tip());
     BOOST_CHECK_EQUAL(testPool.size(), 0U);
 }
 
@@ -619,7 +619,7 @@ void FuncTestMempoolDualProregtx(TestChain100Setup& setup)
 
     testPool.addUnchecked(entry.FromTx(tx_reg1));
     BOOST_CHECK_EQUAL(testPool.size(), 1U);
-    BOOST_CHECK(testPool.existsProviderTxConflict(CTransaction(tx_reg2)));
+    BOOST_CHECK(testPool.existsProviderTxConflict(CTransaction(tx_reg2), setup.m_node.chainman->ActiveChain().Tip()));
 }
 
 void FuncVerifyDB(TestChain100Setup& setup)

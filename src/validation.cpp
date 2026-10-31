@@ -1105,7 +1105,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip(), state, m_active_chainstate.CoinsTip(), true, true))
         return false;
 
-    if (m_pool.existsProviderTxConflict(tx)) {
+    if (m_pool.existsProviderTxConflict(tx, m_active_chainstate.m_chain.Tip())) {
         return state.Invalid(TxValidationResult::TX_CONFLICT, "protx-dup");
     }
     ws.m_ancestors = *ancestors;
@@ -1280,7 +1280,7 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     bool validForFeeEstimation = !bypass_limits && !args.m_package_submission && IsCurrentForFeeEstimation(m_active_chainstate) && m_pool.HasNoInputsOf(tx);
 
     // Store transaction in memory
-    m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation);
+    m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation, m_active_chainstate.m_chain.Tip());
 
     // SYSCOIN
     if(pnevmdatadb)
@@ -3826,7 +3826,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
              Ticks<MillisecondsDouble>(time_chainstate) / num_blocks_total);
     // Remove conflicting transactions from the mempool.;
     if (m_mempool) {
-        m_mempool->removeForBlock(blockConnecting.vtx, pindexNew->nHeight);
+        m_mempool->removeForBlock(blockConnecting.vtx, pindexNew->nHeight, pindexNew->pprev);
         disconnectpool.removeForBlock(blockConnecting.vtx);
     }
     // Update m_chain & related variables.
