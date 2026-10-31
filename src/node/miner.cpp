@@ -367,7 +367,8 @@ bool BlockAssembler::TestMasternodeTransactions(const std::vector<CTxMemPool::tx
             // An earlier candidate revival must not repair a parent-invalid update.
             TxValidationState parent_state;
             if (!CheckSpecialTx(m_chainstate.m_blockman, entry->GetTx(), m_chainstate.m_chain.Tip(),
-                                parent_state, m_chainstate.CoinsTip(), /*fJustCheck=*/true, /*check_sigs=*/true)) {
+                                parent_state, m_chainstate.CoinsTip(), /*fJustCheck=*/true, /*check_sigs=*/true,
+                                &entry->GetProTxBLSCache())) {
                 LogPrint(BCLog::MNLIST, "BlockAssembler: skipping parent-invalid provider package at %s: %s\n", entry->GetTx().GetHash().ToString(), parent_state.ToString());
                 return false;
             }

@@ -8,6 +8,7 @@
 #include <script/sign.h>
 #include <validation.h>
 #include <base58.h>
+#include <consensus/validation.h>
 #include <netbase.h>
 #include <messagesigner.h>
 #include <masternode/masternodepayments.h>
@@ -21,6 +22,7 @@
 
 #include <evo/specialtx.h>
 #include <evo/providertx.h>
+#include <evo/providertx_signaturecache.h>
 #include <evo/deterministicmns.h>
 #include <governance/governance.h>
 #include <governance/governanceclasses.h>
@@ -703,6 +705,278 @@ void FuncVerifyDB(TestChain100Setup& setup)
 }
 BOOST_AUTO_TEST_SUITE(evo_dip3_activation_tests)
 
+BOOST_AUTO_TEST_CASE(protx_bls_cache_binds_complete_authentication_tuple)
+{
+    using Result = CProTxBLSCache::Result;
+    CBLSSecretKey key, other_key;
+    key.MakeNewKey();
+    other_key.MakeNewKey();
+    const auto pubkey = key.GetPublicKey();
+    const auto other_pubkey = other_key.GetPublicKey();
+    const uint256 message = uint256::ONEV;
+    const uint256 other_message = uint256::TWOV;
+
+    for (const bool legacy : {false, true}) {
+        const auto signature = key.Sign(message, legacy);
+        const auto other_signature = other_key.Sign(message, legacy);
+        BOOST_REQUIRE(signature.IsValid());
+        BOOST_REQUIRE(other_signature.IsValid());
+        CProTxBLSCache cache;
+        BOOST_CHECK(cache.GetLastResult() == Result::UNVERIFIED);
+        BOOST_REQUIRE(cache.Verify(signature, pubkey, message, legacy));
+        BOOST_CHECK(cache.GetLastResult() == Result::VERIFIED);
+        for (int i = 0; i < 10; ++i) {
+            BOOST_REQUIRE(cache.Verify(signature, pubkey, message, legacy));
+            BOOST_CHECK(cache.GetLastResult() == Result::CACHED);
+        }
+        BOOST_CHECK(!cache.Verify(CBLSSignature{}, pubkey, message, legacy));
+        BOOST_CHECK(cache.GetLastResult() == Result::INVALID);
+        BOOST_REQUIRE(cache.Verify(signature, pubkey, message, legacy));
+        BOOST_CHECK(cache.GetLastResult() == Result::CACHED);
+        BOOST_CHECK(!cache.Verify(signature, CBLSPublicKey{}, message, legacy));
+        BOOST_CHECK(cache.GetLastResult() == Result::INVALID);
+        BOOST_REQUIRE(cache.Verify(signature, pubkey, message, legacy));
+        BOOST_CHECK(cache.GetLastResult() == Result::CACHED);
+
+        auto reject_changed_tuple = [&](const CBLSSignature& changed_signature,
+                                        const CBLSPublicKey& changed_pubkey,
+                                        const uint256& changed_message, bool changed_legacy) {
+            CProTxBLSCache changed_cache;
+            BOOST_REQUIRE(changed_cache.Verify(signature, pubkey, message, legacy));
+            BOOST_CHECK(!changed_cache.Verify(changed_signature, changed_pubkey, changed_message, changed_legacy));
+            BOOST_CHECK(changed_cache.GetLastResult() == Result::INVALID);
+            // Invalid proofs never become positive cache entries.
+            BOOST_CHECK(!changed_cache.Verify(changed_signature, changed_pubkey, changed_message, changed_legacy));
+            BOOST_CHECK(changed_cache.GetLastResult() == Result::INVALID);
+            BOOST_REQUIRE(changed_cache.Verify(signature, pubkey, message, legacy));
+            BOOST_CHECK(changed_cache.GetLastResult() == Result::CACHED);
+        };
+        reject_changed_tuple(signature, other_pubkey, message, legacy);
+        reject_changed_tuple(signature, pubkey, other_message, legacy);
+        reject_changed_tuple(other_signature, pubkey, message, legacy);
+        reject_changed_tuple(signature, pubkey, message, !legacy);
+
+        CProTxBLSCache unverified;
+        BOOST_CHECK(!unverified.Verify(other_signature, pubkey, message, legacy));
+        BOOST_CHECK(unverified.GetLastResult() == Result::INVALID);
+        BOOST_REQUIRE(unverified.Verify(signature, pubkey, message, legacy));
+        BOOST_CHECK(unverified.GetLastResult() == Result::VERIFIED);
+        const auto new_signature = key.Sign(other_message, legacy);
+        BOOST_REQUIRE(unverified.Verify(new_signature, pubkey, other_message, legacy));
+        BOOST_CHECK(unverified.GetLastResult() == Result::VERIFIED);
+        BOOST_REQUIRE(unverified.Verify(new_signature, pubkey, other_message, legacy));
+        BOOST_CHECK(unverified.GetLastResult() == Result::CACHED);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(protx_bls_cache_reused_by_forward_cleanup)
+{
+    using Result = CProTxBLSCache::Result;
+    TestChainDIP3V19Setup setup;
+    auto& chainman = *setup.m_node.chainman;
+    auto& pool = *setup.m_node.mempool;
+    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
+    const CScript payout = GetScriptForDestination(WitnessV0KeyHash(setup.coinbaseKey.GetPubKey()));
+    const CScript coinbase_script = GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey());
+    CKey owner_key;
+    CBLSSecretKey operator_key;
+    const auto registration = CreateProRegTx(setup.m_node, utxos, 1, payout,
+        setup.coinbaseKey, owner_key, operator_key);
+    setup.CreateAndProcessBlock({registration}, coinbase_script);
+    const uint256 target = registration.GetHash();
+    BOOST_REQUIRE(deterministicMNManager->GetListAtChainTip().HasMN(target));
+
+    auto mine_fee_paying = [&](const CMutableTransaction& tx) {
+        // The generic helper appends transactions after calculating a zero-fee
+        // coinbase. Recalculate exact payments for this selected transaction.
+        auto block_template = node::BlockAssembler{chainman.ActiveChainstate(), nullptr}.CreateNewBlock(coinbase_script);
+        BOOST_REQUIRE(block_template != nullptr);
+        CBlock block = block_template->block;
+        {
+            LOCK(cs_main);
+            CAmount fee = -CTransaction(tx).GetValueOut();
+            for (const auto& input : tx.vin) {
+                const auto& coin = chainman.ActiveChainstate().CoinsTip().AccessCoin(input.prevout);
+                BOOST_REQUIRE(!coin.IsSpent());
+                fee += coin.out.nValue;
+            }
+            const int height = chainman.ActiveHeight() + 1;
+            const CAmount reward = GetBlockSubsidy(height, chainman.GetConsensus());
+            CMutableTransaction coinbase{*block.vtx.front()};
+            const int witness_index = GetWitnessCommitmentIndex(block);
+            BOOST_REQUIRE(witness_index >= 0);
+            const CTxOut witness_commitment = coinbase.vout.at(witness_index);
+            coinbase.vout.resize(1);
+            coinbase.vout.front().nValue = reward + fee;
+            std::vector<CTxOut> mn_payments, superblock_payments;
+            FillBlockPayments(chainman.ActiveChain(), coinbase, height, reward, fee, mn_payments, superblock_payments);
+            coinbase.vout.push_back(witness_commitment);
+            block.vtx.front() = MakeTransactionRef(coinbase);
+            block.vtx.push_back(MakeTransactionRef(tx));
+            node::RegenerateCommitments(block, chainman, block_template->vchCoinbaseCommitmentExtra);
+        }
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus())) ++block.nNonce;
+        BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(block), true, true, nullptr));
+        return block;
+    };
+    auto make_service = [&](int port, const CBLSSecretKey& key) {
+        auto tx = CreateProUpServTx(setup.m_node, utxos, target, key, port, setup.coinbaseKey);
+        tx.vout.front().nValue -= 10000;
+        SignTransaction(setup.m_node, tx, setup.coinbaseKey);
+        return tx;
+    };
+    std::vector<CMutableTransaction> pending;
+    for (int i = 0; i < 8; ++i) pending.push_back(make_service(100 + i, operator_key));
+    pending.push_back(CreateProUpRevTx(setup.m_node, utxos, target, operator_key, setup.coinbaseKey));
+    pending.back().vout.front().nValue -= 10000;
+    SignTransaction(setup.m_node, pending.back(), setup.coinbaseKey);
+    std::set<COutPoint> fee_inputs;
+    for (const auto& tx : pending) {
+        for (const auto& input : tx.vin) BOOST_REQUIRE(fee_inputs.insert(input.prevout).second);
+    }
+
+    {
+        // Unchecked insertion and signature-skipping validation must not mint
+        // evidence that the BLS signature was actually authenticated.
+        CTxMemPool unchecked_pool{MemPoolOptionsForTest(setup.m_node)};
+        TestMemPoolEntryHelper entry;
+        LOCK2(cs_main, unchecked_pool.cs);
+        unchecked_pool.addUnchecked(entry.FromTx(pending.front()));
+        const auto it = unchecked_pool.GetIter(pending.front().GetHash());
+        BOOST_REQUIRE(it.has_value());
+        auto& cache = (*it)->GetProTxBLSCache();
+        BOOST_CHECK(cache.GetLastResult() == Result::UNVERIFIED);
+        TxValidationState state;
+        BOOST_REQUIRE(CheckSpecialTx(chainman.m_blockman, CTransaction(pending.front()), chainman.ActiveTip(),
+            state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/true, /*check_sigs=*/false, &cache));
+        BOOST_CHECK(cache.GetLastResult() == Result::UNVERIFIED);
+    }
+
+    {
+        LOCK2(cs_main, pool.cs);
+        for (const auto& tx : pending) {
+            const auto result = chainman.ProcessTransaction(MakeTransactionRef(tx));
+            BOOST_REQUIRE_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                result.m_state.ToString());
+            const auto it = pool.GetIter(tx.GetHash());
+            BOOST_REQUIRE(it.has_value());
+            BOOST_CHECK_EQUAL((*it)->GetCountWithAncestors(), 1U);
+            BOOST_CHECK((*it)->GetProTxBLSCache().GetLastResult() == Result::VERIFIED);
+        }
+    }
+
+    for (int port : {200, 201}) {
+        const auto confirmed = make_service(port, operator_key);
+        for (const auto& input : confirmed.vin) BOOST_REQUIRE(fee_inputs.insert(input.prevout).second);
+        {
+            LOCK(cs_main);
+            const auto result = chainman.ProcessTransaction(MakeTransactionRef(confirmed));
+            BOOST_REQUIRE_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                result.m_state.ToString());
+        }
+        const auto block = mine_fee_paying(confirmed);
+        BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.ActiveTip()->GetBlockHash()) == block.GetHash());
+        const auto mn = deterministicMNManager->GetListAtChainTip().GetMN(target);
+        BOOST_REQUIRE(mn != nullptr);
+        BOOST_CHECK_EQUAL(mn->pdmnState->addr.GetPort(), port);
+        LOCK(pool.cs);
+        BOOST_CHECK_EQUAL(pool.size(), pending.size());
+        for (const auto& tx : pending) {
+            const auto it = pool.GetIter(tx.GetHash());
+            BOOST_REQUIRE(it.has_value());
+            // VERIFIED would mean redundant pairing; UNVERIFIED would mean
+            // admission or cleanup failed to propagate authentication evidence.
+            BOOST_CHECK((*it)->GetProTxBLSCache().GetLastResult() == Result::CACHED);
+        }
+    }
+
+    CProTxBLSCache old_authentication;
+    {
+        LOCK(pool.cs);
+        const auto it = pool.GetIter(pending.front().GetHash());
+        BOOST_REQUIRE(it.has_value());
+        old_authentication = (*it)->GetProTxBLSCache();
+    }
+    CBLSSecretKey new_operator_key;
+    new_operator_key.MakeNewKey();
+    auto rotation = CreateProUpRegTx(setup.m_node, utxos, target, owner_key,
+        new_operator_key.GetPublicKey(), owner_key.GetPubKey().GetID(), payout, setup.coinbaseKey);
+    rotation.vout.front().nValue -= 10000;
+    SignTransaction(setup.m_node, rotation, setup.coinbaseKey);
+    const auto rotation_block = mine_fee_paying(rotation);
+    BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.ActiveTip()->GetBlockHash()) == rotation_block.GetHash());
+    {
+        LOCK2(cs_main, pool.cs);
+        BOOST_CHECK_EQUAL(pool.size(), 0U);
+        TxValidationState state;
+        BOOST_CHECK(!CheckSpecialTx(chainman.m_blockman, CTransaction(pending.front()), chainman.ActiveTip(),
+            state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/true, /*check_sigs=*/true, &old_authentication));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-protx-bls-sig");
+        BOOST_CHECK(old_authentication.GetLastResult() == Result::INVALID);
+    }
+    const auto fresh = make_service(202, new_operator_key);
+    CProTxBLSCache positive_bls_cache;
+    {
+        LOCK2(cs_main, pool.cs);
+        const auto result = chainman.ProcessTransaction(MakeTransactionRef(fresh));
+        BOOST_REQUIRE_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+            result.m_state.ToString());
+        const auto it = pool.GetIter(fresh.GetHash());
+        BOOST_REQUIRE(it.has_value());
+        positive_bls_cache = (*it)->GetProTxBLSCache();
+        BOOST_REQUIRE(positive_bls_cache.GetLastResult() == Result::VERIFIED);
+    }
+
+    // Registrar authorization belongs to the owner, regardless of any valid
+    // operator-signature memo supplied by the caller.
+    CKey wrong_owner;
+    wrong_owner.MakeNewKey(true);
+    const auto bad_registrar = CreateProUpRegTx(setup.m_node, utxos, target, wrong_owner,
+        new_operator_key.GetPublicKey(), owner_key.GetPubKey().GetID(), payout, setup.coinbaseKey);
+    {
+        LOCK(cs_main);
+        TxValidationState state;
+        BOOST_CHECK(!CheckSpecialTx(chainman.m_blockman, CTransaction(bad_registrar), chainman.ActiveTip(),
+            state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/true, /*check_sigs=*/true,
+            &positive_bls_cache));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-protx-hash-sig");
+        BOOST_CHECK(positive_bls_cache.GetLastResult() == Result::VERIFIED);
+    }
+
+    // Roll back the authorizing key while its service update and positive
+    // proof are still pending. Adjacent-list assumptions cannot authenticate
+    // this transaction against the restored old operator.
+    CBlockIndex* rotation_index;
+    {
+        LOCK(cs_main);
+        rotation_index = chainman.m_blockman.LookupBlockIndex(rotation_block.GetHash());
+        BOOST_REQUIRE(rotation_index != nullptr);
+    }
+    BlockValidationState disconnect_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(disconnect_state, rotation_index));
+    BlockValidationState activate_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(activate_state));
+    {
+        LOCK2(cs_main, pool.cs);
+        BOOST_CHECK(chainman.ActiveTip() == rotation_index->pprev);
+        const auto restored = deterministicMNManager->GetListForBlock(chainman.ActiveTip()).GetMN(target);
+        BOOST_REQUIRE(restored != nullptr);
+        BOOST_CHECK(restored->pdmnState->pubKeyOperator.Get() == operator_key.GetPublicKey());
+        BOOST_CHECK(!pool.exists(GenTxid::Txid(fresh.GetHash())));
+        TxValidationState changed_key_state;
+        BOOST_CHECK(!CheckSpecialTx(chainman.m_blockman, CTransaction(fresh), chainman.ActiveTip(),
+            changed_key_state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/true,
+            /*check_sigs=*/true, &positive_bls_cache));
+        BOOST_CHECK_EQUAL(changed_key_state.GetRejectReason(), "bad-protx-bls-sig");
+        BOOST_CHECK(positive_bls_cache.GetLastResult() == Result::INVALID);
+        TxValidationState restored_key_state;
+        BOOST_REQUIRE(CheckSpecialTx(chainman.m_blockman, CTransaction(pending.front()), chainman.ActiveTip(),
+            restored_key_state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/true,
+            /*check_sigs=*/true, &old_authentication));
+        BOOST_CHECK(old_authentication.GetLastResult() == Result::CACHED);
+    }
+}
+
 // DIP3 can only be activated with legacy scheme (v19 is activated later)
 BOOST_AUTO_TEST_CASE(dip3_activation_legacy)
 {
@@ -1041,6 +1315,7 @@ static void TestQuorumPoSeBanMempool(QuorumPoSeMempoolTest test)
     SignTransaction(setup.m_node, ordinary_tx, setup.coinbaseKey);
     std::optional<CTxMemPoolEntry> original_service_entry;
     std::optional<CMutableTransaction> service_child;
+    CProTxBLSCache service_authentication;
     {
         LOCK(cs_main);
         const auto service_result = chainman.ProcessTransaction(MakeTransactionRef(service_update));
@@ -1048,6 +1323,13 @@ static void TestQuorumPoSeBanMempool(QuorumPoSeMempoolTest test)
             service_result.m_state.ToString());
         BOOST_REQUIRE(service_result.m_base_fees.has_value());
         BOOST_CHECK_EQUAL(*service_result.m_base_fees, stale_fee);
+        {
+            LOCK(pool.cs);
+            const auto entry = pool.GetIter(service_update.GetHash());
+            BOOST_REQUIRE(entry.has_value());
+            service_authentication = (*entry)->GetProTxBLSCache();
+            BOOST_REQUIRE(service_authentication.GetLastResult() == CProTxBLSCache::Result::VERIFIED);
+        }
         if (test == QuorumPoSeMempoolTest::RESTORED_POOL) {
             LOCK(pool.cs);
             const auto service_entry = pool.GetIter(service_update.GetHash());
@@ -1127,6 +1409,14 @@ static void TestQuorumPoSeBanMempool(QuorumPoSeMempoolTest test)
     BOOST_REQUIRE(target_mn != nullptr);
     BOOST_CHECK(target_mn->pdmnState->IsBanned());
     BOOST_CHECK(target_mn->pdmnState->vchNEVMAddress.empty());
+    {
+        LOCK(cs_main);
+        TxValidationState cached_state;
+        BOOST_CHECK(!CheckSpecialTx(chainman.m_blockman, CTransaction(service_update), chainman.ActiveTip(),
+            cached_state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/true, /*check_sigs=*/true,
+            &service_authentication));
+        BOOST_CHECK_EQUAL(cached_state.GetRejectReason(), "bad-protx-banned-nevm-address");
+    }
 
     const bool stale_evicted = !pool.exists(GenTxid::Txid(service_update.GetHash()));
     const bool stale_child_evicted = !service_child || !pool.exists(GenTxid::Txid(service_child->GetHash()));

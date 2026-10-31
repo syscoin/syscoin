@@ -8,6 +8,7 @@
 #include <consensus/amount.h>
 #include <consensus/validation.h>
 #include <core_memusage.h>
+#include <evo/providertx_signaturecache.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <primitives/transaction.h>
@@ -84,6 +85,8 @@ private:
     const int64_t sigOpCost;        //!< Total sigop cost
     CAmount m_modified_fee;         //!< Used for determining the priority of the transaction for mining in a block
     LockPoints lockPoints;          //!< Track the height and time at which tx was final
+    // SYSCOIN: A positive cryptographic result, never a cached provider-validity decision.
+    mutable CProTxBLSCache m_protx_bls_cache;
 
     // Information about descendants of this transaction that are in the
     // mempool; if we remove this transaction we must remove all of these
@@ -124,6 +127,7 @@ public:
 
     const CTransaction& GetTx() const { return *this->tx; }
     CTransactionRef GetSharedTx() const { return this->tx; }
+    CProTxBLSCache& GetProTxBLSCache() const { return m_protx_bls_cache; }
     const CAmount& GetFee() const { return nFee; }
     int32_t GetTxSize() const
     {

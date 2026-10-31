@@ -387,7 +387,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
     for (const auto& entry : m_mempool->mapTx) {
         TxValidationState state;
         if (!CheckSpecialTx(m_blockman, entry.GetTx(), m_chain.Tip(), state, CoinsTip(),
-                            /*fJustCheck=*/true, /*check_sigs=*/true)) {
+                            /*fJustCheck=*/true, /*check_sigs=*/true, &entry.GetProTxBLSCache())) {
             invalid_provider_txs.push_back(entry.GetSharedTx());
         }
     }
@@ -1124,7 +1124,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     // check special TXs after all the other checks. If we'd do this before the other checks, we might end up
     // DoS scoring a node for non-critical errors, e.g. duplicate keys because a TX is received that was already
     // mined
-    if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip(), state, m_active_chainstate.CoinsTip(), true, true))
+    if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip(), state, m_active_chainstate.CoinsTip(),
+                        /*fJustCheck=*/true, /*check_sigs=*/true, &entry->GetProTxBLSCache()))
         return false;
 
     // SYSCOIN: Enforce provider conflicts against the mempool and package members.

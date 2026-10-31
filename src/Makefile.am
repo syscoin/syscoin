@@ -140,6 +140,7 @@ SYSCOIN_CORE_H = \
   evo/mnauth.h \
   evo/dmnstate.h \
   evo/providertx.h \
+  evo/providertx_signaturecache.h \
   evo/specialtx.h \
   masternode/activemasternode.h \
   masternode/masternodemeta.h \

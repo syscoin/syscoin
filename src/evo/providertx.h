@@ -18,6 +18,7 @@
 #include <kernel/cs_main.h>
 class CBlockIndex;
 class CCoinsViewCache;
+class CProTxBLSCache;
 class CProRegTx
 {
 public:
@@ -296,8 +297,10 @@ public:
 
 
 bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs,
+                      CProTxBLSCache* signature_cache = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs,
+                     CProTxBLSCache* signature_cache = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 #endif // SYSCOIN_EVO_PROVIDERTX_H

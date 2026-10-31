@@ -1009,7 +1009,7 @@ void CTxMemPool::removeInvalidProTxReferencesForBlock(node::BlockManager& blockm
         const auto tx = it->GetSharedTx();
         TxValidationState state;
         if (!CheckSpecialTx(blockman, *tx, pindexNew, state, coins,
-                            /*fJustCheck=*/true, /*check_sigs=*/true)) {
+                            /*fJustCheck=*/true, /*check_sigs=*/true, &it->GetProTxBLSCache())) {
             removeRecursive(*tx, MemPoolRemovalReason::CONFLICT);
         } else {
             UpdateProviderTxKeyMetadata(*it, new_list);

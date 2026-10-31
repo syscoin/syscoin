@@ -15,6 +15,7 @@ class uint256;
 class TxValidationState;
 class BlockValidationState;
 class CCoinsViewCache;
+class CProTxBLSCache;
 class ChainstateManager;
 class CDeterministicMNListNEVMAddressDiff;
 namespace llmq {
@@ -23,7 +24,8 @@ class CBTCCheckpointSig;
 namespace node {
 class BlockManager;
 }
-bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+bool CheckSpecialTx(node::BlockManager &blockman, const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, CCoinsViewCache& view, bool fJustCheck, bool check_sigs,
+                    CProTxBLSCache* signature_cache = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool ProcessSpecialTxsInBlock(ChainstateManager &chainman, const CBlock& block, const CBlockIndex* pindex, BlockValidationState& state, CDeterministicMNListNEVMAddressDiff &diff, CCoinsViewCache& view, bool fJustCheck, bool check_sigs, bool ibd) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, CDeterministicMNListNEVMAddressDiff& diffNEVM, bool bUpdateSpecialTxState, bool bReplay) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
