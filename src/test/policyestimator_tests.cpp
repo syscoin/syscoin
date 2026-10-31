@@ -76,6 +76,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
                 txHashes[9-h].pop_back();
             }
         }
+        // SYSCOIN: Fee-estimator tests have no masternode parent context.
         mpool.removeForBlock(block, ++blocknum, /*pindexPrev=*/nullptr);
         block.clear();
         // Check after just a few txs that combining buckets works as expected
@@ -115,6 +116,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     // Mine 50 more blocks with no transactions happening, estimates shouldn't change
     // We haven't decayed the moving average enough so we still have enough data points in every bucket
     while (blocknum < 250)
+        // SYSCOIN: Fee-estimator tests have no masternode parent context.
         mpool.removeForBlock(block, ++blocknum, /*pindexPrev=*/nullptr);
 
     BOOST_CHECK(feeEst.estimateFee(1) == CFeeRate(0));
@@ -135,6 +137,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
                 txHashes[j].push_back(hash);
             }
         }
+        // SYSCOIN: Fee-estimator tests have no masternode parent context.
         mpool.removeForBlock(block, ++blocknum, /*pindexPrev=*/nullptr);
     }
 
@@ -152,6 +155,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
             txHashes[j].pop_back();
         }
     }
+    // SYSCOIN: Fee-estimator tests have no masternode parent context.
     mpool.removeForBlock(block, 266, /*pindexPrev=*/nullptr);
     block.clear();
     BOOST_CHECK(feeEst.estimateFee(1) == CFeeRate(0));
@@ -173,6 +177,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
 
             }
         }
+        // SYSCOIN: Fee-estimator tests have no masternode parent context.
         mpool.removeForBlock(block, ++blocknum, /*pindexPrev=*/nullptr);
         block.clear();
     }

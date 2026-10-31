@@ -36,6 +36,7 @@
 #include <bls/bls.h>
 class CBlockIndex;
 class CChain;
+// SYSCOIN: Provider list used by mempool conflict checks.
 class CDeterministicMNList;
 class Chainstate;
 
@@ -414,7 +415,7 @@ public:
 
     using Limits = kernel::MemPoolLimits;
 
-    /** Attempt-local provider indexes for transactions checked but not yet inserted. */
+    // SYSCOIN: Attempt-local provider indexes for transactions checked but not yet inserted.
     struct ProviderTxConflictTracker {
         std::set<CService> addresses;
         std::set<std::vector<unsigned char>> nevm_addresses;
@@ -428,6 +429,7 @@ public:
         /** Mirror the provider indexes populated by addUnchecked, after validation succeeds. */
         void Add(const CTransaction& tx, const CBlockIndex* pindexTip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     };
+    // END SYSCOIN
 
     uint64_t CalculateDescendantMaximum(txiter entry) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 private:
@@ -510,6 +512,7 @@ public:
     // and any other callers may break wallet's in-mempool tracking (due to
     // lack of CValidationInterface::TransactionAddedToMempool callbacks).
     void addUnchecked(const CTxMemPoolEntry& entry, bool validFeeEstimate = true) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    // SYSCOIN: Supply the admission tip for provider-index maintenance during reorg replay.
     void addUnchecked(const CTxMemPoolEntry& entry, setEntries& setAncestors, bool validFeeEstimate = true, const CBlockIndex* pindexTip = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeRecursive(const CTransaction& tx, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
     // SYSCOIN

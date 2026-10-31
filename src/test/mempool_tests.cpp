@@ -428,6 +428,7 @@ BOOST_AUTO_TEST_CASE(MempoolAncestorIndexingTest)
     /* after tx6 is mined, tx7 should move up in the sort */
     std::vector<CTransactionRef> vtx;
     vtx.push_back(MakeTransactionRef(tx6));
+    // SYSCOIN: Generic mempool tests have no masternode parent context.
     pool.removeForBlock(vtx, 1, /*pindexPrev=*/nullptr);
 
     sortedOrder.erase(sortedOrder.begin()+1);
@@ -588,6 +589,7 @@ BOOST_AUTO_TEST_CASE(MempoolSizeLimitTest)
     SetMockTime(42 + CTxMemPool::ROLLING_FEE_HALFLIFE);
     BOOST_CHECK_EQUAL(pool.GetMinFee(1).GetFeePerK(), maxFeeRateRemoved.GetFeePerK() + 1000);
     // ... we should keep the same min fee until we get a block
+    // SYSCOIN: Generic mempool tests have no masternode parent context.
     pool.removeForBlock(vtx, 1, /*pindexPrev=*/nullptr);
     SetMockTime(42 + 2*CTxMemPool::ROLLING_FEE_HALFLIFE);
     BOOST_CHECK_EQUAL(pool.GetMinFee(1).GetFeePerK(), llround((maxFeeRateRemoved.GetFeePerK() + 1000)/2.0));

@@ -440,6 +440,7 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 {
     nTransactionsUpdated += n;
 }
+// SYSCOIN: Use the actual admission tip for provider-index maintenance.
 void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate, const CBlockIndex* pindexTip)
 {
     // Add to memory pool without checking anything.
@@ -929,6 +930,7 @@ void CTxMemPool::removeProTxCollateralConflicts(const CTransaction &tx, const CO
     }
 }
 
+// SYSCOIN: Remove all transactions referencing a replaced or spent masternode.
 void CTxMemPool::removeProTxReferences(uint256 proTxHash)
 {
     AssertLockHeld(cs_main);
@@ -1059,11 +1061,12 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx, const CDeterminist
 /**
  * Called when a block is connected. Removes from mempool and updates the miner fee estimator.
  */
+// SYSCOIN: Supply the connected block's parent for provider-conflict cleanup.
 void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight, const CBlockIndex* pindexPrev)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
-    // The manager's published tip can still refer to the old branch while a
+    // SYSCOIN: The manager's published tip can still refer to the old branch while a
     // reorg connects several blocks. Null is only for genesis/no-MN test context.
     const auto mnList = pindexPrev ? deterministicMNManager->GetListForBlock(pindexPrev) : CDeterministicMNList{};
     std::vector<const CTxMemPoolEntry*> entries;

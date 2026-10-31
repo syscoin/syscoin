@@ -716,6 +716,7 @@ private:
     // Looks up inputs, calculates feerate, considers replacement, evaluates
     // package limits, etc. As this function can be invoked for "free" by a peer,
     // only tests that are fast should be done here (to avoid CPU DoS).
+    // SYSCOIN: Include provider reservations from earlier package members.
     bool PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs,
                    const CTxMemPool::ProviderTxConflictTracker* provider_package = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
@@ -779,6 +780,7 @@ private:
     bool m_rbf{false};
 };
 
+// SYSCOIN: Include provider reservations from earlier package members.
 bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs,
                             const CTxMemPool::ProviderTxConflictTracker* provider_package)
 {
@@ -1107,6 +1109,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     if (!CheckSpecialTx(m_active_chainstate.m_blockman, tx, m_active_chainstate.m_chain.Tip(), state, m_active_chainstate.CoinsTip(), true, true))
         return false;
 
+    // SYSCOIN: Enforce provider conflicts against the mempool and package members.
     if (m_pool.existsProviderTxConflict(tx, m_active_chainstate.m_chain.Tip(), provider_package)) {
         return state.Invalid(TxValidationResult::TX_CONFLICT, "protx-dup");
     }
@@ -1282,6 +1285,7 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     bool validForFeeEstimation = !bypass_limits && !args.m_package_submission && IsCurrentForFeeEstimation(m_active_chainstate) && m_pool.HasNoInputsOf(tx);
 
     // Store transaction in memory
+    // SYSCOIN: Keep provider indexes tied to this transaction's validated chain context.
     m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation, m_active_chainstate.m_chain.Tip());
 
     // SYSCOIN
@@ -1427,16 +1431,18 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
 
     // Each attempt owns its reservations; failed subpackages may be retried with different fees.
     NEVMMintTxSet mint_txs;
+    // SYSCOIN: Reserve provider properties without inserting transactions into the mempool.
     CTxMemPool::ProviderTxConflictTracker provider_package;
     // Do all PreChecks first and fail fast to avoid running expensive script checks when unnecessary.
     for (Workspace& ws : workspaces) {
+        // SYSCOIN: Validate against provider properties of earlier package members.
         if (!PreChecks(args, ws, mint_txs, &provider_package)) {
             package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
             return PackageMempoolAcceptResult(package_state, std::move(results));
         }
-        // Earlier package members are not in the mempool yet. Reserve their provider
+        // SYSCOIN: Earlier package members are not in the mempool yet. Reserve their provider
         // properties locally so dry runs and submission enforce the same conflict rules.
         provider_package.Add(*ws.m_ptx, m_active_chainstate.m_chain.Tip());
         // Make the coins created by this transaction available for subsequent transactions in the
@@ -3832,6 +3838,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
              Ticks<MillisecondsDouble>(time_chainstate) / num_blocks_total);
     // Remove conflicting transactions from the mempool.;
     if (m_mempool) {
+        // SYSCOIN: Use this block's parent even while the manager still points to the old branch.
         m_mempool->removeForBlock(blockConnecting.vtx, pindexNew->nHeight, pindexNew->pprev);
         disconnectpool.removeForBlock(blockConnecting.vtx);
     }

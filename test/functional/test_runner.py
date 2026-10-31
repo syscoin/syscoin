@@ -166,6 +166,7 @@ BASE_SCRIPTS = [
     'feature_llmqconnections.py --descriptors',
     'feature_llmqdkgerrors.py --descriptors',
     'feature_deterministicmns.py --descriptors',
+    # SYSCOIN: Provider-transaction admission, replay, and package regressions.
     'feature_protx_conflicts.py --descriptors',
     'feature_protx_packages.py --descriptors',
     'feature_nevm_data.py --descriptors',
