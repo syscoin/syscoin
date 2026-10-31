@@ -172,6 +172,7 @@ BASE_SCRIPTS = [
     'feature_protx_collateral_spend.py --descriptors',
     'feature_protx_mining.py --descriptors',
     'feature_protx_reorg.py --descriptors',
+    'feature_protx_reorg_keys.py --descriptors',
     'feature_nevm_data.py --descriptors',
     'feature_nevm_connect_after_consensus.py --descriptors',
     'rpc_signer.py',

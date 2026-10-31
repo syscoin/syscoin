@@ -440,6 +440,34 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 {
     nTransactionsUpdated += n;
 }
+// SYSCOIN: These fields describe the chain context in which an update is valid.
+static void UpdateProviderTxKeyMetadata(const CTxMemPoolEntry& entry, const CDeterministicMNList& mnList)
+{
+    const auto& tx = entry.GetTx();
+    if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR && tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+        return;
+    }
+    entry.validForProTxKey.SetNull();
+    entry.isKeyChangeProTx = false;
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
+        CProUpRegTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            if (const auto dmn = mnList.GetMN(proTx.proTxHash)) {
+                entry.validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
+                entry.isKeyChangeProTx = dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator;
+            }
+        }
+    } else {
+        CProUpRevTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            if (const auto dmn = mnList.GetMN(proTx.proTxHash)) {
+                entry.validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
+                entry.isKeyChangeProTx = dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey();
+            }
+        }
+    }
+}
+
 // SYSCOIN: Use the actual admission tip for provider-index maintenance.
 void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate, const CBlockIndex* pindexTip)
 {
@@ -525,30 +553,18 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
             mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx_hash);
-            // ATMP supplies its actual tip, including during reorg replay.
-            // Direct test insertions retain the existing manager-tip fallback.
-            const auto mnList = pindexTip ? deterministicMNManager->GetListForBlock(pindexTip) : deterministicMNManager->GetListAtChainTip();
-            auto dmn = mnList.GetMN(proTx.proTxHash);
-            if(dmn) {
-                newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
-                if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
-                    newit->isKeyChangeProTx = true;
-                }
-            }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
-            const auto mnList = pindexTip ? deterministicMNManager->GetListForBlock(pindexTip) : deterministicMNManager->GetListAtChainTip();
-            auto dmn = mnList.GetMN(proTx.proTxHash);
-            if(dmn) {
-                newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
-                if (dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey()) {
-                    newit->isKeyChangeProTx = true;
-                }
-            }
         }
+    }
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR || tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+        // ATMP supplies its actual tip, including during reorg replay.
+        // Direct test insertions retain the existing manager-tip fallback.
+        const auto mnList = pindexTip ? deterministicMNManager->GetListForBlock(pindexTip) : deterministicMNManager->GetListAtChainTip();
+        UpdateProviderTxKeyMetadata(*newit, mnList);
     }
 
     // Only admitted transactions own global mint reservations. Validation attempts use local sets.
@@ -1389,6 +1405,17 @@ void CTxMemPool::ProviderTxConflictTracker::Add(const CTransaction& tx, const CB
     }
     for (const auto& txin : tx.vin) {
         spent_outpoints.insert(txin.prevout);
+    }
+}
+
+void CTxMemPool::RefreshProviderTxKeyMetadata(const CBlockIndex* pindexTip)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+    assert(pindexTip != nullptr);
+    const auto mnList = deterministicMNManager->GetListForBlock(pindexTip);
+    for (const auto& entry : mapTx) {
+        UpdateProviderTxKeyMetadata(entry, mnList);
     }
 }
 

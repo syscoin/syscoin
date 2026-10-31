@@ -394,6 +394,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
     for (const auto& tx : invalid_provider_txs) {
         m_mempool->removeRecursive(*tx, MemPoolRemovalReason::REORG);
     }
+    m_mempool->RefreshProviderTxKeyMetadata(m_chain.Tip());
 
     std::vector<uint256> vHashUpdate;
     {

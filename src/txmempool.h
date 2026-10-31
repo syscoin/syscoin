@@ -752,6 +752,8 @@ public:
     // SYSCOIN
     bool existsProviderTxConflict(const CTransaction &tx, const CBlockIndex* pindexTip,
                                   const ProviderTxConflictTracker* package = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    /** Refresh surviving registrar/revoke metadata after a change to the active tip. */
+    void RefreshProviderTxKeyMetadata(const CBlockIndex* pindexTip) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     size_t DynamicMemoryUsage() const;
 
     /** Adds a transaction to the unbroadcast set */
