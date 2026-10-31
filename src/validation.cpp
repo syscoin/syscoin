@@ -3862,6 +3862,11 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     }
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
+    // SYSCOIN: A forward quorum ban can invalidate independently funded updates.
+    // Use this resulting tip, before publishing it, to release their reservations.
+    if (m_mempool) {
+        m_mempool->removeInvalidProTxReferencesForBlock(m_blockman, pindexNew, CoinsTip());
+    }
     UpdateTip(pindexNew);
 
     const auto time_6{SteadyClock::now()};

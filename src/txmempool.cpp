@@ -969,6 +969,54 @@ void CTxMemPool::removeProTxReferences(uint256 proTxHash)
     }
 }
 
+// SYSCOIN: Forward state changes can invalidate updates without spending their
+// inputs. Visit only referenced MNs, then release stale reservations recursively.
+void CTxMemPool::removeInvalidProTxReferencesForBlock(node::BlockManager& blockman, const CBlockIndex* pindexNew, CCoinsViewCache& coins)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+    assert(pindexNew != nullptr);
+    if (!pindexNew->pprev || mapProTxRefs.empty()) return;
+
+    const auto old_list = deterministicMNManager->GetListForBlock(pindexNew->pprev);
+    const auto new_list = deterministicMNManager->GetListForBlock(pindexNew);
+    std::set<uint256> affected_transactions;
+    for (auto first = mapProTxRefs.begin(); first != mapProTxRefs.end();) {
+        const auto last = mapProTxRefs.upper_bound(first->first);
+        const auto old_mn = old_list.GetMN(first->first);
+        const auto new_mn = new_list.GetMN(first->first);
+        bool changed = old_mn != new_mn;
+        if (old_mn && new_mn && old_mn->pdmnState != new_mn->pdmnState) {
+            const CDeterministicMNStateDiff state_diff(*old_mn->pdmnState, *new_mn->pdmnState);
+            // Payment selection and penalty decay alone cannot change provider validity.
+            constexpr uint32_t ignored_fields = CDeterministicMNStateDiff::Field_nLastPaidHeight |
+                                                CDeterministicMNStateDiff::Field_nPoSePenalty;
+            changed = (state_diff.fields & ~ignored_fields) != 0 ||
+                      old_mn->collateralOutpoint != new_mn->collateralOutpoint ||
+                      old_mn->nOperatorReward != new_mn->nOperatorReward;
+        }
+        if (changed) {
+            for (auto it = first; it != last; ++it) affected_transactions.insert(it->second);
+        }
+        first = last;
+    }
+
+    // Own txids before removing anything: recursive removal erases references
+    // and can remove another transaction that was selected above.
+    for (const auto& txid : affected_transactions) {
+        const auto it = mapTx.find(txid);
+        if (it == mapTx.end()) continue;
+        const auto tx = it->GetSharedTx();
+        TxValidationState state;
+        if (!CheckSpecialTx(blockman, *tx, pindexNew, state, coins,
+                            /*fJustCheck=*/true, /*check_sigs=*/true)) {
+            removeRecursive(*tx, MemPoolRemovalReason::CONFLICT);
+        } else {
+            UpdateProviderTxKeyMetadata(*it, new_list);
+        }
+    }
+}
+
 void CTxMemPool::removeProTxSpentCollateralConflicts(const CTransaction &tx, const CDeterministicMNList& mnList)
 {
     AssertLockHeld(cs_main);

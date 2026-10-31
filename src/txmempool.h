@@ -39,6 +39,7 @@ class CChain;
 // SYSCOIN: Provider list used by mempool conflict checks.
 class CDeterministicMNList;
 class Chainstate;
+namespace node { class BlockManager; }
 
 #include <atomic>
 #include <map>
@@ -521,6 +522,8 @@ public:
     void removeProTxPubKeyConflicts(const CTransaction &tx, const CBLSLazyPublicKey &pubKey) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxCollateralConflicts(const CTransaction &tx, const COutPoint &collateralOutpoint) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxReferences(uint256 proTxHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    // SYSCOIN: Revalidate references affected by a successfully connected block.
+    void removeInvalidProTxReferencesForBlock(node::BlockManager& blockman, const CBlockIndex* pindexNew, CCoinsViewCache& coins) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxSpentCollateralConflicts(const CTransaction &tx, const CDeterministicMNList& mnList) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxKeyChangedConflicts(const CTransaction &tx, const uint256& proTxHash, const uint256& newKeyHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxConflicts(const CTransaction &tx, const CDeterministicMNList& mnList) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
