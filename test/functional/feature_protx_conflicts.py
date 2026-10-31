@@ -169,10 +169,10 @@ class ProTxConflictTest(DIP3Test):
         self.generate(node, 1)
         self.restart_wallet(broadcast=True)
 
-    def check_reorg_replay(self):
+    def check_reorg_replay(self, kind):
         node = self.nodes[0]
         old, replacement_raw = self.prepare_replacement()
-        update_id = self.submit_update(old, 'service')
+        update_id = self.submit_update(old, kind)
         update_raw = node.getrawtransaction(update_id)
         replacement_id = node.decoderawtransaction(replacement_raw)['txid']
         self.restart_without_mempool()
@@ -191,10 +191,10 @@ class ProTxConflictTest(DIP3Test):
         assert_equal(node.getrawmempool(), [])
         self.restart_wallet(broadcast=True)
 
-    def check_longer_branch_replay(self):
+    def check_longer_branch_replay(self, kind):
         node = self.nodes[0]
         old, replacement_raw = self.prepare_replacement()
-        update_id = self.submit_update(old, 'service')
+        update_id = self.submit_update(old, kind)
         update_raw = node.getrawtransaction(update_id)
         replacement_id = node.decoderawtransaction(replacement_raw)['txid']
         self.restart_without_mempool()
@@ -220,8 +220,8 @@ class ProTxConflictTest(DIP3Test):
         node.reconsiderblock(competing_first)
         assert_equal(node.getbestblockhash(), competing_tip)
         assert_equal(node.protx_info(old.protx_hash)['proTxHash'], old.protx_hash)
-        self.log.info('Longer-branch replay: update=%s replacement=%s mempool=%s',
-                      update_id, replacement_id, node.getrawmempool())
+        self.log.info('Longer-branch replay: kind=%s update=%s replacement=%s mempool=%s',
+                      kind, update_id, replacement_id, node.getrawmempool())
         assert_equal(node.getrawmempool(), [update_id])
         self.wait_for_replayed_template(update_id, replacement_id)
         self.generate(node, 1)
@@ -259,10 +259,11 @@ class ProTxConflictTest(DIP3Test):
         for replacement_first in (False, True):
             self.log.info('First-seen conflict survives mempool reload, replacement first: %s', replacement_first)
             self.check_persisted_first_seen(replacement_first)
-        self.log.info('Reorg replay keeps only the first-seen update and produces a valid template')
-        self.check_reorg_replay()
-        self.log.info('Longer-branch activation uses the new branch for replay conflicts')
-        self.check_longer_branch_replay()
+        for kind in ('service', 'registrar', 'revoke'):
+            self.log.info('Reorg replay keeps only the first-seen %s update and produces a valid template', kind)
+            self.check_reorg_replay(kind)
+            self.log.info('Longer-branch activation uses the new branch for %s replay conflicts', kind)
+            self.check_longer_branch_replay(kind)
 
 
 if __name__ == '__main__':

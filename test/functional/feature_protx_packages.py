@@ -130,20 +130,24 @@ class ProTxPackageTest(ProTxConflictTest):
         assert_equal(signed['complete'], True)
         return signed['hex']
 
-    def check_submission(self):
+    def check_submission(self, kind):
         node = self.nodes[0]
         miniwallet = MiniWallet(node)
         self.generate(miniwallet, 180)
         old, replacement_raw = self.prepare_replacement()
         control, _ = self.prepare_replacement()
-        update_id = self.submit_update(old, 'service')
+        update_id = self.submit_update(old, kind)
         update_raw = node.getrawtransaction(update_id)
-        control_id = self.submit_update(control, 'service')
+        control_id = self.submit_update(control, kind)
         control_raw = node.getrawtransaction(control_id)
         self.restart_without_mempool()
         node = self.nodes[0]
         replacement_raw, update_raw, control_raw = [self.low_fee_parent(raw)
                                                    for raw in (replacement_raw, update_raw, control_raw)]
+        # Rewriting the ordinary change output must preserve the signed
+        # provider payload; a later fee rejection would otherwise mask it.
+        for raw in (replacement_raw, update_raw, control_raw):
+            assert_equal(node.testmempoolaccept([raw])[0]['allowed'], True)
         child_raw = self.make_child([replacement_raw, update_raw])
         control_child = self.make_child([replacement_raw, control_raw])
 
@@ -201,8 +205,9 @@ class ProTxPackageTest(ProTxConflictTest):
         self.check_service_properties(duplicate=False)
         self.log.info('Package rejects duplicate external collateral')
         self.check_duplicate_collateral()
-        self.log.info('Package submission checks conflicts before deferred insertion')
-        self.check_submission()
+        for kind in ('service', 'registrar', 'revoke'):
+            self.log.info('Package submission checks %s conflicts before deferred insertion', kind)
+            self.check_submission(kind)
 
 
 if __name__ == '__main__':
