@@ -985,8 +985,10 @@ void CTxMemPool::removeProTxKeyChangedConflicts(const CTransaction &tx, const ui
         }
     }
     for (const auto& txHash : conflictingTxs) {
-        auto& tx = mapTx.find(txHash)->GetTx();
-        removeRecursive(tx, MemPoolRemovalReason::CONFLICT);
+        // SYSCOIN: Removing an earlier ancestor can already remove this txid.
+        if (auto it = mapTx.find(txHash); it != mapTx.end()) {
+            removeRecursive(it->GetTx(), MemPoolRemovalReason::CONFLICT);
+        }
     }
 }
 

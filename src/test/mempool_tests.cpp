@@ -5,6 +5,9 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <common/system.h>
+// SYSCOIN: Exercise recursive cleanup of provider-reference entries.
+#include <evo/providertx.h>
+#include <evo/specialtx.h>
 #include <node/mempool_args.h>
 #include <policy/policy.h>
 #include <test/util/txmempool.h>
@@ -20,6 +23,44 @@
 BOOST_FIXTURE_TEST_SUITE(mempool_tests, TestingSetup)
 
 static constexpr auto REMOVAL_REASON_DUMMY = MemPoolRemovalReason::REPLACED;
+
+// SYSCOIN: An earlier recursive removal may already remove another saved txid.
+BOOST_AUTO_TEST_CASE(ProTxKeyChangeRemovesParentAndChildOnce)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(::cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    const uint256 protx = uint256S("01");
+    const auto make_update = [](const COutPoint& input, const uint256& target, CAmount amount) {
+        CMutableTransaction tx;
+        tx.nVersion = SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE;
+        tx.vin.emplace_back(input);
+        tx.vout.emplace_back(amount, CScript() << OP_TRUE);
+        CProUpServTx payload;
+        payload.nVersion = CProUpServTx::LEGACY_BLS_VERSION;
+        payload.proTxHash = target;
+        SetTxPayload(tx, payload);
+        return tx;
+    };
+
+    // Unchecked entries isolate index cleanup from signature/consensus checks.
+    const auto parent = make_update(COutPoint(uint256S("02"), 0), protx, 20000);
+    auto child = make_update(COutPoint(parent.GetHash(), 0), protx, 10000);
+    for (unsigned i = 0; i < 1000 && !(parent.GetHash() < child.GetHash()); ++i) {
+        ++child.nLockTime;
+    }
+    BOOST_REQUIRE(parent.GetHash() < child.GetHash());
+    const auto control = make_update(COutPoint(uint256S("03"), 0), uint256S("04"), 20000);
+    pool.addUnchecked(entry.FromTx(parent));
+    pool.addUnchecked(entry.FromTx(child));
+    pool.addUnchecked(entry.FromTx(control));
+    BOOST_REQUIRE_EQUAL(pool.size(), 3U);
+    BOOST_REQUIRE_EQUAL(pool.GetIter(parent.GetHash()).value()->GetCountWithDescendants(), 2U);
+
+    pool.removeProTxKeyChangedConflicts(CTransaction(parent), protx, uint256S("05"));
+    BOOST_CHECK_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(control.GetHash())));
+}
 
 class MemPoolTest final : public CTxMemPool
 {
