@@ -11,7 +11,10 @@
 #include <netbase.h>
 #include <messagesigner.h>
 #include <masternode/masternodepayments.h>
+#include <node/miner.h>
 #include <policy/policy.h>
+#include <pow.h>
+#include <random.h>
 #include <script/signingprovider.h>
 #include <spork.h>
 #include <txmempool.h>
@@ -23,6 +26,8 @@
 #include <governance/governanceclasses.h>
 #include <governance/governanceexceptions.h>
 #include <governance/governancevote.h>
+#include <llmq/quorums_blockprocessor.h>
+#include <llmq/quorums_commitment.h>
 #include <chainparams.h>
 #include <dbwrapper.h>
 #include <protocol.h>
@@ -908,6 +913,178 @@ BOOST_AUTO_TEST_CASE(test_mempool_dual_proregtx_basic)
 {
     TestChainDIP3V19Setup setup;
     FuncTestMempoolDualProregtx(setup);
+}
+
+BOOST_AUTO_TEST_CASE(quorum_pose_ban_filters_nevm_update_from_block_template)
+{
+    TestChainDIP3V19Setup setup;
+    auto& chainman = *setup.m_node.chainman;
+    auto& pool = *setup.m_node.mempool;
+    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
+    const CScript payout = GetScriptForDestination(WitnessV0KeyHash(setup.coinbaseKey.GetPubKey()));
+    const CScript coinbase_script = GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey());
+    const auto& params = Params().GetConsensus().llmqTypeChainLocks;
+    BOOST_REQUIRE_EQUAL(params.size, 3);
+    BOOST_REQUIRE_EQUAL(params.minSize, 2);
+
+    std::map<uint256, CBLSSecretKey> operator_keys;
+    std::vector<CMutableTransaction> registrations;
+    for (int i = 0; i < params.size; ++i) {
+        CKey owner_key;
+        CBLSSecretKey operator_key;
+        auto registration = CreateProRegTx(setup.m_node, utxos, i + 1, payout,
+            setup.coinbaseKey, owner_key, operator_key);
+        operator_keys.emplace(registration.GetHash(), operator_key);
+        registrations.push_back(std::move(registration));
+    }
+    const uint256 target = registrations.front().GetHash();
+    setup.CreateAndProcessBlock(registrations, coinbase_script);
+    BOOST_REQUIRE_EQUAL(deterministicMNManager->GetListAtChainTip().GetAllMNsCount(), 3U);
+
+    // Two real commitments omit the same member. Each adds a 66% penalty;
+    // one regtest DKG interval of decay between them still reaches the ban threshold.
+    const int registration_height = *setup.m_node.chain->getHeight();
+    const int first_base_height =
+        (registration_height / params.dkgInterval + 1) * params.dkgInterval;
+    const int first_commitment_height = first_base_height + params.dkgMiningWindowStart;
+    setup.mineBlocks(first_commitment_height - 1 - registration_height);
+
+    auto make_commitment = [&](int base_height) {
+        LOCK(cs_main);
+        const auto* base_index = chainman.ActiveChain()[base_height];
+        BOOST_REQUIRE(base_index != nullptr);
+        const auto members = llmq::CLLMQUtils::GetAllQuorumMembers(base_index);
+        BOOST_REQUIRE_EQUAL(members.size(), 3U);
+
+        llmq::CFinalCommitment commitment(base_index->GetBlockHash());
+        const bool legacy = !llmq::CLLMQUtils::IsV19Active(base_height);
+        commitment.nVersion = llmq::CFinalCommitment::GetVersion(!legacy);
+        CBLSSecretKey quorum_key;
+        quorum_key.MakeNewKey();
+        commitment.quorumPublicKey = quorum_key.GetPublicKey();
+        commitment.quorumVvecHash = GetRandHash();
+        for (size_t i = 0; i < members.size(); ++i) {
+            commitment.validMembers[i] = members[i]->proTxHash != target;
+            commitment.signers[i] = commitment.validMembers[i];
+        }
+        BOOST_REQUIRE_EQUAL(commitment.CountValidMembers(), 2);
+        const uint256 commitment_hash = llmq::BuildCommitmentHash(commitment.quorumHash,
+            commitment.validMembers, commitment.quorumPublicKey, commitment.quorumVvecHash);
+        commitment.quorumSig = quorum_key.Sign(commitment_hash, legacy);
+        std::vector<CBLSSignature> signatures;
+        std::vector<CBLSPublicKey> public_keys;
+        for (size_t i = 0; i < members.size(); ++i) {
+            if (!commitment.signers[i]) continue;
+            const auto& key = operator_keys.at(members[i]->proTxHash);
+            signatures.push_back(key.Sign(commitment_hash, legacy));
+            public_keys.push_back(key.GetPublicKey());
+        }
+        commitment.membersSig = CBLSSignature::AggregateSecure(signatures, public_keys, commitment_hash);
+        // Exercise the real membership and BLS checks before making it mineable.
+        BOOST_REQUIRE(commitment.Verify(base_index, /*checkSigs=*/true));
+        return commitment;
+    };
+
+    const auto first_commitment = make_commitment(first_base_height);
+    llmq::quorumBlockProcessor->AddMineableCommitment(first_commitment);
+    const CBlock first_block = setup.CreateAndProcessBlock({}, coinbase_script);
+    BOOST_REQUIRE_EQUAL(*setup.m_node.chain->getHeight(), first_commitment_height);
+    llmq::CFinalCommitmentTxPayload first_payload;
+    BOOST_REQUIRE(GetTxPayload(*first_block.vtx.front(), first_payload));
+    BOOST_CHECK(SerializeHash(first_payload.commitment) == SerializeHash(first_commitment));
+    auto target_mn = deterministicMNManager->GetListAtChainTip().GetMN(target);
+    BOOST_REQUIRE(target_mn != nullptr);
+    BOOST_CHECK_EQUAL(target_mn->pdmnState->nPoSePenalty, 66);
+    BOOST_CHECK(!target_mn->pdmnState->IsBanned());
+
+    const int second_base_height = first_base_height + params.dkgInterval;
+    const int second_commitment_height = second_base_height + params.dkgMiningWindowStart;
+    setup.mineBlocks(second_commitment_height - 1 - first_commitment_height);
+    target_mn = deterministicMNManager->GetListAtChainTip().GetMN(target);
+    BOOST_REQUIRE(target_mn != nullptr);
+    BOOST_REQUIRE(!target_mn->pdmnState->IsBanned());
+    BOOST_REQUIRE(!target_mn->pdmnState->confirmedHash.IsNull());
+    BOOST_REQUIRE(target_mn->pdmnState->nPoSePenalty - 1 + 66 >= 100);
+
+    CMutableTransaction service_update = CreateProUpServTx(setup.m_node, utxos, target,
+        operator_keys.at(target), /*port=*/10, setup.coinbaseKey);
+    CProUpServTx service_payload;
+    BOOST_REQUIRE(GetTxPayload(service_update, service_payload));
+    service_payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+    service_payload.vchNEVMAddress.assign(20, 1);
+    service_payload.sig = operator_keys.at(target).Sign(SerializeHash(service_payload), bls::bls_legacy_scheme);
+    service_update.vout.front().nValue -= 10000;
+    SetTxPayload(service_update, service_payload);
+    SignTransaction(setup.m_node, service_update, setup.coinbaseKey);
+    CProUpServTx decoded_service_payload;
+    BOOST_REQUIRE(GetTxPayload(service_update, decoded_service_payload));
+    BOOST_REQUIRE(decoded_service_payload.vchNEVMAddress == service_payload.vchNEVMAddress);
+
+    CMutableTransaction ordinary_tx;
+    FundTransaction(setup.m_node, ordinary_tx, utxos, payout, COIN);
+    ordinary_tx.vout.front().nValue -= 10000;
+    SignTransaction(setup.m_node, ordinary_tx, setup.coinbaseKey);
+    {
+        LOCK(cs_main);
+        const auto service_result = chainman.ProcessTransaction(MakeTransactionRef(service_update));
+        BOOST_REQUIRE_MESSAGE(service_result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+            service_result.m_state.ToString());
+        const auto ordinary_result = chainman.ProcessTransaction(MakeTransactionRef(ordinary_tx));
+        BOOST_REQUIRE_MESSAGE(ordinary_result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+            ordinary_result.m_state.ToString());
+    }
+
+    const auto second_commitment = make_commitment(second_base_height);
+    BOOST_REQUIRE(llmq::quorumBlockProcessor->AddMineableCommitment(second_commitment).has_value());
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveHeight(), second_commitment_height - 1);
+        llmq::CFinalCommitmentTxPayload mineable_payload;
+        mineable_payload.nHeight = second_commitment_height;
+        BOOST_REQUIRE(llmq::quorumBlockProcessor->GetMinableCommitment(second_commitment_height,
+            mineable_payload.commitment));
+        BOOST_REQUIRE(SerializeHash(mineable_payload.commitment) == SerializeHash(second_commitment));
+        CBlock empty_block;
+        empty_block.vtx.emplace_back();
+        CDeterministicMNList next_list, old_list;
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(deterministicMNManager->BuildNewListFromBlock(empty_block,
+            chainman.ActiveTip(), state, chainman.ActiveChainstate().CoinsTip(), next_list, old_list,
+            mineable_payload), state.ToString());
+        const auto banned_mn = next_list.GetMN(target);
+        BOOST_REQUIRE(banned_mn != nullptr);
+        BOOST_REQUIRE_MESSAGE(banned_mn->pdmnState->IsBanned(),
+            "candidate penalty: " << banned_mn->pdmnState->nPoSePenalty);
+    }
+    auto block_template = node::BlockAssembler{chainman.ActiveChainstate(), &pool}.CreateNewBlock(coinbase_script);
+    BOOST_REQUIRE(block_template != nullptr);
+    auto& block = block_template->block;
+    llmq::CFinalCommitmentTxPayload second_payload;
+    BOOST_REQUIRE(GetTxPayload(*block.vtx.front(), second_payload));
+    BOOST_REQUIRE(SerializeHash(second_payload.commitment) == SerializeHash(second_commitment));
+    BOOST_REQUIRE_EQUAL(block.vtx.size(), 2U);
+    BOOST_CHECK(block.vtx[1]->GetHash() == ordinary_tx.GetHash());
+    {
+        LOCK(cs_main);
+        // The excluded update is valid at the parent, but fails after this exact
+        // commitment is applied. Do not silently drop the commitment instead.
+        CBlock invalid_block = block;
+        invalid_block.vtx.push_back(MakeTransactionRef(service_update));
+        CDeterministicMNList invalid_list, old_list;
+        BlockValidationState state;
+        BOOST_CHECK(!deterministicMNManager->BuildNewListFromBlock(invalid_block, chainman.ActiveTip(),
+            state, chainman.ActiveChainstate().CoinsTip(), invalid_list, old_list, second_payload));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-protx-banned-nevm-address");
+    }
+
+    node::RegenerateCommitments(block, chainman, block_template->vchCoinbaseCommitmentExtra);
+    while (!CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus())) ++block.nNonce;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(block), true, true, nullptr));
+    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight(), second_commitment_height);
+    target_mn = deterministicMNManager->GetListAtChainTip().GetMN(target);
+    BOOST_REQUIRE(target_mn != nullptr);
+    BOOST_CHECK(target_mn->pdmnState->IsBanned());
+    BOOST_CHECK(target_mn->pdmnState->vchNEVMAddress.empty());
 }
 
 //This one can be started only with legacy scheme, since inside undo block will switch it back to legacy resulting into an inconsistency
