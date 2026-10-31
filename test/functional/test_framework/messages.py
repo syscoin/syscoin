@@ -28,6 +28,7 @@ import socket
 import struct
 import time
 import unittest
+from unittest.mock import patch
 
 from test_framework.siphash import siphash256
 from test_framework.util import assert_equal
@@ -2471,6 +2472,36 @@ class msg_sendtxrcncl:
             (self.version, self.salt)
 
 class TestFrameworkScript(unittest.TestCase):
+    def test_getclsig_receive_dispatch(self):
+        from test_framework.p2p import P2PInterface
+
+        peer = P2PInterface()
+        peer.peer_connect_helper("127.0.0.1", 0, "regtest", timeout_factor=1)
+        transport = object()
+        peer._transport = transport
+        request = msg_getclsig()
+        self.assertEqual(request.serialize(), b"")
+
+        # Decode a real wire frame through the shared receive and dispatch path.
+        # A following message must still be handled by this ordinary peer.
+        peer.data_received(peer.build_message(request) + peer.build_message(msg_pong(7)))
+        self.assertEqual(peer.message_count["getclsig"], 1)
+        self.assertIsInstance(peer.last_message["getclsig"], msg_getclsig)
+        self.assertEqual(peer.last_message["pong"].nonce, 7)
+        self.assertIs(peer._transport, transport)
+        self.assertTrue(peer.is_connected)
+        self.assertEqual(peer.recvbuf, b"")
+
+        class UnknownMessage:
+            msgtype = b"unknown"
+
+            def serialize(self):
+                return b""
+
+        with patch("test_framework.p2p.logger.exception"):
+            with self.assertRaisesRegex(ValueError, "Received unknown msgtype"):
+                peer.data_received(peer.build_message(UnknownMessage()))
+
     def test_addrv2_encode_decode(self):
         def check_addrv2(ip, net):
             addr = CAddress()

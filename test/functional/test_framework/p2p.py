@@ -80,6 +80,7 @@ from test_framework.messages import (
     msg_clsig,
     msg_pqclshare,
     msg_pqposecert,
+    msg_getclsig,
 )
 from test_framework.util import (
     MAX_NODES,
@@ -153,6 +154,7 @@ MESSAGEMAP = {
     b"clsig": msg_clsig,
     # SYSCOIN: Generic test peers intentionally ignore bounded governance pages.
     b"getgovpage": None,
+    b"getclsig": msg_getclsig,
     b"getsporks": None,
     b"govpage": None,
     b"pqclshare": msg_pqclshare,
@@ -471,6 +473,7 @@ class P2PInterface(P2PConnection):
     def on_clsig(self, message): pass
     def on_pqclshare(self, message): pass
     def on_pqposecert(self, message): pass
+    def on_getclsig(self, message): pass
     def on_inv(self, message):
         want = msg_getdata()
         for i in message.inv:
