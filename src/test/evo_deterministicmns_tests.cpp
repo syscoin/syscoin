@@ -915,7 +915,7 @@ BOOST_AUTO_TEST_CASE(test_mempool_dual_proregtx_basic)
     FuncTestMempoolDualProregtx(setup);
 }
 
-BOOST_AUTO_TEST_CASE(quorum_pose_ban_filters_nevm_update_from_block_template)
+static void TestQuorumPoSeBanMempool(bool test_stale_update_after_revival)
 {
     TestChainDIP3V19Setup setup;
     auto& chainman = *setup.m_node.chainman;
@@ -1013,7 +1013,8 @@ BOOST_AUTO_TEST_CASE(quorum_pose_ban_filters_nevm_update_from_block_template)
     service_payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
     service_payload.vchNEVMAddress.assign(20, 1);
     service_payload.sig = operator_keys.at(target).Sign(SerializeHash(service_payload), bls::bls_legacy_scheme);
-    service_update.vout.front().nValue -= 10000;
+    constexpr CAmount stale_fee{10000};
+    service_update.vout.front().nValue -= stale_fee;
     SetTxPayload(service_update, service_payload);
     SignTransaction(setup.m_node, service_update, setup.coinbaseKey);
     CProUpServTx decoded_service_payload;
@@ -1029,6 +1030,8 @@ BOOST_AUTO_TEST_CASE(quorum_pose_ban_filters_nevm_update_from_block_template)
         const auto service_result = chainman.ProcessTransaction(MakeTransactionRef(service_update));
         BOOST_REQUIRE_MESSAGE(service_result.m_result_type == MempoolAcceptResult::ResultType::VALID,
             service_result.m_state.ToString());
+        BOOST_REQUIRE(service_result.m_base_fees.has_value());
+        BOOST_CHECK_EQUAL(*service_result.m_base_fees, stale_fee);
         const auto ordinary_result = chainman.ProcessTransaction(MakeTransactionRef(ordinary_tx));
         BOOST_REQUIRE_MESSAGE(ordinary_result.m_result_type == MempoolAcceptResult::ResultType::VALID,
             ordinary_result.m_state.ToString());
@@ -1085,6 +1088,101 @@ BOOST_AUTO_TEST_CASE(quorum_pose_ban_filters_nevm_update_from_block_template)
     BOOST_REQUIRE(target_mn != nullptr);
     BOOST_CHECK(target_mn->pdmnState->IsBanned());
     BOOST_CHECK(target_mn->pdmnState->vchNEVMAddress.empty());
+
+    if (!test_stale_update_after_revival) return;
+
+    // A quorum PoSe ban does not remove this previously admitted update. A
+    // later valid revival must not make it eligible against the banned parent.
+    BOOST_REQUIRE(pool.exists(GenTxid::Txid(service_update.GetHash())));
+    {
+        LOCK(cs_main);
+        TxValidationState stale_state;
+        BOOST_CHECK(!CheckSpecialTx(chainman.m_blockman, CTransaction(service_update), chainman.ActiveTip(),
+            stale_state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/false, /*check_sigs=*/true));
+        BOOST_CHECK_EQUAL(stale_state.GetRejectReason(), "bad-protx-banned-nevm-address");
+    }
+
+    CMutableTransaction revival = CreateProUpServTx(setup.m_node, utxos, target,
+        operator_keys.at(target), /*port=*/11, setup.coinbaseKey);
+    CProUpServTx revival_payload;
+    BOOST_REQUIRE(GetTxPayload(revival, revival_payload));
+    revival_payload.nVersion = CProUpServTx::UPDATE_NEVM_VERSION;
+    BOOST_REQUIRE(revival_payload.vchNEVMAddress.empty());
+    revival_payload.sig = operator_keys.at(target).Sign(SerializeHash(revival_payload), bls::bls_legacy_scheme);
+    constexpr CAmount revival_fee{2 * stale_fee};
+    revival.vout.front().nValue -= revival_fee;
+    SetTxPayload(revival, revival_payload);
+    SignTransaction(setup.m_node, revival, setup.coinbaseKey);
+    for (const auto& stale_input : service_update.vin) {
+        for (const auto& revival_input : revival.vin) {
+            BOOST_REQUIRE(stale_input.prevout != revival_input.prevout);
+        }
+    }
+    BOOST_REQUIRE(revival_fee * GetVirtualTransactionSize(CTransaction(service_update)) >
+        stale_fee * GetVirtualTransactionSize(CTransaction(revival)));
+    {
+        LOCK(cs_main);
+        const auto revival_result = chainman.ProcessTransaction(MakeTransactionRef(revival));
+        BOOST_REQUIRE_MESSAGE(revival_result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+            revival_result.m_state.ToString());
+        BOOST_REQUIRE(revival_result.m_base_fees.has_value());
+        BOOST_CHECK_EQUAL(*revival_result.m_base_fees, revival_fee);
+    }
+    BOOST_REQUIRE(pool.exists(GenTxid::Txid(service_update.GetHash())));
+    BOOST_REQUIRE(pool.exists(GenTxid::Txid(revival.GetHash())));
+
+    // The higher actual feerate chooses the empty-NEVM revival first. Ordered
+    // candidate state alone would then accept the stale update and fail the
+    // consensus check, which validates each payload against the parent list.
+    auto revived_template = node::BlockAssembler{chainman.ActiveChainstate(), &pool}.CreateNewBlock(coinbase_script);
+    BOOST_REQUIRE(revived_template != nullptr);
+    auto& revived_block = revived_template->block;
+    BOOST_REQUIRE_EQUAL(revived_block.vtx.size(), 2U);
+    BOOST_CHECK(revived_block.vtx[1]->GetHash() == revival.GetHash());
+    node::RegenerateCommitments(revived_block, chainman, revived_template->vchCoinbaseCommitmentExtra);
+    while (!CheckProofOfWork(revived_block.GetHash(), revived_block.nBits, chainman.GetConsensus())) ++revived_block.nNonce;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(revived_block), true, true, nullptr));
+    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight(), second_commitment_height + 1);
+    target_mn = deterministicMNManager->GetListAtChainTip().GetMN(target);
+    BOOST_REQUIRE(target_mn != nullptr);
+    BOOST_CHECK(!target_mn->pdmnState->IsBanned());
+    BOOST_CHECK_EQUAL(target_mn->pdmnState->addr.GetPort(), 11);
+    BOOST_CHECK(target_mn->pdmnState->vchNEVMAddress.empty());
+
+    // Once the revival is confirmed, the unchanged pending update is valid
+    // against the new parent and must be mineable without re-submission.
+    BOOST_REQUIRE(pool.exists(GenTxid::Txid(service_update.GetHash())));
+    {
+        LOCK(cs_main);
+        TxValidationState pending_state;
+        BOOST_REQUIRE_MESSAGE(CheckSpecialTx(chainman.m_blockman, CTransaction(service_update), chainman.ActiveTip(),
+            pending_state, chainman.ActiveChainstate().CoinsTip(), /*fJustCheck=*/false, /*check_sigs=*/true),
+            pending_state.ToString());
+    }
+    auto pending_template = node::BlockAssembler{chainman.ActiveChainstate(), &pool}.CreateNewBlock(coinbase_script);
+    BOOST_REQUIRE(pending_template != nullptr);
+    auto& pending_block = pending_template->block;
+    BOOST_REQUIRE_EQUAL(pending_block.vtx.size(), 2U);
+    BOOST_CHECK(pending_block.vtx[1]->GetHash() == service_update.GetHash());
+    node::RegenerateCommitments(pending_block, chainman, pending_template->vchCoinbaseCommitmentExtra);
+    while (!CheckProofOfWork(pending_block.GetHash(), pending_block.nBits, chainman.GetConsensus())) ++pending_block.nNonce;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(pending_block), true, true, nullptr));
+    BOOST_CHECK_EQUAL(*setup.m_node.chain->getHeight(), second_commitment_height + 2);
+    target_mn = deterministicMNManager->GetListAtChainTip().GetMN(target);
+    BOOST_REQUIRE(target_mn != nullptr);
+    BOOST_CHECK(!target_mn->pdmnState->IsBanned());
+    BOOST_CHECK_EQUAL(target_mn->pdmnState->addr.GetPort(), 10);
+    BOOST_CHECK(target_mn->pdmnState->vchNEVMAddress == service_payload.vchNEVMAddress);
+}
+
+BOOST_AUTO_TEST_CASE(quorum_pose_ban_filters_nevm_update_from_block_template)
+{
+    TestQuorumPoSeBanMempool(/*test_stale_update_after_revival=*/false);
+}
+
+BOOST_AUTO_TEST_CASE(quorum_pose_ban_revival_does_not_mine_stale_nevm_update)
+{
+    TestQuorumPoSeBanMempool(/*test_stale_update_after_revival=*/true);
 }
 
 //This one can be started only with legacy scheme, since inside undo block will switch it back to legacy resulting into an inconsistency
