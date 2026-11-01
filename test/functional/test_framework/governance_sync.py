@@ -5,6 +5,7 @@
 """Regression tests for governance functional-test relay barriers."""
 
 from types import SimpleNamespace
+import json
 import unittest
 
 from feature_governance import SyscoinGovernanceTest as TriggerTest
@@ -82,6 +83,87 @@ class TestGovernanceSync(unittest.TestCase):
                 case.wait_until = lambda predicate, **_: self.assertTrue(predicate())
                 case.connect_masternode_to_controller(node)
                 self.assertEqual(calls, ["disconnect", "connect"])
+
+    def test_superblock_waits_for_matching_dominant_winner_votes(self):
+        height = 175
+        case = object.__new__(TriggerTest)
+        case.mn_count = 5
+        case._throttled_bump_mocktime = lambda *_args, **_kwargs: None
+        winner = {
+            "DataString": json.dumps({"event_block_height": height}),
+            "Hash": "winning-data", "YesCount": 4, "NoCount": 1,
+            "AbstainCount": 0, "AbsoluteYesCount": 3,
+            "fCachedFunding": False,
+        }
+        # A late rival may have no NO votes until another block arrives. Its
+        # incomplete tally must not deadlock a winner that cannot be overtaken.
+        rival = dict(winner, Hash="rival-data", YesCount=1, NoCount=0, AbsoluteYesCount=1)
+        expected_votes = {str(i): f"voter{i}:1:{'yes' if i < 4 else 'no'}:funding" for i in range(5)}
+        votes = [dict(expected_votes) for _ in range(6)]
+        triggers = [{"winner": dict(winner), "rival": dict(rival)} for _ in range(6)]
+        case.nodes = [SimpleNamespace(
+            getgovernanceinfo=lambda: {"governanceminquorum": 1},
+            gobject_list=lambda *_args, i=i: triggers[i],
+            gobject_getcurrentvotes=lambda _hash, i=i: votes[i],
+        ) for i in range(6)]
+
+        def wait_until(predicate, *, timeout):
+            self.assertEqual(timeout, 30)
+            votes[-1].pop("0")
+            self.assertFalse(predicate(), "a missing winner vote must block mining")
+            votes[-1] = dict(expected_votes)
+            votes[-1]["0"] = "voter0:2:yes:funding"
+            self.assertFalse(predicate(), "equal tallies must not hide different current votes")
+            votes[-1] = dict(expected_votes)
+            self.assertTrue(predicate(), "incomplete rival votes and stale cache flags must not block a dominant winner")
+
+        case.wait_until = wait_until
+        case.wait_for_superblock_votes(height)
+
+    def test_superblock_three_two_split_waits_only_for_irreversible_rival_bound(self):
+        height = 200
+        case = object.__new__(TriggerTest)
+        case.mn_count = 5
+        case._throttled_bump_mocktime = lambda *_args, **_kwargs: None
+        winner = {
+            "DataString": json.dumps({"event_block_height": height}),
+            "Hash": "winning-data", "YesCount": 3, "NoCount": 2,
+            "AbstainCount": 0, "AbsoluteYesCount": 1,
+        }
+        rival = dict(winner, Hash="rival-data", YesCount=2, NoCount=0, AbsoluteYesCount=2)
+        winner_votes = {str(i): f"voter{i}:1:{'yes' if i < 3 else 'no'}:funding" for i in range(5)}
+        rival_votes = {str(i): f"voter{i}:1:yes:funding" for i in (3, 4)}
+        votes = [{"winner": dict(winner_votes), "rival": dict(rival_votes)} for _ in range(6)]
+        triggers = [{"winner": dict(winner), "rival": dict(rival)} for _ in range(6)]
+        case.nodes = [SimpleNamespace(
+            getgovernanceinfo=lambda: {"governanceminquorum": 1},
+            gobject_list=lambda *_args, i=i: triggers[i],
+            gobject_getcurrentvotes=lambda trigger_hash, i=i: votes[i][trigger_hash],
+        ) for i in range(6)]
+
+        def wait_until(predicate, *, timeout):
+            self.assertEqual(timeout, 30)
+            self.assertFalse(predicate(), "a rival which can overtake the winner is not ready")
+            for node_votes in votes:
+                node_votes["rival"]["0"] = "voter0:2:no:funding"
+            self.assertFalse(predicate(), "a possible tie must still block mining")
+            for node_votes in votes[:-1]:
+                node_votes["rival"]["1"] = "voter1:2:no:funding"
+            self.assertFalse(predicate(), "every node must have the same irreversible winner")
+            votes[-1]["rival"]["1"] = "voter1:2:no:funding"
+            self.assertTrue(predicate(), "the rival's fifth vote is unnecessary once it cannot catch the winner")
+            for node_votes in votes:
+                node_votes["rival"].pop("3")
+                node_votes["rival"].pop("4")
+            self.assertFalse(predicate(), "unseen YES voters could still make another trigger win")
+            for node_votes in votes:
+                node_votes["rival"].update(rival_votes)
+            self.assertTrue(predicate())
+            votes[-1]["rival"]["0"] = "voter0:2:yes:funding"
+            self.assertFalse(predicate(), "a voter apparently supporting two triggers is not settled")
+
+        case.wait_until = wait_until
+        case.wait_for_superblock_votes(height)
 
     def test_trigger_barrier_checks_every_voter_and_exact_hashes(self):
         expected = {"isolated", "winning"}

@@ -19,11 +19,18 @@
 #include <evo/specialtx.h>
 #include <evo/providertx.h>
 #include <evo/deterministicmns.h>
+#include <governance/governance.h>
+#include <governance/governanceclasses.h>
+#include <governance/governanceexceptions.h>
+#include <governance/governancevote.h>
 #include <chainparams.h>
 #include <dbwrapper.h>
+#include <protocol.h>
+#include <streams.h>
 #include <boost/test/unit_test.hpp>
 #include <test/util/txmempool.h>
 #include <interfaces/chain.h>
+#include <util/time.h>
 
 using SimpleUTXOVec = std::vector<std::pair<COutPoint, std::pair<int, CAmount>> >;
 
@@ -708,6 +715,89 @@ BOOST_AUTO_TEST_CASE(dip3_protx_basic)
 {
     TestChainDIP3V19Setup setup;
     FuncDIP3Protx(setup);
+}
+
+BOOST_AUTO_TEST_CASE(orphan_governance_vote_is_available_after_parent)
+{
+    TestChainDIP3V19Setup setup;
+    BOOST_REQUIRE(governance != nullptr);
+    BOOST_REQUIRE(governance->LoadCache(/*load_cache=*/false));
+
+    auto utxos = BuildSimpleUTXOVec(setup.m_coinbase_txns);
+    CKey owner_key;
+    CBLSSecretKey operator_key;
+    const CMutableTransaction pro_reg = CreateProRegTx(
+        setup.m_node, utxos, /*port=*/1,
+        GetScriptForDestination(WitnessV0KeyHash(setup.coinbaseKey.GetPubKey())),
+        setup.coinbaseKey, owner_key, operator_key);
+    setup.CreateAndProcessBlock(
+        {pro_reg}, GetScriptForRawPubKey(setup.coinbaseKey.GetPubKey()));
+
+    const auto mn_list = deterministicMNManager->GetListAtChainTip();
+    const auto dmn = mn_list.GetMN(pro_reg.GetHash());
+    BOOST_REQUIRE(dmn != nullptr);
+    int last_superblock;
+    int next_superblock;
+    CSuperblock::GetNearestSuperblocksHeights(
+        *setup.m_node.chain->getHeight(), last_superblock, next_superblock);
+    BOOST_REQUIRE(CSuperblock::IsValidBlockHeight(next_superblock));
+
+    std::vector<CGovernancePayment> payments;
+    payments.emplace_back(PKHash(setup.coinbaseKey.GetPubKey()), COIN, uint256::ONEV);
+    const CSuperblock schedule{next_superblock, std::move(payments)};
+    CGovernanceObject trigger{
+        uint256{}, /*revision=*/1, GetTime<std::chrono::seconds>().count(),
+        uint256{}, schedule.GetHexStrData()};
+    trigger.SetMasternodeOutpoint(dmn->collateralOutpoint);
+
+    // Sign the wire object without changing this process's active masternode.
+    Governance::Object signed_trigger = trigger.Object();
+    signed_trigger.vchSig =
+        operator_key.Sign(trigger.GetSignatureHash(), false).ToByteVector(false);
+    CDataStream trigger_bytes{SER_NETWORK, PROTOCOL_VERSION};
+    trigger_bytes << signed_trigger;
+    trigger_bytes >> trigger;
+    const uint256 trigger_hash = trigger.GetHash();
+    BOOST_REQUIRE(trigger.CheckSignature(operator_key.GetPublicKey()));
+
+    CGovernanceVote vote{
+        dmn->collateralOutpoint, trigger_hash,
+        VOTE_SIGNAL_FUNDING, VOTE_OUTCOME_YES};
+    vote.SetSignature(
+        operator_key.Sign(vote.GetSignatureHash(), false).ToByteVector(false));
+    BOOST_REQUIRE(vote.IsValid(mn_list, /*useVotingKey=*/false));
+    const uint256 vote_hash = vote.GetHash();
+
+    // The vote arrives first. It must remain unavailable until its parent is
+    // accepted, then become both locally counted and retrievable by a peer.
+    CGovernanceException exception;
+    BOOST_CHECK(!governance->ProcessVoteAndRelay(
+        vote, mn_list, exception, *setup.m_node.connman, *setup.m_node.peerman));
+    BOOST_CHECK_EQUAL(exception.GetType(), GOVERNANCE_EXCEPTION_WARNING);
+    BOOST_CHECK(!governance->HaveObjectForHash(trigger_hash));
+    BOOST_CHECK(!governance->HaveVoteForHash(vote_hash));
+    CDataStream before_parent{SER_NETWORK, PROTOCOL_VERSION};
+    BOOST_CHECK(!governance->SerializeVoteForHash(vote_hash, before_parent));
+
+    governance->AddGovernanceObject(trigger, *setup.m_node.peerman);
+    BOOST_REQUIRE(governance->HaveObjectForHash(trigger_hash));
+    const auto current_votes = governance->GetCurrentVotes(trigger_hash, COutPoint{});
+    BOOST_REQUIRE_EQUAL(current_votes.size(), 1);
+    BOOST_CHECK(current_votes.front().GetHash() == vote_hash);
+    BOOST_CHECK(governance->HaveVoteForHash(vote_hash));
+
+    CDataStream served_vote{SER_NETWORK, PROTOCOL_VERSION};
+    BOOST_REQUIRE(governance->SerializeVoteForHash(vote_hash, served_vote));
+    CDataStream expected_vote{SER_NETWORK, PROTOCOL_VERSION};
+    expected_vote << vote;
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        served_vote.begin(), served_vote.end(),
+        expected_vote.begin(), expected_vote.end());
+    CGovernanceVote decoded_vote;
+    served_vote >> decoded_vote;
+    BOOST_CHECK(served_vote.empty());
+    BOOST_CHECK(decoded_vote.GetHash() == vote_hash);
+    BOOST_CHECK(decoded_vote.IsValid(mn_list, /*useVotingKey=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(masternode_required_outputs_are_matched_once)

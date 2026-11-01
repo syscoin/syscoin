@@ -209,41 +209,73 @@ class LLMQChainLocksTest(DashTestFramework):
         self.wait_for_chainlocked_block(self.nodes[0], cl)
 
         self.log.info("Isolate node, mine a shallow fork, and verify a within-window chainlock pulls it back")
+        node1_mining_addr = self.nodes[1].get_deterministic_priv_key().address
+        self.sync_blocks(self.nodes, timeout=60)
+        fork_height = self.nodes[0].getblockcount()
+        # Regtest has 24-block DKG rounds with commitment mining at offsets
+        # 10..18. Keep both ten-block forks outside that window, and align the
+        # split with the five-block ChainLock cadence.
+        while fork_height % 5 or fork_height % 24 < 18:
+            fork_height += 1
+        alignment_blocks = fork_height - self.nodes[0].getblockcount()
+        if alignment_blocks:
+            self.generatetoaddress(self.nodes[1], alignment_blocks, node1_mining_addr)
+        fork_hash = self.nodes[0].getbestblockhash()
+        self.wait_for_chainlocked_block_all_nodes(self.nodes[0].getblockhash(fork_height - 5))
+        previous_cl = self.nodes[0].getbestchainlock()["blockhash"]
         self.isolate_node(self.nodes[0])
         for i in range(1, len(self.nodes)):
             for j in range(i + 1, len(self.nodes)):
                 self.connect_nodes(i, j, wait_for_connect=False)
-        node1_mining_addr = self.nodes[1].get_deterministic_priv_key().address
-        shallow_tip = self.generatetoaddress(self.nodes[0], 4, node0_mining_addr, sync_fun=self.no_op)[-1]
-        assert self.nodes[0].getbestblockhash() == shallow_tip
-        prev_cl = self.nodes[1].getbestchainlock()["blockhash"]
-        shallow_cl = self.mine_until_new_chainlock(self.nodes[1], node1_mining_addr, sync_nodes=self.nodes[1:])
-        self.wait_for_chainlocked_block(self.nodes[1], shallow_cl)
-        assert self.nodes[0].getbestblockhash() == shallow_tip
+        private_blocks = self.generatetoaddress(self.nodes[0], 10, node0_mining_addr, sync_fun=self.no_op)
+        signed_blocks = self.generatetoaddress(self.nodes[1], 10, node1_mining_addr, sync_fun=self.no_op)
+        self.sync_blocks(self.nodes[1:], timeout=60)
+        private_tip = private_blocks[-1]
+        signed_tip = signed_blocks[-1]
+        shallow_cl = signed_blocks[4]
+        shallow_cl_height = fork_height + 5
+        assert shallow_cl != private_blocks[4]
+        assert_equal(self.nodes[0].getblockhash(fork_height), fork_hash)
+        assert_equal(self.nodes[1].getblockhash(fork_height), fork_hash)
+        assert_equal(self.nodes[0].getblockcount(), shallow_cl_height + 5)
+        assert_equal(self.nodes[1].getblockcount(), shallow_cl_height + 5)
+        assert_equal(self.nodes[0].getblockheader(private_tip)["chainwork"],
+                     self.nodes[1].getblockheader(signed_tip)["chainwork"])
+
+        def exact_shallow_chainlock():
+            self._throttled_bump_mocktime("shallow_fork_chainlock", step=1)
+            best = self.nodes[1].getbestchainlock()
+            return best["height"] == shallow_cl_height and best["blockhash"] == shallow_cl
+
+        self.wait_until(exact_shallow_chainlock, timeout=120)
         shallow_best = self.nodes[1].getbestchainlock()
-        self.reconnect_isolated_node(self.nodes[0], 1)
-        for i in range(1, len(self.nodes)):
-            self.connect_nodes(0, i, wait_for_connect=False)
-        def node0_has_shallow_cl_header():
-            try:
-                self.nodes[0].getblockheader(shallow_cl)
-                return True
-            except JSONRPCException:
-                return False
-        self.wait_until(node0_has_shallow_cl_header, timeout=60)
-        def node0_is_in_shallow_cl_submit_window():
-            active_height = self.nodes[0].getblockcount() - 5
-            active_height -= active_height % 5
-            return active_height == shallow_best["height"]
-        self.wait_until(node0_is_in_shallow_cl_submit_window, timeout=60)
+
+        # A side-branch header/body alone is not fully validated. Activate it
+        # once, then restore the equal-work private branch before submitting
+        # the signature. Stay disconnected so only this RPC can supply it.
+        for block_hash in signed_blocks:
+            assert self.nodes[0].submitblock(self.nodes[1].getblock(block_hash, 0)) in (None, "inconclusive")
+        self.nodes[0].preciousblock(signed_tip)
+        assert_equal(self.nodes[0].getbestblockhash(), signed_tip)
+        self.nodes[0].preciousblock(private_tip)
+        assert_equal(self.nodes[0].getbestblockhash(), private_tip)
+        signed_fork = next(tip for tip in self.nodes[0].getchaintips() if tip["hash"] == signed_tip)
+        assert_equal(signed_fork["status"], "valid-fork")
+        assert_equal(self.nodes[0].getbestchainlock()["blockhash"], previous_cl)
         node_height = self.nodes[0].submitchainlock(
             shallow_best["blockhash"],
             shallow_best["signature"],
             shallow_best["signers"],
         )
-        assert_equal(shallow_best["height"], node_height)
+        assert_equal(shallow_cl_height, node_height)
         self.wait_for_chainlocked_block(self.nodes[0], shallow_cl, timeout=120)
-        self.wait_until(lambda: self.nodes[0].getbestblockhash() == self.nodes[1].getbestblockhash(), timeout=120)
+        self.wait_until(lambda: self.nodes[0].getbestblockhash() == signed_tip, timeout=120)
+        private_fork = next(tip for tip in self.nodes[0].getchaintips() if tip["hash"] == private_tip)
+        assert_equal(private_fork["status"], "conflicting")
+        self.reconnect_isolated_node(self.nodes[0], 1)
+        for i in range(1, len(self.nodes)):
+            self.connect_nodes(0, i, wait_for_connect=False)
+        self.sync_blocks(self.nodes, timeout=60)
         
         self.log.info("Isolate node, mine on both parts of the network, and reconnect")
         self.isolate_node(self.nodes[0])
@@ -328,18 +360,16 @@ class LLMQChainLocksTest(DashTestFramework):
         self.log.info("A later honest CLSIG should be rejected while the node remains on the wrong branch")
         self.nodes[0].reconsiderblock(good_tip)
         assert self.nodes[0].getbestblockhash() != good_tip
+        self.isolate_node(self.nodes[0])
         prev_cl = self.nodes[1].getbestchainlock()["blockhash"]
-        self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
+        honest_blocks = self.generatetoaddress(self.nodes[1], 5, node0_mining_addr, sync_fun=self.no_op)
         self.wait_until(lambda: self.nodes[1].getbestchainlock()["blockhash"] != prev_cl, timeout=120)
         rejected_best = self.nodes[1].getbestchainlock()
-        rejected_cl = rejected_best["blockhash"]
-        def node0_has_rejected_cl_header():
-            try:
-                self.nodes[0].getblockheader(rejected_cl)
-                return True
-            except JSONRPCException:
-                return False
-        self.wait_until(node0_has_rejected_cl_header, timeout=60)
+        # Learn the signed target without receiving the greater-work block
+        # bodies, which could move this node off the branch being tested.
+        for block_hash in honest_blocks:
+            self.nodes[0].submitheader(self.nodes[1].getblockheader(block_hash, False))
+        assert_equal(self.nodes[0].getbestblockhash(), bad_tip)
         try:
             self.nodes[0].submitchainlock(
                 rejected_best["blockhash"],
@@ -357,6 +387,9 @@ class LLMQChainLocksTest(DashTestFramework):
 
         self.log.info("Reorg back by normal chain-work once the honest branch overtakes the wrong branch")
         self.generatetoaddress(self.nodes[1], 7, node0_mining_addr, sync_fun=self.no_op)
+        self.reconnect_isolated_node(self.nodes[0], 1)
+        for i in range(1, len(self.nodes)):
+            self.connect_nodes(0, i, wait_for_connect=False)
         self.wait_until(lambda: self.nodes[0].getbestblockhash() == self.nodes[1].getbestblockhash(), timeout=120)
         good_cl = self.mine_until_new_chainlock(self.nodes[1], node0_mining_addr, sync_nodes=self.nodes)
         good_tip = self.nodes[1].getbestblockhash()

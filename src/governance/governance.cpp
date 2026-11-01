@@ -316,6 +316,7 @@ void CGovernanceManager::CheckOrphanVotes(CGovernanceObject& govobj, PeerManager
         if (pairVote.second < nNow) {
             fRemove = true;
         } else if (govobj.ProcessVote(tip_mn_list, vote, e)) {
+            cmapVoteToObject.Insert(vote.GetHash(), &govobj);
             vote.Relay(peerman, tip_mn_list);
             fRemove = true;
         }

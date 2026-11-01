@@ -59,7 +59,8 @@ jobs:
             CC=clang CXX=clang++ ./configure
             make clean
             make -j $(nproc) check
-            ./test/functional/test_runner.py -j $(( $(nproc) * 2 ))
+            # Retain daemon rejection diagnostics in the hosted job log.
+            ./test/functional/test_runner.py -j $(( $(nproc) * 2 )) --combinedlogslen=4000
           done < "$RUNNER_TEMP/test-each-commits"
           git checkout --detach "${{ github.event.pull_request.head.sha }}"
 

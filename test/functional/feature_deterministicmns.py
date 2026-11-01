@@ -419,7 +419,8 @@ class DIP3Test(SyscoinTestFramework):
 
         coinbase.calc_sha256(with_witness=True)
 
-        block = create_block(int(tip_hash, 16), coinbase)
+        # Keep the template's valid timestamp when rapid mining advances MTP.
+        block = create_block(int(tip_hash, 16), coinbase, ntime=bt['curtime'])
         block.nVersion = 4
         block.vtx += vtx
         block.hashMerkleRoot = block.calc_merkle_root()
