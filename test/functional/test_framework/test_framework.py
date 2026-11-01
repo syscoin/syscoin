@@ -1361,41 +1361,40 @@ class DashTestFramework(SyscoinTestFramework):
             return all(node.spork('show') == sporks for node in self.nodes)
         self.wait_until(check_sporks_same, timeout=timeout)
 
-    def wait_for_quorum_connections(self, quorum_hash, expected_connections, mninfos, timeout = 60, wait_proc=None):
+    def wait_for_quorum_connections(self, quorum_hash, expected_connections, mninfos, timeout=60,
+                                    wait_proc=None, *, expected_member_count, require_outbound_ready=False):
         def check_quorum_connections():
             def ret():
                 if wait_proc is not None:
                     wait_proc()
                 return False
 
+            participants = []
             for mn in mninfos:
-                s = mn.node.quorum_dkgstatus()
-                for qs in s["session"]:
-                    if qs["status"]["quorumHash"] != quorum_hash:
-                        continue
-                    for qc in s["quorumConnections"]:
-                        if "quorumConnections" not in qc:
-                            continue
-                        if qc["quorumHash"] != quorum_hash:
-                            continue
-                        if len(qc["quorumConnections"]) == 0:
-                            continue
-                        cnt = 0
-                        for c in qc["quorumConnections"]:
-                            if c["connected"]:
-                                cnt += 1
-                        if cnt < expected_connections:
-                            return ret()
-                        return True
-                    # a session with no matching connections - not ok
+                status = mn.node.quorum_dkgstatus()
+                if any(session["status"].get("quorumHash") == quorum_hash for session in status["session"]):
+                    participants.append((mn, status))
+            if not participants or len(participants) < expected_member_count:
+                return ret()
+
+            participant_hashes = {mn.proTxHash for mn, _ in participants}
+            for _, status in participants:
+                connections = next((quorum["quorumConnections"] for quorum in status["quorumConnections"]
+                                    if quorum.get("quorumHash") == quorum_hash and "quorumConnections" in quorum), None)
+                if connections is None:
                     return ret()
-                # a node with no sessions - ok
-                pass
-            # no sessions at all - not ok
-            return ret()
+                if sum(connection["connected"] for connection in connections) < expected_connections:
+                    return ret()
+                # The RPC includes both inbound and outbound peers. A sufficient
+                # total alone does not mean this member can relay its contribution.
+                if require_outbound_ready and any(
+                        connection["outbound"] and connection["proTxHash"] in participant_hashes
+                        and not connection["connected"] for connection in connections):
+                    return ret()
+            return True
 
         wait_until_helper_internal(check_quorum_connections, timeout=timeout)
-        
+
     def wait_for_masternode_probes(self, mninfos, timeout = 60, wait_proc=None):
         def check_probes():
             def ret():
@@ -1555,6 +1554,7 @@ class DashTestFramework(SyscoinTestFramework):
         spork21_active = self.nodes[0].spork('show')['SPORK_21_QUORUM_ALL_CONNECTED'] <= 1
         spork23_active = self.nodes[0].spork('show')['SPORK_23_QUORUM_POSE'] <= 1
 
+        require_outbound_ready = expected_connections is None
         if expected_connections is None:
             expected_connections = (self.llmq_size - 1) if spork21_active else 2
         if expected_members is None:
@@ -1588,7 +1588,10 @@ class DashTestFramework(SyscoinTestFramework):
         self.log.info("Expected quorum_hash:"+str(q))
         self.log.info("Waiting for phase 1 (init)")
         self.wait_for_quorum_phase(q, 1, expected_members, None, 0, mninfos_online, wait_proc=timeout_func)
-        self.wait_for_quorum_connections(q, expected_connections, mninfos_online, wait_proc=lambda: self._throttled_bump_mocktime("mine_quorum_wait_conn", step=1, nodes=nodes))
+        self.wait_for_quorum_connections(q, expected_connections, mninfos_online,
+                                         expected_member_count=expected_members,
+                                         require_outbound_ready=require_outbound_ready,
+                                         wait_proc=lambda: self._throttled_bump_mocktime("mine_quorum_wait_conn", step=1, nodes=nodes))
         if spork23_active:
             self.wait_for_masternode_probes(mninfos_valid, wait_proc=lambda: self._throttled_bump_mocktime("mine_quorum_wait_probes", step=1, nodes=nodes))
 

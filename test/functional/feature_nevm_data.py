@@ -144,19 +144,33 @@ class NEVMDataTest(DashTestFramework):
         self.generate_helper(self.nodes[0], 3)
         self.wait_for_chainlocked_block_all_nodes(cl)
 
+    def bump_nevm_mocktime(self, seconds, nodes=None):
+        nodes = self.nodes if nodes is None else nodes
+        # Long clock jumps reset the controller's sync state on its next
+        # scheduler tick. Observe that reset before completing sync, so it
+        # cannot race the governance validation of subsequently mined blocks.
+        if seconds > 60 * 60:
+            force_finish_mnsync(self.nodes[0])
+        self.bump_mocktime(seconds, nodes=nodes)
+        if seconds > 60 * 60:
+            self.wait_until(lambda: not self.nodes[0].mnsync("status")['IsSynced'])
+        for node in nodes:
+            force_finish_mnsync(node)
+
     def bump_until_mtp_exceeds(self, cl, expiry_timestamp):
         max_bumps = 20  # avoid infinite loops in case something goes wrong
         bumps = 0
         mtp = self.nodes[0].getblockheader(cl)["mediantime"]
+        # Reach the deadline first even when the renewed blob is hours newer.
+        self.bump_nevm_mocktime(max(0, expiry_timestamp - self.mocktime))
         while True:
-            bump_time = (expiry_timestamp - mtp) * 10
-            if (bump_time > 150):
-                bump_time = 150
+            bump_time = max(1, min(150, (expiry_timestamp - mtp) * 10))
             self.bump_mocktime(bump_time)
             print(f"Current MTP: {mtp}, Target expiry: {expiry_timestamp}, Mocktime: {self.mocktime}")
             for i in range(len(self.nodes)):
                 force_finish_mnsync(self.nodes[i])
 
+            # Signing targets an ancestor five blocks behind the active tip.
             cl = self.nodes[0].getbestblockhash()
             self.generate(self.nodes[0], 5)
             mtp = self.nodes[0].getblockheader(cl)['mediantime']
@@ -217,6 +231,16 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[0].getnevmblobdata(txid, True)['data'], txidData)
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid, True)['data'], txidData)
+        # Separate the original and renewed retention windows. A few seconds
+        # between them lets chainlock waits expire the renewed blob while the
+        # test is still checking that it survives expiry of the original.
+        original_mtp = self.nodes[1].getnevmblobdata(txid1)['mtp']
+        refresh_gap = NEVM_DATA_EXPIRE_TIME // 2
+        self.bump_nevm_mocktime(refresh_gap, nodes=self.nodes[0:4])
+        # Replace the full MTP window without changing the five-block CLSIG cadence.
+        self.generate_helper(self.nodes[0], 15, sync_fun=self.no_op, nodes=self.nodes[0:4])
+        self.wait_until(lambda: self.sync_blocks_helper(self.nodes[0:4]))
+        assert self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())['mediantime'] >= original_mtp + refresh_gap
         # test relay before block creation
         print('Create more blobs...')
         self.nodes[0].syscoincreatenevmblob(secrets.token_hex(55))
@@ -250,6 +274,10 @@ class NEVMDataTest(DashTestFramework):
         assert_equal(self.nodes[1].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[1].getnevmblobdata(txid1, True)['data'], txid1Data)
         mtp = self.nodes[1].getnevmblobdata(txid1)['mtp']
+        renewed_mtp = self.nodes[1].getnevmblobdata(vh)['mtp']
+        assert renewed_mtp >= mtp + refresh_gap
+        renewed_expiry = renewed_mtp + NEVM_DATA_EXPIRE_TIME
+        self.log.info("Blob expiry deadlines: original=%d, renewed=%d", mtp + NEVM_DATA_EXPIRE_TIME, renewed_expiry)
         print('Start node 4...')
         self.start_node(4, extra_args=["-mocktime=" + str(self.mocktime), *self.extra_args[4]])
         force_finish_mnsync(self.nodes[4])
@@ -276,9 +304,7 @@ class NEVMDataTest(DashTestFramework):
         print('Test blob expiry...')
         expiry_timestamp = (mtp + NEVM_DATA_EXPIRE_TIME)
         bump_to_expiry = expiry_timestamp - self.mocktime
-        self.bump_mocktime(bump_to_expiry-1) # right before expiry
-        for i in range(len(self.nodes)):
-            force_finish_mnsync(self.nodes[i])
+        self.bump_nevm_mocktime(bump_to_expiry-1) # right before expiry
         cl = self.nodes[0].getbestblockhash()
         self.generate(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
@@ -298,6 +324,7 @@ class NEVMDataTest(DashTestFramework):
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[1].getnevmblobdata, txid1)
         # vh got recreated so its MTP was updated to a later time
         mtpbest = self.nodes[2].getblockheader(self.nodes[2].getbestblockhash())['mediantime']
+        assert expiry_timestamp < mtpbest <= renewed_expiry
         assert_equal(self.nodes[2].getnevmblobdata(vh, True)['data'], vhData)
         assert_equal(self.nodes[3].getnevmblobdata(vh, True)['data'], vhData)
         nowblockhash = self.nodes[0].getbestblockhash()
@@ -314,6 +341,7 @@ class NEVMDataTest(DashTestFramework):
         cl = self.nodes[0].getbestblockhash()
         self.generate_helper(self.nodes[0], 5)
         self.wait_for_chainlocked_block_all_nodes(cl)
+        assert self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())['mediantime'] <= renewed_expiry
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid)
         assert_equal(self.nodes[0].getnevmblobdata(vh, True)['data'], vhData)
         assert_raises_rpc_error(-32602, 'Could not find blob information for versionhash', self.nodes[0].getnevmblobdata, txid1)

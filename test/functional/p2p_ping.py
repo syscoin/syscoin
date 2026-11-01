@@ -7,7 +7,7 @@
 
 import time
 
-from test_framework.messages import msg_pong
+from test_framework.messages import msg_pong, msg_version
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import assert_equal
@@ -25,6 +25,16 @@ class msg_pong_corrupt(msg_pong):
 class NodeNoPong(P2PInterface):
     def on_ping(self, message):
         pass
+
+
+class VersionedNodeNoPong(NodeNoPong):
+    def __init__(self, version):
+        super().__init__()
+        self.version = version
+
+    def peer_connect_send_version(self, services):
+        super().peer_connect_send_version(services)
+        self.on_connection_send_msg.nVersion = self.version
 
 
 class PingPongTest(SyscoinTestFramework):
@@ -114,6 +124,37 @@ class PingPongTest(SyscoinTestFramework):
             no_pong_node.sync_with_ping()
             self.mock_forward(TIMEOUT_INTERVAL // 2 + 1)
             no_pong_node.wait_for_disconnect()
+
+        self.nodes[0].disconnect_p2ps()
+        self.test_protocol_floor()
+
+    def test_protocol_floor(self):
+        node = self.nodes[0]
+        self.log.info('Reject obsolete protocol versions before completing the handshake')
+        for version in (31800, 60000, 70015, 70016):
+            peer = node.add_p2p_connection(P2PInterface(), wait_for_verack=False, send_version=False)
+            version_message = msg_version()
+            version_message.nVersion = version
+            with node.assert_debug_log([f'using obsolete version {version}; disconnecting']):
+                peer.send_message(version_message)
+                peer.wait_for_disconnect()
+            assert_equal(peer.message_count.get('verack', 0), 0)
+            node.disconnect_p2ps()
+
+        self.log.info('Accept the minimum and future protocol versions with nonced ping timeouts')
+        for version in (70017, 70018):
+            peer = node.add_p2p_connection(VersionedNodeNoPong(version))
+            assert_equal(node.getpeerinfo()[0]['version'], version)
+            peer.wait_until(lambda: 'ping' in peer.last_message)
+            assert peer.last_message['ping'].nonce != 0
+            with node.assert_debug_log(['ping timeout: 1201.000000s']):
+                self.mock_forward(TIMEOUT_INTERVAL // 2)
+                # Keep the connection active without answering the outstanding
+                # ping, so only the ping timeout can remove this peer.
+                peer.sync_with_ping()
+                self.mock_forward(TIMEOUT_INTERVAL // 2 + 1)
+                peer.wait_for_disconnect()
+            node.disconnect_p2ps()
 
 
 if __name__ == '__main__':

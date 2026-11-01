@@ -83,7 +83,7 @@ class SendTxRcnclTest(SyscoinTestFramework):
         assert sendtxrcncl_index < verack_index
         self.nodes[0].disconnect_p2ps()
 
-        self.log.info('SENDTXRCNCL on pre-WTXID version should not be sent')
+        self.log.info('Obsolete pre-WTXID peers are disconnected without SENDTXRCNCL')
         peer = self.nodes[0].add_p2p_connection(SendTxrcnclReceiver(), send_version=False, wait_for_verack=False)
         pre_wtxid_version_msg = msg_version()
         pre_wtxid_version_msg.nVersion = 70015
@@ -91,7 +91,7 @@ class SendTxRcnclTest(SyscoinTestFramework):
         pre_wtxid_version_msg.nServices = P2P_SERVICES
         pre_wtxid_version_msg.relay = 1
         peer.send_message(pre_wtxid_version_msg)
-        peer.wait_for_verack()
+        peer.wait_for_disconnect()
         assert not peer.sendtxrcncl_msg_received
         self.nodes[0].disconnect_p2ps()
 
@@ -195,16 +195,17 @@ class SendTxRcnclTest(SyscoinTestFramework):
             peer.send_message(sendtxrcncl_higher_version)
         self.nodes[0].disconnect_p2ps()
 
-        self.log.info('unexpected SENDTXRCNCL is ignored')
+        self.log.info('SENDTXRCNCL from a peer declining transaction relay triggers a disconnect')
         peer = self.nodes[0].add_p2p_connection(PeerNoVerack(), send_version=False, wait_for_verack=False)
-        old_version_msg = msg_version()
-        old_version_msg.nVersion = 70015
-        old_version_msg.strSubVer = P2P_SUBVERSION
-        old_version_msg.nServices = P2P_SERVICES
-        old_version_msg.relay = 1
-        peer.send_message(old_version_msg)
-        with self.nodes[0].assert_debug_log(['Ignore unexpected txreconciliation signal']):
+        no_txrelay_version_msg = msg_version()
+        no_txrelay_version_msg.nVersion = P2P_VERSION
+        no_txrelay_version_msg.strSubVer = P2P_SUBVERSION
+        no_txrelay_version_msg.nServices = P2P_SERVICES
+        no_txrelay_version_msg.relay = 0
+        peer.send_message(no_txrelay_version_msg)
+        with self.nodes[0].assert_debug_log(['which indicated no tx relay to us; disconnecting']):
             peer.send_message(create_sendtxrcncl_msg())
+            peer.wait_for_disconnect()
         self.nodes[0].disconnect_p2ps()
 
         self.log.info('sending SENDTXRCNCL after sending VERACK triggers a disconnect')

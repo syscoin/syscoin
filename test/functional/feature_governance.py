@@ -105,6 +105,33 @@ class SyscoinGovernanceTest (DashTestFramework):
 
         self.wait_until(all_triggers_synced, timeout=5)
 
+    def wait_for_initial_trigger_vote(self, node, trigger_hash):
+        def has_initial_vote():
+            # Trigger delivery can finish before its vote's delayed GETDATA
+            # becomes requestable. Keep mock time moving until the vote arrives.
+            self._throttled_bump_mocktime("feature_governance_initial_vote_sync", step=1)
+            trigger = node.gobject_list("valid", "triggers").get(trigger_hash, {})
+            return trigger.get('YesCount') == 1
+
+        self.wait_until(has_initial_vote, timeout=5)
+
+    def connect_masternode_to_controller(self, node):
+        controller_subver = self.nodes[0].getnetworkinfo()['subversion']
+
+        def outbound_ready():
+            return any(peer['subver'] == controller_subver
+                       and not peer['inbound'] and not peer['masternode']
+                       and peer['bytesrecv_per_msg'].get('pong', 0) >= 29
+                       for peer in node.getpeerinfo())
+
+        if not outbound_ready():
+            # Generic connect_nodes accepts either direction, but MN sync skips
+            # inbound/non-relay peers. Make this fixture's controller link outbound.
+            if any(peer['subver'] == controller_subver for peer in node.getpeerinfo()):
+                self.disconnect_nodes(node.index, 0)
+            self.connect_nodes(node.index, 0)
+        self.wait_until(outbound_ready, timeout=5)
+
     def wait_for_trigger(self, sb_block_height, timeout=10):
         def check_for_trigger():
             if((self.nodes[0].getblockcount()+1) >= sb_block_height):
@@ -265,8 +292,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.isolate_node(isolated)
         for idx, node in enumerate(non_isolated_nodes):
             if node.index != 0:
-                self.connect_nodes(0, node.index)
-                self.connect_nodes(node.index, 0)
+                self.connect_masternode_to_controller(node)
         # Move 1 block inside the Superblock maturity window on the isolated node
         self.bump_mocktime(1)
         self.generate(isolated, 1, sync_fun=self.no_op)
@@ -277,7 +303,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         # The isolated "winner" should submit new trigger and vote for it
         self.wait_until(lambda: sync_gobject_list_trigger(isolated, 1), timeout=5)
         isolated_trigger_hash = list(isolated.gobject_list("valid", "triggers").keys())[0]
-        self.wait_until(lambda: list(isolated.gobject_list("valid", "triggers").values())[0]['YesCount'] == 1, timeout=5)
+        self.wait_for_initial_trigger_vote(isolated, isolated_trigger_hash)
         more_votes = wait_until_helper_internal(lambda: list(isolated.gobject_list("valid", "triggers").values())[0]['YesCount'] > 1, timeout=5, do_assert=False)
         assert_equal(more_votes, False)
 
@@ -304,7 +330,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         for idx, node in enumerate(non_isolated_nodes):
             self.wait_until(lambda: sync_gobject_list_trigger(node, 1), timeout=5)
         winning_trigger_hash = list(self.nodes[0].gobject_list("valid", "triggers").keys())[0]
-        self.wait_until(lambda: list(self.nodes[0].gobject_list("valid", "triggers").values())[0]['YesCount'] == 1, timeout=5)
+        self.wait_for_initial_trigger_vote(self.nodes[0], winning_trigger_hash)
         more_votes = wait_until_helper_internal(lambda: list(self.nodes[0].gobject_list("valid", "triggers").values())[0]['YesCount'] > 1, timeout=5, do_assert=False)
         assert_equal(more_votes, False)
 
@@ -332,8 +358,7 @@ class SyscoinGovernanceTest (DashTestFramework):
         self.reconnect_isolated_node(self.nodes[payee_idx], 0)
         for idx, node in enumerate(self.nodes):
             if node.index != 0:
-                self.connect_nodes(0, node.index)
-                self.connect_nodes(node.index, 0)
+                self.connect_masternode_to_controller(node)
         self.sync_blocks()
 
         # re-sync helper

@@ -11,7 +11,12 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cassert>
+#include <memory>
 #include <thread>
+
+#ifdef USE_POLL
+#include <poll.h>
+#endif
 
 using namespace std::chrono_literals;
 
@@ -79,6 +84,69 @@ BOOST_AUTO_TEST_CASE(move_assignment)
     delete sock2;
     BOOST_CHECK(SocketIsClosed(s1));
     BOOST_CHECK(SocketIsClosed(s2));
+}
+
+BOOST_AUTO_TEST_CASE(wait_many_urgent_data_respects_receive_interest)
+{
+    Sock listener{CreateSocket()};
+    sockaddr_in endpoint{};
+    endpoint.sin_family = AF_INET;
+    endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    BOOST_REQUIRE_EQUAL(listener.Bind(reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint)), 0);
+    BOOST_REQUIRE_EQUAL(listener.Listen(1), 0);
+    socklen_t endpoint_len{sizeof(endpoint)};
+    BOOST_REQUIRE_EQUAL(listener.GetSockName(reinterpret_cast<sockaddr*>(&endpoint), &endpoint_len), 0);
+
+    auto sender{std::make_shared<Sock>(CreateSocket())};
+    BOOST_REQUIRE_EQUAL(sender->Connect(reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint)), 0);
+    std::shared_ptr<Sock> receiver{listener.Accept(nullptr, nullptr)};
+    BOOST_REQUIRE(receiver);
+    BOOST_REQUIRE(receiver->IsSelectable());
+    BOOST_REQUIRE(sender->IsSelectable());
+    const int inline_urgent{0};
+    BOOST_REQUIRE_EQUAL(receiver->SetSockOpt(SOL_SOCKET, SO_OOBINLINE, &inline_urgent, sizeof(inline_urgent)), 0);
+    BOOST_REQUIRE_EQUAL(sender->Send("!", 1, MSG_OOB), 1);
+
+    // Wait for a real TCP exception before checking that a paused receiver
+    // cannot turn it into another read, even while its socket is writable.
+#ifdef USE_POLL
+    pollfd urgent_poll{static_cast<int>(receiver->Get()), POLLPRI, 0};
+    BOOST_REQUIRE_EQUAL(poll(&urgent_poll, 1, 5000), 1);
+    BOOST_REQUIRE(urgent_poll.revents & POLLPRI);
+#else
+    fd_set exceptional;
+    FD_ZERO(&exceptional);
+    FD_SET(receiver->Get(), &exceptional);
+    timeval timeout{5, 0};
+    BOOST_REQUIRE_EQUAL(select(static_cast<int>(receiver->Get() + 1), nullptr, nullptr, &exceptional, &timeout), 1);
+    BOOST_REQUIRE(FD_ISSET(receiver->Get(), &exceptional));
+#endif
+
+    Sock::EventsPerSock interests{
+        {receiver, Sock::Events{Sock::SEND}},
+        {sender, Sock::Events{Sock::SEND}},
+    };
+    BOOST_REQUIRE(receiver->WaitMany(0ms, interests));
+    BOOST_CHECK_EQUAL(interests.at(receiver).occurred, Sock::SEND);
+
+    // Keep a writable socket in the set: Windows select rejects empty sets.
+    interests.at(receiver).requested = 0;
+    BOOST_REQUIRE(receiver->WaitMany(0ms, interests));
+    BOOST_CHECK_EQUAL(interests.at(receiver).occurred, 0);
+
+    interests.at(receiver).requested = Sock::RECV | Sock::SEND;
+    BOOST_REQUIRE(receiver->WaitMany(0ms, interests));
+    BOOST_CHECK(interests.at(receiver).occurred & Sock::SEND);
+#ifdef USE_POLL
+    // The poll backend does not subscribe to urgent-data events (POLLPRI).
+    BOOST_CHECK(!(interests.at(receiver).occurred & Sock::ERR));
+#else
+    // Receive-enabled select sockets must still report exceptions.
+    BOOST_CHECK(interests.at(receiver).occurred & Sock::ERR);
+#endif
+    char urgent{};
+    BOOST_REQUIRE_EQUAL(receiver->Recv(&urgent, 1, MSG_OOB), 1);
+    BOOST_CHECK_EQUAL(urgent, '!');
 }
 
 #ifndef WIN32 // Windows does not have socketpair(2).
