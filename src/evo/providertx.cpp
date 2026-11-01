@@ -4,6 +4,7 @@
 
 #include <evo/deterministicmns.h>
 #include <evo/providertx.h>
+#include <evo/providertx_signaturecache.h>
 #include <evo/specialtx.h>
 #include <llmq/quorums_utils.h>
 
@@ -17,6 +18,34 @@
 #include <script/script.h>
 #include <validation.h>
 #include <common/args.h>
+
+bool CProTxBLSCache::Verify(const CBLSSignature& signature, const CBLSPublicKey& pubkey,
+                          const uint256& message, bool legacy)
+{
+    if (!signature.IsValid() || !pubkey.IsValid()) {
+        m_last_result = Result::INVALID;
+        return false;
+    }
+
+    // Do not use the wrappers' cached GetHash(): their serialization depends
+    // on the global BLS scheme. Bind the same explicit scheme used below.
+    CHashWriter writer(SER_GETHASH, 0);
+    writer << std::string{"Syscoin/ProTx/BLS/1"} << legacy << pubkey.ToBytes(legacy)
+           << message << signature.ToBytes(legacy);
+    const uint256 key = writer.GetHash();
+    if (m_verified && *m_verified == key) {
+        m_last_result = Result::CACHED;
+        return true;
+    }
+    if (!signature.VerifyInsecure(pubkey, message, legacy)) {
+        m_last_result = Result::INVALID;
+        return false;
+    }
+    m_verified = key;
+    m_last_result = Result::VERIFIED;
+    return true;
+}
+
 bool CProRegTx::IsTriviallyValid(TxValidationState& state, bool is_basic_scheme_active) const
 {
     if (nVersion == 0 || nVersion > GetVersion(is_basic_scheme_active)) {
@@ -95,9 +124,14 @@ static bool CheckStringSig(const ProTx& proTx, const CKeyID& keyID, TxValidation
 }
 
 template <typename ProTx>
-static bool CheckHashSig(const ProTx& proTx, const CBLSPublicKey& pubKey, TxValidationState& state, bool fJustCheck)
+static bool CheckHashSig(const ProTx& proTx, const CBLSPublicKey& pubKey, TxValidationState& state, bool fJustCheck,
+                         CProTxBLSCache* signature_cache)
 {
-    if (!proTx.sig.VerifyInsecure(pubKey, ::SerializeHash(proTx))) {
+    const bool legacy = bls::bls_legacy_scheme.load();
+    const uint256 message = ::SerializeHash(proTx);
+    const bool valid = signature_cache ? signature_cache->Verify(proTx.sig, pubKey, message, legacy)
+                                       : proTx.sig.VerifyInsecure(pubKey, message, legacy);
+    if (!valid) {
         return FormatSyscoinErrorMessage(state, "bad-protx-bls-sig", fJustCheck);
     }
     return true;
@@ -220,7 +254,8 @@ bool CheckProRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVali
     return true;
 }
 
-bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs)
+bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs,
+                      CProTxBLSCache* signature_cache)
 {
     if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
         return FormatSyscoinErrorMessage(state, "bad-protx-type", fJustCheck);
@@ -289,7 +324,7 @@ bool CheckProUpServTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxV
             // pass the state returned by the function above
             return false;
         }
-        if (check_sigs && !CheckHashSig(ptx, mn->pdmnState->pubKeyOperator.Get(), state, fJustCheck)) {
+        if (check_sigs && !CheckHashSig(ptx, mn->pdmnState->pubKeyOperator.Get(), state, fJustCheck, signature_cache)) {
             // pass the state returned by the function above
             return false;
         }
@@ -367,7 +402,8 @@ bool CheckProUpRegTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
     return true;
 }
 
-bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs)
+bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxValidationState& state, bool fJustCheck, bool check_sigs,
+                     CProTxBLSCache* signature_cache)
 {
     if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         return FormatSyscoinErrorMessage(state, "bad-protx-type", fJustCheck);
@@ -392,7 +428,7 @@ bool CheckProUpRevTx(const CTransaction& tx, const CBlockIndex* pindexPrev, TxVa
             // pass the state returned by the function above
             return false;
         }
-        if (check_sigs && !CheckHashSig(ptx, dmn->pdmnState->pubKeyOperator.Get(), state, fJustCheck)) {
+        if (check_sigs && !CheckHashSig(ptx, dmn->pdmnState->pubKeyOperator.Get(), state, fJustCheck, signature_cache)) {
             // pass the state returned by the function above
             return false;
         }

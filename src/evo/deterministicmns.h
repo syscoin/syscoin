@@ -514,6 +514,9 @@ public:
     // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
     bool BuildNewListFromBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state, const CCoinsViewCache& view,
                                 CDeterministicMNList& mnListRet, CDeterministicMNList& mnOldListRet, const llmq::CFinalCommitmentTxPayload &qcTx) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    // SYSCOIN: Apply one transaction to a temporary list without persistence or notifications.
+    static bool ApplyTransactionToList(const CTransaction& tx, const CCoinsViewCache& view,
+                                       CDeterministicMNList& mnList, BlockValidationState& state);
     void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const CBlockIndex* pQuorumBaseBlockIndex, CDeterministicMNList& mnList);
     static void DecreasePoSePenalties(CDeterministicMNList& mnList, const std::vector<CDeterministicMNCPtr> &toDecrease);
 

@@ -36,7 +36,10 @@
 #include <bls/bls.h>
 class CBlockIndex;
 class CChain;
+// SYSCOIN: Provider list used by mempool conflict checks.
+class CDeterministicMNList;
 class Chainstate;
+namespace node { class BlockManager; }
 
 #include <atomic>
 #include <map>
@@ -413,6 +416,22 @@ public:
 
     using Limits = kernel::MemPoolLimits;
 
+    // SYSCOIN: Attempt-local provider indexes for transactions checked but not yet inserted.
+    struct ProviderTxConflictTracker {
+        std::set<CService> addresses;
+        std::set<std::vector<unsigned char>> nevm_addresses;
+        std::set<CKeyID> owner_keys;
+        std::set<uint256> operator_keys;
+        std::set<COutPoint> collaterals;
+        std::set<uint256> referenced_mns;
+        std::set<uint256> key_changed_mns;
+        std::set<COutPoint> spent_outpoints;
+
+        /** Mirror the provider indexes populated by addUnchecked, after validation succeeds. */
+        void Add(const CTransaction& tx, const CBlockIndex* pindexTip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    };
+    // END SYSCOIN
+
     uint64_t CalculateDescendantMaximum(txiter entry) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 private:
     typedef std::map<txiter, setEntries, CompareIteratorByHash> cacheMap;
@@ -494,16 +513,20 @@ public:
     // and any other callers may break wallet's in-mempool tracking (due to
     // lack of CValidationInterface::TransactionAddedToMempool callbacks).
     void addUnchecked(const CTxMemPoolEntry& entry, bool validFeeEstimate = true) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void addUnchecked(const CTxMemPoolEntry& entry, setEntries& setAncestors, bool validFeeEstimate = true) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    // SYSCOIN: Supply the admission tip for provider-index maintenance during reorg replay.
+    void addUnchecked(const CTxMemPoolEntry& entry, setEntries& setAncestors, bool validFeeEstimate = true, const CBlockIndex* pindexTip = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeRecursive(const CTransaction& tx, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
     // SYSCOIN
     void removeProTxPubKeyConflicts(const CTransaction &tx, const CKeyID &keyId) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxNEVMKeyConflicts(const CTransaction &tx, const std::vector<unsigned char> &vchNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxPubKeyConflicts(const CTransaction &tx, const CBLSLazyPublicKey &pubKey) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxCollateralConflicts(const CTransaction &tx, const COutPoint &collateralOutpoint) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void removeProTxSpentCollateralConflicts(const CTransaction &tx) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void removeProTxReferences(uint256 proTxHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    // SYSCOIN: Revalidate references affected by a successfully connected block.
+    void removeInvalidProTxReferencesForBlock(node::BlockManager& blockman, const CBlockIndex* pindexNew, CCoinsViewCache& coins) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void removeProTxSpentCollateralConflicts(const CTransaction &tx, const CDeterministicMNList& mnList) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxKeyChangedConflicts(const CTransaction &tx, const uint256& proTxHash, const uint256& newKeyHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void removeProTxConflicts(const CTransaction &tx) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void removeProTxConflicts(const CTransaction &tx, const CDeterministicMNList& mnList) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     bool existsConflicts(const CTransaction& tx) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     bool isSyscoinConflictIsFirstSeen(const CTransaction &tx) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     void removeZDAGConflicts(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
@@ -517,7 +540,7 @@ public:
     void removeForReorg(CChain& chain, std::function<bool(txiter)> filter_final_and_mature) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     // SYSCOIN
     void removeConflicts(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    void removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight, const CBlockIndex* pindexPrev) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
 
     bool CompareDepthAndScore(const uint256& hasha, const uint256& hashb, bool wtxid=false);
     void queryHashes(std::vector<uint256>& vtxid) const;
@@ -730,7 +753,10 @@ public:
 
     std::vector<TxMempoolInfo> infoAll() const;
     // SYSCOIN
-    bool existsProviderTxConflict(const CTransaction &tx) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    bool existsProviderTxConflict(const CTransaction &tx, const CBlockIndex* pindexTip,
+                                  const ProviderTxConflictTracker* package = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
+    /** Refresh surviving registrar/revoke metadata after a change to the active tip. */
+    void RefreshProviderTxKeyMetadata(const CBlockIndex* pindexTip) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     size_t DynamicMemoryUsage() const;
 
     /** Adds a transaction to the unbroadcast set */

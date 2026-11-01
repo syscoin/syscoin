@@ -440,7 +440,36 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 {
     nTransactionsUpdated += n;
 }
-void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate)
+// SYSCOIN: These fields describe the chain context in which an update is valid.
+static void UpdateProviderTxKeyMetadata(const CTxMemPoolEntry& entry, const CDeterministicMNList& mnList)
+{
+    const auto& tx = entry.GetTx();
+    if (tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR && tx.nVersion != SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+        return;
+    }
+    entry.validForProTxKey.SetNull();
+    entry.isKeyChangeProTx = false;
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
+        CProUpRegTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            if (const auto dmn = mnList.GetMN(proTx.proTxHash)) {
+                entry.validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
+                entry.isKeyChangeProTx = dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator;
+            }
+        }
+    } else {
+        CProUpRevTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            if (const auto dmn = mnList.GetMN(proTx.proTxHash)) {
+                entry.validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
+                entry.isKeyChangeProTx = dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey();
+            }
+        }
+    }
+}
+
+// SYSCOIN: Use the actual admission tip for provider-index maintenance.
+void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate, const CBlockIndex* pindexTip)
 {
     // Add to memory pool without checking anything.
     // Used by AcceptToMemoryPool(), which DOES do
@@ -524,26 +553,18 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
             mapProTxBlsPubKeyHashes.emplace(proTx.pubKeyOperator.GetHash(), tx_hash);
-            auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
-            if(dmn) {
-                newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
-                if (dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
-                    newit->isKeyChangeProTx = true;
-                }
-            }
         }
     } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
         CProUpRevTx proTx;
         if(GetTxPayload(tx, proTx)) {
             mapProTxRefs.emplace(proTx.proTxHash, tx_hash);
-            auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
-            if(dmn) {
-                newit->validForProTxKey = ::SerializeHash(dmn->pdmnState->pubKeyOperator);
-                if (dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey()) {
-                    newit->isKeyChangeProTx = true;
-                }
-            }
         }
+    }
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR || tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+        // ATMP supplies its actual tip, including during reorg replay.
+        // Direct test insertions retain the existing manager-tip fallback.
+        const auto mnList = pindexTip ? deterministicMNManager->GetListForBlock(pindexTip) : deterministicMNManager->GetListAtChainTip();
+        UpdateProviderTxKeyMetadata(*newit, mnList);
     }
 
     // Only admitted transactions own global mint reservations. Validation attempts use local sets.
@@ -925,41 +946,98 @@ void CTxMemPool::removeProTxCollateralConflicts(const CTransaction &tx, const CO
     }
 }
 
-void CTxMemPool::removeProTxSpentCollateralConflicts(const CTransaction &tx)
+// SYSCOIN: Remove all transactions referencing a replaced or spent masternode.
+void CTxMemPool::removeProTxReferences(uint256 proTxHash)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
-    // Remove TXs that refer to a MN for which the collateral was spent
-    auto removeSpentCollateralConflict = [&](const uint256& proTxHash) {
-        LOCK2(cs_main, cs);
-        // Can't use equal_range here as every call to removeRecursive might invalidate iterators
-        while (true) {
-            auto it = mapProTxRefs.find(proTxHash);
-            if (it == mapProTxRefs.end()) {
-                break;
-            }
-            auto conflictIt = mapTx.find(it->second);
-            if (conflictIt != mapTx.end()) {
-                removeRecursive(conflictIt->GetTx(), MemPoolRemovalReason::CONFLICT);
-            } else {
-                // Should not happen as we track referencing TXs in addUnchecked/removeUnchecked.
-                // But lets be on the safe side and not run into an endless loop...
-                LogPrint(BCLog::MEMPOOL, "%s: ERROR: found invalid TX ref in mapProTxRefs, proTxHash=%s, txHash=%s\n", __func__, proTxHash.ToString(), it->second.ToString());
-                mapProTxRefs.erase(it);
-            }
+
+    // Own the key: recursive removal can erase the caller's index entry too.
+    while (true) {
+        auto it = mapProTxRefs.find(proTxHash);
+        if (it == mapProTxRefs.end()) {
+            break;
         }
-    };
-    auto mnList = deterministicMNManager->GetListAtChainTip();
+        auto conflictIt = mapTx.find(it->second);
+        if (conflictIt != mapTx.end()) {
+            removeRecursive(conflictIt->GetTx(), MemPoolRemovalReason::CONFLICT);
+        } else {
+            // Should not happen as we track references in addUnchecked/removeUnchecked.
+            LogPrint(BCLog::MEMPOOL, "%s: ERROR: found invalid TX ref in mapProTxRefs, proTxHash=%s, txHash=%s\n", __func__, proTxHash.ToString(), it->second.ToString());
+            mapProTxRefs.erase(it);
+        }
+    }
+}
+
+// SYSCOIN: Forward state changes can invalidate updates without spending their
+// inputs. Visit only referenced MNs, then release stale reservations recursively.
+void CTxMemPool::removeInvalidProTxReferencesForBlock(node::BlockManager& blockman, const CBlockIndex* pindexNew, CCoinsViewCache& coins)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+    assert(pindexNew != nullptr);
+    if (!pindexNew->pprev || mapProTxRefs.empty()) return;
+
+    const auto old_list = deterministicMNManager->GetListForBlock(pindexNew->pprev);
+    const auto new_list = deterministicMNManager->GetListForBlock(pindexNew);
+    std::set<uint256> affected_transactions;
+    for (auto first = mapProTxRefs.begin(); first != mapProTxRefs.end();) {
+        const auto last = mapProTxRefs.upper_bound(first->first);
+        const auto old_mn = old_list.GetMN(first->first);
+        const auto new_mn = new_list.GetMN(first->first);
+        bool changed = old_mn != new_mn;
+        if (old_mn && new_mn && old_mn->pdmnState != new_mn->pdmnState) {
+            const CDeterministicMNStateDiff state_diff(*old_mn->pdmnState, *new_mn->pdmnState);
+            // Payment selection and penalty decay alone cannot change provider validity.
+            constexpr uint32_t ignored_fields = CDeterministicMNStateDiff::Field_nLastPaidHeight |
+                                                CDeterministicMNStateDiff::Field_nPoSePenalty;
+            changed = (state_diff.fields & ~ignored_fields) != 0 ||
+                      old_mn->collateralOutpoint != new_mn->collateralOutpoint ||
+                      old_mn->nOperatorReward != new_mn->nOperatorReward;
+        }
+        if (changed) {
+            for (auto it = first; it != last; ++it) affected_transactions.insert(it->second);
+        }
+        first = last;
+    }
+
+    // Own txids before removing anything: recursive removal erases references
+    // and can remove another transaction that was selected above.
+    for (const auto& txid : affected_transactions) {
+        const auto it = mapTx.find(txid);
+        if (it == mapTx.end()) continue;
+        const auto tx = it->GetSharedTx();
+        TxValidationState state;
+        if (!CheckSpecialTx(blockman, *tx, pindexNew, state, coins,
+                            /*fJustCheck=*/true, /*check_sigs=*/true, &it->GetProTxBLSCache())) {
+            removeRecursive(*tx, MemPoolRemovalReason::CONFLICT);
+        } else {
+            UpdateProviderTxKeyMetadata(*it, new_list);
+        }
+    }
+}
+
+void CTxMemPool::removeProTxSpentCollateralConflicts(const CTransaction &tx, const CDeterministicMNList& mnList)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+    // Remove TXs that refer to a MN for which the collateral was spent.
     for (const auto& in : tx.vin) {
         auto collateralIt = mapProTxCollaterals.find(in.prevout);
         if (collateralIt != mapProTxCollaterals.end()) {
-            // These are not yet mined ProRegTxs
-            removeSpentCollateralConflict(collateralIt->second);
+            // These are not yet mined ProRegTxs. Own the hash before recursive
+            // removal erases the collateral index, and remove the registration
+            // itself as well as its references and ordinary descendants.
+            const uint256 proTxHash{collateralIt->second};
+            removeProTxReferences(proTxHash);
+            if (auto registrationIt = mapTx.find(proTxHash); registrationIt != mapTx.end()) {
+                removeRecursive(registrationIt->GetTx(), MemPoolRemovalReason::CONFLICT);
+            }
         }
         auto dmn = mnList.GetMNByCollateral(in.prevout);
         if (dmn) {
             // These are updates referring to a mined ProRegTx
-            removeSpentCollateralConflict(dmn->proTxHash);
+            removeProTxReferences(dmn->proTxHash);
         }
     }
 }
@@ -977,22 +1055,33 @@ void CTxMemPool::removeProTxKeyChangedConflicts(const CTransaction &tx, const ui
         }
     }
     for (const auto& txHash : conflictingTxs) {
-        auto& tx = mapTx.find(txHash)->GetTx();
-        removeRecursive(tx, MemPoolRemovalReason::CONFLICT);
+        // SYSCOIN: Removing an earlier ancestor can already remove this txid.
+        if (auto it = mapTx.find(txHash); it != mapTx.end()) {
+            removeRecursive(it->GetTx(), MemPoolRemovalReason::CONFLICT);
+        }
     }
 }
 
-void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
+void CTxMemPool::removeProTxConflicts(const CTransaction &tx, const CDeterministicMNList& mnList)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
-    removeProTxSpentCollateralConflicts(tx);
+    removeProTxSpentCollateralConflicts(tx, mnList);
     const uint256 tx_hash{tx.GetHash()};
     if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
         CProRegTx proTx;
         if (!GetTxPayload(tx, proTx)) {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return;
+        }
+
+        if (!proTx.collateralOutpoint.hash.IsNull()) {
+            // Use this block's parent list even when activation connects a
+            // batch of blocks before updating the manager's tip pointer.
+            const auto replaced = mnList.GetMNByCollateral(proTx.collateralOutpoint);
+            if (replaced && replaced->proTxHash != tx_hash) {
+                removeProTxReferences(replaced->proTxHash);
+            }
         }
 
         if (mapProTxAddresses.count(proTx.addr)) {
@@ -1044,10 +1133,14 @@ void CTxMemPool::removeProTxConflicts(const CTransaction &tx)
 /**
  * Called when a block is connected. Removes from mempool and updates the miner fee estimator.
  */
-void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight)
+// SYSCOIN: Supply the connected block's parent for provider-conflict cleanup.
+void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight, const CBlockIndex* pindexPrev)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
+    // SYSCOIN: The manager's published tip can still refer to the old branch while a
+    // reorg connects several blocks. Null is only for genesis/no-MN test context.
+    const auto mnList = pindexPrev ? deterministicMNManager->GetListForBlock(pindexPrev) : CDeterministicMNList{};
     std::vector<const CTxMemPoolEntry*> entries;
     for (const auto& tx : vtx)
     {
@@ -1070,7 +1163,7 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
         removeConflicts(*tx);
         // SYSCOIN
         removeZDAGConflicts(*tx);
-        removeProTxConflicts(*tx);
+        removeProTxConflicts(*tx, mnList);
         ClearPrioritisation(tx->GetHash());
     }
     lastRollingFeeUpdate = GetTime();
@@ -1310,13 +1403,82 @@ TxMempoolInfo CTxMemPool::info(const GenTxid& gtxid) const
 }
 // SYSCOIN
 
-bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
+void CTxMemPool::ProviderTxConflictTracker::Add(const CTransaction& tx, const CBlockIndex* pindexTip)
+{
+    AssertLockHeld(cs_main);
+    assert(pindexTip != nullptr);
+
+    const uint256 tx_hash{tx.GetHash()};
+    if (tx.nVersion == SYSCOIN_TX_VERSION_MN_REGISTER) {
+        CProRegTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            addresses.insert(proTx.addr);
+            owner_keys.insert(proTx.keyIDOwner);
+            operator_keys.insert(proTx.pubKeyOperator.GetHash());
+            if (!proTx.collateralOutpoint.hash.IsNull()) {
+                referenced_mns.insert(tx_hash);
+                collaterals.insert(proTx.collateralOutpoint);
+            } else {
+                collaterals.emplace(tx_hash, proTx.collateralOutpoint.n);
+            }
+        }
+    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_SERVICE) {
+        CProUpServTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            referenced_mns.insert(proTx.proTxHash);
+            addresses.insert(proTx.addr);
+            if (!proTx.vchNEVMAddress.empty()) {
+                nevm_addresses.insert(proTx.vchNEVMAddress);
+            }
+        }
+    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REGISTRAR) {
+        CProUpRegTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            referenced_mns.insert(proTx.proTxHash);
+            operator_keys.insert(proTx.pubKeyOperator.GetHash());
+            const auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
+            if (dmn && dmn->pdmnState->pubKeyOperator != proTx.pubKeyOperator) {
+                key_changed_mns.insert(proTx.proTxHash);
+            }
+        }
+    } else if (tx.nVersion == SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE) {
+        CProUpRevTx proTx;
+        if (GetTxPayload(tx, proTx)) {
+            referenced_mns.insert(proTx.proTxHash);
+            const auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
+            if (dmn && dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey()) {
+                key_changed_mns.insert(proTx.proTxHash);
+            }
+        }
+    }
+    for (const auto& txin : tx.vin) {
+        spent_outpoints.insert(txin.prevout);
+    }
+}
+
+void CTxMemPool::RefreshProviderTxKeyMetadata(const CBlockIndex* pindexTip)
+{
     AssertLockHeld(cs_main);
     AssertLockHeld(cs);
+    assert(pindexTip != nullptr);
+    const auto mnList = deterministicMNManager->GetListForBlock(pindexTip);
+    for (const auto& entry : mapTx) {
+        UpdateProviderTxKeyMetadata(entry, mnList);
+    }
+}
+
+bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx, const CBlockIndex* pindexTip,
+                                        const ProviderTxConflictTracker* package) const {
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs);
+    assert(pindexTip != nullptr);
 
     auto hasKeyChangeInMempool = [&](const uint256& proTxHash) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main) {
         AssertLockHeld(cs_main);
         AssertLockHeld(cs);
+        if (package && package->key_changed_mns.count(proTxHash)) {
+            return true;
+        }
         for (auto its = mapProTxRefs.equal_range(proTxHash); its.first != its.second; ++its.first) {
             auto txit = mapTx.find(its.first->second);
             if (txit == mapTx.end()) {
@@ -1335,15 +1497,23 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return true; // i.e. can't decode payload == conflict
         }
-        if (mapProTxAddresses.count(proTx.addr) || mapProTxPubKeyIDs.count(proTx.keyIDOwner) || mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()))
+        if (mapProTxAddresses.count(proTx.addr) || mapProTxPubKeyIDs.count(proTx.keyIDOwner) || mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()) ||
+            (package && (package->addresses.count(proTx.addr) || package->owner_keys.count(proTx.keyIDOwner) || package->operator_keys.count(proTx.pubKeyOperator.GetHash()))))
             return true;
         if (!proTx.collateralOutpoint.hash.IsNull()) {
-            if (mapProTxCollaterals.count(proTx.collateralOutpoint)) {
+            if (mapProTxCollaterals.count(proTx.collateralOutpoint) || (package && package->collaterals.count(proTx.collateralOutpoint))) {
                 // there is another ProRegTx that refers to the same collateral
                 return true;
             }
-            if (mapNextTx.count(proTx.collateralOutpoint)) {
+            if (mapNextTx.count(proTx.collateralOutpoint) || (package && package->spent_outpoints.count(proTx.collateralOutpoint))) {
                 // there is another tx that spends the collateral
+                return true;
+            }
+            // A replacement can remove the old MN before its update is
+            // processed. Keep the first-seen transaction in the mempool.
+            const auto replaced = deterministicMNManager->GetListForBlock(pindexTip).GetMNByCollateral(proTx.collateralOutpoint);
+            if (replaced && (mapProTxRefs.find(replaced->proTxHash) != mapProTxRefs.end() ||
+                             (package && package->referenced_mns.count(replaced->proTxHash)))) {
                 return true;
             }
         }
@@ -1354,15 +1524,19 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Invalid transaction payload, tx: %s\n", __func__, tx_hash.ToString());
             return true; // i.e. can't decode payload == conflict
         }
+        const auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
+        if (dmn && (mapProTxCollaterals.count(dmn->collateralOutpoint) || (package && package->collaterals.count(dmn->collateralOutpoint)))) {
+            return true;
+        }
         if(proTx.addr != CService()) {
-            if(mapProTxAddresses.count(proTx.addr)) {
+            if(mapProTxAddresses.count(proTx.addr) || (package && package->addresses.count(proTx.addr))) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate address, tx: %s\n", __func__, tx_hash.ToString());
                 return true;
             }
         }
         if(!proTx.vchNEVMAddress.empty()) {
             // Check NEVM address uniqueness
-            if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress)) {
+            if (mapProTxNEVMAddresses.count(proTx.vchNEVMAddress) || (package && package->nevm_addresses.count(proTx.vchNEVMAddress))) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate NEVM address, tx: %s\n", __func__, tx_hash.ToString());
                 return true;
             }
@@ -1374,9 +1548,12 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             return true;
         }
     
-        auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
+        auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
         if (!dmn) {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
+            return true;
+        }
+        if (mapProTxCollaterals.count(dmn->collateralOutpoint) || (package && package->collaterals.count(dmn->collateralOutpoint))) {
             return true;
         }
         // only allow one operator key change in the mempool
@@ -1387,7 +1564,7 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
             }
         }
         if(proTx.pubKeyOperator.Get().IsValid()) {
-            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash())) {
+            if(mapProTxBlsPubKeyHashes.count(proTx.pubKeyOperator.GetHash()) || (package && package->operator_keys.count(proTx.pubKeyOperator.GetHash()))) {
                 LogPrint(BCLog::MEMPOOL, "%s: ERROR: Duplicate operator key (%s), tx: %s\n", __func__, proTx.pubKeyOperator.Get().ToString(), tx_hash.ToString());
                 return true;
             }
@@ -1400,10 +1577,13 @@ bool CTxMemPool::existsProviderTxConflict(const CTransaction &tx) const {
         }
 
         // this method should only be called with validated ProTxs
-        auto dmn = deterministicMNManager->GetListAtChainTip().GetMN(proTx.proTxHash);
+        auto dmn = deterministicMNManager->GetListForBlock(pindexTip).GetMN(proTx.proTxHash);
         if (!dmn) {
             LogPrint(BCLog::MEMPOOL, "%s: ERROR: Masternode is not in the list, proTxHash: %s\n", __func__, proTx.proTxHash.ToString());
             return true; // i.e. failed to find validated ProTx == conflict
+        }
+        if (mapProTxCollaterals.count(dmn->collateralOutpoint) || (package && package->collaterals.count(dmn->collateralOutpoint))) {
+            return true;
         }
         // only allow one operator key change in the mempool
         if (dmn->pdmnState->pubKeyOperator.Get() != CBLSPublicKey()) {

@@ -9,6 +9,8 @@
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <txmempool.h>
+// SYSCOIN
+#include <evo/deterministicmns.h>
 
 #include <memory>
 #include <optional>
@@ -156,6 +158,7 @@ private:
     Chainstate& m_chainstate;
     // SYSCOIN
     int nNumNEVMDataTxs;
+    std::optional<CDeterministicMNList> m_mn_block_context;
 
 public:
     struct Options {
@@ -188,7 +191,7 @@ private:
     /** Add transactions based on feerate including unconfirmed ancestors
       * Increments nPackagesSelected / nDescendantsUpdated with corresponding
       * statistics from the package selection (for logging statistics). */
-    void addPackageTxs(const CTxMemPool& mempool, int& nPackagesSelected, int& nDescendantsUpdated) EXCLUSIVE_LOCKS_REQUIRED(mempool.cs);
+    void addPackageTxs(const CTxMemPool& mempool, int& nPackagesSelected, int& nDescendantsUpdated) EXCLUSIVE_LOCKS_REQUIRED(cs_main, mempool.cs);
 
     // helper functions for addPackageTxs()
     /** Remove confirmed (inBlock) entries from given set */
@@ -201,6 +204,8 @@ private:
       * only as an extra check in case of suboptimal node configuration */
     // SYSCOIN
     bool TestPackageTransactions(const CTxMemPool& mempool, const CTxMemPool::setEntries& package) const EXCLUSIVE_LOCKS_REQUIRED(mempool.cs);
+    // SYSCOIN: Commit a package's MN state only if every transaction is valid in block order.
+    bool TestMasternodeTransactions(const std::vector<CTxMemPool::txiter>& package) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Sort the package in an order that is valid to appear in a block */
     void SortForBlock(const CTxMemPool::setEntries& package, std::vector<CTxMemPool::txiter>& sortedEntries);
 };

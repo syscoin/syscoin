@@ -114,6 +114,7 @@ void BlockAssembler::resetBlock()
     nFees = 0;
     // SYSCOIN
     nNumNEVMDataTxs = 0;
+    m_mn_block_context.reset();
 }
 
 std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
@@ -160,6 +161,22 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblock->nTime = TicksSinceEpoch<std::chrono::seconds>(GetAdjustedTime());
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();
 
+    // SYSCOIN: Freeze the commitment used by both selection and the final coinbase.
+    // Its PoSe changes precede all provider transactions in consensus processing.
+    llmq::CFinalCommitmentTxPayload qcTx;
+    bool have_quorum_commitment = false;
+    if (fDIP0003Active_context) {
+        have_quorum_commitment = llmq::quorumBlockProcessor->GetMinableCommitment(nHeight, qcTx.commitment);
+        if (have_quorum_commitment) qcTx.nHeight = nHeight;
+        CDeterministicMNList old_list, next_list;
+        BlockValidationState context_state;
+        if (!deterministicMNManager->BuildNewListFromBlock(*pblock, pindexPrev, context_state,
+                m_chainstate.CoinsTip(), next_list, old_list, qcTx)) {
+            throw std::runtime_error(strprintf("%s: Invalid masternode block context: %s", __func__, context_state.ToString()));
+        }
+        m_mn_block_context = std::move(next_list);
+    }
+
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
     if (m_mempool) {
@@ -195,12 +212,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     if(fDIP0003Active_context) {
         // Update coinbase transaction with additional info about masternode and governance payments,
         // get some info back to pass to getblocktemplate
-        llmq::CFinalCommitmentTxPayload qcTx;
-        // create commitment payload if quorum commitment is needed
-        llmq::CFinalCommitment commitment;
-        // this quorum period start
-        if (llmq::quorumBlockProcessor->GetMinableCommitment(nHeight, qcTx.commitment)) {
-            qcTx.nHeight = nHeight;
+        if (have_quorum_commitment) {
             coinbaseTx.nVersion = SYSCOIN_TX_VERSION_MN_QUORUM_COMMITMENT;
             ds << qcTx;
         }
@@ -333,6 +345,46 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool& mempool, const CT
     return true;
 }
 
+// SYSCOIN: Mempool checks use the parent list; provider updates and the quorum
+// commitment can change that state before a later transaction in this block.
+bool BlockAssembler::TestMasternodeTransactions(const std::vector<CTxMemPool::txiter>& package)
+{
+    AssertLockHeld(cs_main);
+    if (!m_mn_block_context || std::none_of(package.begin(), package.end(), [](const auto& entry) {
+            const auto version = entry->GetTx().nVersion;
+            return version >= SYSCOIN_TX_VERSION_MN_REGISTER && version <= SYSCOIN_TX_VERSION_MN_UPDATE_REVOKE;
+        })) {
+        return true;
+    }
+
+    // The list uses persistent maps, so a trial snapshot is cheap and rejection
+    // cannot leave partially applied state for the next package candidate.
+    auto trial_list = *m_mn_block_context;
+    for (const auto& entry : package) {
+        BlockValidationState state;
+        try {
+            // Consensus first checks every provider against the actual parent.
+            // An earlier candidate revival must not repair a parent-invalid update.
+            TxValidationState parent_state;
+            if (!CheckSpecialTx(m_chainstate.m_blockman, entry->GetTx(), m_chainstate.m_chain.Tip(),
+                                parent_state, m_chainstate.CoinsTip(), /*fJustCheck=*/true, /*check_sigs=*/true,
+                                &entry->GetProTxBLSCache())) {
+                LogPrint(BCLog::MNLIST, "BlockAssembler: skipping parent-invalid provider package at %s: %s\n", entry->GetTx().GetHash().ToString(), parent_state.ToString());
+                return false;
+            }
+            if (!CDeterministicMNManager::ApplyTransactionToList(entry->GetTx(), m_chainstate.CoinsTip(), trial_list, state)) {
+                LogPrint(BCLog::MNLIST, "BlockAssembler: skipping provider package at %s: %s\n", entry->GetTx().GetHash().ToString(), state.ToString());
+                return false;
+            }
+        } catch (const std::exception& e) {
+            LogPrint(BCLog::MNLIST, "BlockAssembler: skipping provider package at %s: %s\n", entry->GetTx().GetHash().ToString(), e.what());
+            return false;
+        }
+    }
+    m_mn_block_context = std::move(trial_list);
+    return true;
+}
+
 void BlockAssembler::AddToBlock(CTxMemPool::txiter iter)
 {
     pblocktemplate->block.vtx.emplace_back(iter->GetSharedTx());
@@ -408,6 +460,7 @@ void BlockAssembler::SortForBlock(const CTxMemPool::setEntries& package, std::ve
 // transaction package to work on next.
 void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSelected, int& nDescendantsUpdated)
 {
+    AssertLockHeld(cs_main);
     AssertLockHeld(mempool.cs);
 
     // mapModifiedTx will store sorted packages after they are modified
@@ -536,12 +589,21 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
             continue;
         }
 
-        // This transaction will make it in; reset the failed counter.
-        nConsecutiveFailed = 0;
-
         // Package can be added. Sort the entries in a valid order.
         std::vector<CTxMemPool::txiter> sortedEntries;
         SortForBlock(ancestors, sortedEntries);
+
+        // SYSCOIN: Validate provider transitions in the same order as the block.
+        if (!TestMasternodeTransactions(sortedEntries)) {
+            if (fUsingModified) {
+                mapModifiedTx.get<ancestor_score>().erase(modit);
+                failedTx.insert(iter);
+            }
+            continue;
+        }
+
+        // This transaction will make it in; reset the failed counter.
+        nConsecutiveFailed = 0;
 
         for (size_t i = 0; i < sortedEntries.size(); ++i) {
             AddToBlock(sortedEntries[i]);
