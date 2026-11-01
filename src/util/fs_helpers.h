@@ -8,8 +8,13 @@
 
 #include <util/fs.h>
 
+#ifndef WIN32
+#include <sys/types.h>
+#endif
+
 #include <cstdint>
 #include <cstdio>
+#include <cerrno>
 #include <iosfwd>
 #include <limits>
 #include <optional>
@@ -26,9 +31,34 @@ bool FileCommit(FILE* file);
  */
 void DirectoryCommit(const fs::path& dirname);
 
-bool TruncateFile(FILE* file, unsigned int length);
+bool TruncateFile(FILE* file, uint64_t length);
+
+/** Use 64-bit file positions, including on Windows where long remains 32 bits. */
+inline int FileSeek64(FILE* file, int64_t offset, int origin)
+{
+#ifdef WIN32
+    return _fseeki64(file, offset, origin);
+#else
+    // Fail instead of narrowing on platforms without large-file support.
+    if (offset < std::numeric_limits<off_t>::min() || offset > std::numeric_limits<off_t>::max()) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    return ::fseeko(file, static_cast<off_t>(offset), origin);
+#endif
+}
+
+inline int64_t FileTell64(FILE* file)
+{
+#ifdef WIN32
+    return _ftelli64(file);
+#else
+    return ::ftello(file);
+#endif
+}
+
 int RaiseFileDescriptorLimit(int nMinFD);
-void AllocateFileRange(FILE* file, unsigned int offset, unsigned int length);
+void AllocateFileRange(FILE* file, uint64_t offset, uint64_t length);
 
 /**
  * Rename src to dest.

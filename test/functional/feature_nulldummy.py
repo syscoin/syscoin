@@ -37,7 +37,9 @@ from test_framework.util import (
 from test_framework.wallet import getnewdestination
 from test_framework.wallet_util import generate_keypair
 
-NULLDUMMY_ERROR = "mandatory-script-verify-flag-failed (Dummy CHECKMULTISIG argument must be zero)"
+NULLDUMMY_BLK_ERROR = "mandatory-script-verify-flag-failed (Dummy CHECKMULTISIG argument must be zero)"
+
+NULLDUMMY_TX_ERROR = NULLDUMMY_BLK_ERROR.replace("mandatory-script", "mempool-script")
 
 
 def invalidate_nulldummy_tx(tx):
@@ -106,7 +108,7 @@ class NULLDUMMYTest(SyscoinTestFramework):
                                           addr=self.ms_address, amount=47,
                                           privkey=self.privkey)
         invalidate_nulldummy_tx(test2tx)
-        assert_raises_rpc_error(-26, NULLDUMMY_ERROR, self.nodes[0].sendrawtransaction, test2tx.serialize_with_witness().hex(), 0)
+        assert_raises_rpc_error(-26, NULLDUMMY_TX_ERROR, self.nodes[0].sendrawtransaction, test2tx.serialize_with_witness().hex(), 0)
 
         self.log.info(f"Test 3: Non-NULLDUMMY base transactions should be accepted in a block before activation [{COINBASE_MATURITY + 4}]")
         self.block_submit(self.nodes[0], [test2tx], accept=True)
@@ -117,7 +119,7 @@ class NULLDUMMYTest(SyscoinTestFramework):
                                           privkey=self.privkey)
         test6txs = [CTransaction(test4tx)]
         invalidate_nulldummy_tx(test4tx)
-        assert_raises_rpc_error(-26, NULLDUMMY_ERROR, self.nodes[0].sendrawtransaction, test4tx.serialize_with_witness().hex(), 0)
+        assert_raises_rpc_error(-26, NULLDUMMY_TX_ERROR, self.nodes[0].sendrawtransaction, test4tx.serialize_with_witness().hex(), 0)
         self.block_submit(self.nodes[0], [test4tx], accept=False)
 
         self.log.info("Test 5: Non-NULLDUMMY P2WSH multisig transaction invalid after activation")
@@ -127,7 +129,7 @@ class NULLDUMMYTest(SyscoinTestFramework):
                                           privkey=self.privkey)
         test6txs.append(CTransaction(test5tx))
         test5tx.wit.vtxinwit[0].scriptWitness.stack[0] = b'\x01'
-        assert_raises_rpc_error(-26, NULLDUMMY_ERROR, self.nodes[0].sendrawtransaction, test5tx.serialize_with_witness().hex(), 0)
+        assert_raises_rpc_error(-26, NULLDUMMY_TX_ERROR, self.nodes[0].sendrawtransaction, test5tx.serialize_with_witness().hex(), 0)
         self.block_submit(self.nodes[0], [test5tx], with_witness=True, accept=False)
 
         self.log.info(f"Test 6: NULLDUMMY compliant base/witness transactions should be accepted to mempool and in block after activation [{COINBASE_MATURITY + 5}]")
@@ -143,7 +145,7 @@ class NULLDUMMYTest(SyscoinTestFramework):
         if with_witness:
             add_witness_commitment(block)
         block.solve()
-        assert_equal(None if accept else NULLDUMMY_ERROR, node.submitblock(block.serialize().hex()))
+        assert_equal(None if accept else NULLDUMMY_BLK_ERROR, node.submitblock(block.serialize().hex()))
         if accept:
             assert_equal(node.getbestblockhash(), block.hash)
             self.lastblockhash = block.hash

@@ -12,10 +12,15 @@
 #include <util/string.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <list>
 #include <mutex>
+#include <memory>
+#if __has_include(<source_location>)
+#include <source_location>
+#endif
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -95,6 +100,41 @@ namespace BCLog {
         None, // Internal use only
     };
     constexpr auto DEFAULT_LOG_LEVEL{Level::Debug};
+    constexpr uint64_t RATELIMIT_MAX_BYTES{1024 * 1024};
+
+    /** Fixed-window disk-log quota for each source file and line. */
+    class LogRateLimiter
+    {
+    public:
+        enum class Status { UNSUPPRESSED, NEWLY_SUPPRESSED, STILL_SUPPRESSED };
+
+        const uint64_t m_max_bytes;
+        const std::chrono::seconds m_reset_window;
+
+        explicit LogRateLimiter(uint64_t max_bytes = RATELIMIT_MAX_BYTES,
+                                std::chrono::seconds reset_window = std::chrono::hours{1});
+        Status Consume(const std::string& function, const std::string& file, int line, uint64_t bytes);
+        void Reset();
+        bool SuppressionsActive() const { return m_suppression_active.load(); }
+
+    private:
+        using Source = std::pair<std::string, int>;
+        struct SourceHasher {
+            size_t operator()(const Source& source) const noexcept
+            {
+                return std::hash<std::string>{}(source.first) ^
+                       (std::hash<int>{}(source.second) << 1);
+            }
+        };
+        struct Counter {
+            std::string function;
+            uint64_t available;
+            uint64_t dropped{0};
+        };
+        mutable StdMutex m_mutex;
+        std::unordered_map<Source, Counter, SourceHasher> m_sources GUARDED_BY(m_mutex);
+        std::atomic<bool> m_suppression_active{false};
+    };
 
     class Logger
     {
@@ -104,6 +144,7 @@ namespace BCLog {
         FILE* m_fileout GUARDED_BY(m_cs) = nullptr;
         std::list<std::string> m_msgs_before_open GUARDED_BY(m_cs);
         bool m_buffering GUARDED_BY(m_cs) = true; //!< Buffer messages before logging can be started.
+        std::shared_ptr<LogRateLimiter> m_limiter GUARDED_BY(m_cs);
 
         /**
          * m_started_new_line is a state variable that will suppress printing of
@@ -127,6 +168,10 @@ namespace BCLog {
         /** Slots that connect to the print signal */
         std::list<std::function<void(const std::string&)>> m_print_callbacks GUARDED_BY(m_cs) {};
 
+        void LogPrintStr_(const std::string& str, const std::string& logging_function,
+                          const std::string& source_file, int source_line, LogFlags category,
+                          Level level, bool should_ratelimit) EXCLUSIVE_LOCKS_REQUIRED(m_cs);
+
     public:
         bool m_print_to_console = false;
         bool m_print_to_file = false;
@@ -140,7 +185,12 @@ namespace BCLog {
         std::atomic<bool> m_reopen_file{false};
 
         /** Send a string to the log output */
-        void LogPrintStr(const std::string& str, const std::string& logging_function, const std::string& source_file, int source_line, BCLog::LogFlags category, BCLog::Level level);
+        void LogPrintStr(const std::string& str, const std::string& logging_function, const std::string& source_file, int source_line, BCLog::LogFlags category, BCLog::Level level, bool should_ratelimit = true);
+        void SetRateLimiting(std::shared_ptr<LogRateLimiter> limiter)
+        {
+            StdLockGuard scoped_lock(m_cs);
+            m_limiter = std::move(limiter);
+        }
 
         /** Returns whether logs will be written to any output */
         bool Enabled() const
@@ -232,7 +282,7 @@ bool GetLogCategory(BCLog::LogFlags& flag, const std::string& str);
 // peer can fill up a user's disk with debug.log entries.
 
 template <typename... Args>
-static inline void LogPrintf_(const std::string& logging_function, const std::string& source_file, const int source_line, const BCLog::LogFlags flag, const BCLog::Level level, const char* fmt, const Args&... args)
+static inline void LogPrintf_(const std::string& logging_function, const std::string& source_file, const int source_line, const BCLog::LogFlags flag, const BCLog::Level level, bool should_ratelimit, const char* fmt, const Args&... args)
 {
     if (LogInstance().Enabled()) {
         std::string log_msg;
@@ -242,17 +292,24 @@ static inline void LogPrintf_(const std::string& logging_function, const std::st
             /* Original format string will have newline so don't add one here */
             log_msg = "Error \"" + std::string(fmterr.what()) + "\" while formatting log message: " + fmt;
         }
-        LogInstance().LogPrintStr(log_msg, logging_function, source_file, source_line, flag, level);
+        LogInstance().LogPrintStr(log_msg, logging_function, source_file, source_line, flag, level, should_ratelimit);
     }
 }
 
-#define LogPrintLevel_(category, level, ...) LogPrintf_(__func__, __FILE__, __LINE__, category, level, __VA_ARGS__)
+template <typename... Args>
+static inline void LogPrintf_(const std::string& logging_function, const std::string& source_file, const int source_line, const BCLog::LogFlags flag, const BCLog::Level level, const char* fmt, const Args&... args)
+{
+    LogPrintf_(logging_function, source_file, source_line, flag, level,
+               level == BCLog::Level::None || level >= BCLog::Level::Info, fmt, args...);
+}
+
+#define LogPrintLevel_(category, level, should_ratelimit, ...) LogPrintf_(__func__, __FILE__, __LINE__, category, level, should_ratelimit, __VA_ARGS__)
 
 // Log unconditionally.
-#define LogPrintf(...) LogPrintLevel_(BCLog::LogFlags::NONE, BCLog::Level::None, __VA_ARGS__)
+#define LogPrintf(...) LogPrintLevel_(BCLog::LogFlags::NONE, BCLog::Level::None, true, __VA_ARGS__)
 
 // Log unconditionally, prefixing the output with the passed category name.
-#define LogPrintfCategory(category, ...) LogPrintLevel_(category, BCLog::Level::None, __VA_ARGS__)
+#define LogPrintfCategory(category, ...) LogPrintLevel_(category, BCLog::Level::None, true, __VA_ARGS__)
 
 // Use a macro instead of a function for conditional logging to prevent
 // evaluating arguments when logging for the category is not enabled.
@@ -261,7 +318,7 @@ static inline void LogPrintf_(const std::string& logging_function, const std::st
 #define LogPrint(category, ...)                                        \
     do {                                                               \
         if (LogAcceptCategory((category), BCLog::Level::Debug)) {      \
-            LogPrintLevel_(category, BCLog::Level::None, __VA_ARGS__); \
+            LogPrintLevel_(category, BCLog::Level::None, false, __VA_ARGS__); \
         }                                                              \
     } while (0)
 
@@ -269,14 +326,35 @@ static inline void LogPrintf_(const std::string& logging_function, const std::st
 #define LogPrintLevel(category, level, ...)               \
     do {                                                  \
         if (LogAcceptCategory((category), (level))) {     \
-            LogPrintLevel_(category, level, __VA_ARGS__); \
+            LogPrintLevel_(category, level, (level) >= BCLog::Level::Info, __VA_ARGS__); \
         }                                                 \
     } while (0)
 
+/** Capture error()'s caller, rather than sharing one quota for every error. */
+struct LogErrorFormat {
+    const char* format;
+    const char* source_function;
+    const char* source_file;
+    int source_line;
+#if defined(__cpp_lib_source_location) && __cpp_lib_source_location >= 201907L
+    LogErrorFormat(const char* value, std::source_location source = std::source_location::current())
+        : format{value}, source_function{source.function_name()}, source_file{source.file_name()},
+          source_line{static_cast<int>(source.line())} {}
+#else
+    // Default arguments capture the conversion's caller, even when error()'s
+    // format argument is converted implicitly. Older libraries lack source_location.
+    LogErrorFormat(const char* value, const char* caller_function = __builtin_FUNCTION(),
+                   const char* caller_file = __builtin_FILE(), int caller_line = __builtin_LINE())
+        : format{value}, source_function{caller_function}, source_file{caller_file}, source_line{caller_line} {}
+#endif
+};
+
 template <typename... Args>
-bool error(const char* fmt, const Args&... args)
+bool error(LogErrorFormat fmt, const Args&... args)
 {
-    LogPrintf("ERROR: %s\n", tfm::format(fmt, args...));
+    LogPrintf_(fmt.source_function, fmt.source_file, fmt.source_line,
+               BCLog::LogFlags::NONE, BCLog::Level::None, true,
+               "ERROR: %s\n", tfm::format(fmt.format, args...));
     return false;
 }
 

@@ -17,11 +17,45 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <limits>
 #include <optional>
 #include <string>
 
 using namespace std::literals;
 using node::NodeContext;
+
+// Use the existing test-access friend to exercise large IDs without billions
+// of address insertions. IDs are private, in-memory bookkeeping only.
+class AddrManDeterministic : public AddrMan
+{
+public:
+    using AddrMan::AddrMan;
+
+    void SetNextIdForTest(nid_type next_id)
+    {
+        LOCK(m_impl->cs);
+        BOOST_REQUIRE(m_impl->mapInfo.empty());
+        m_impl->nIdCount = next_id;
+    }
+
+    nid_type IdForTest(const CService& address) const
+    {
+        LOCK(m_impl->cs);
+        return m_impl->mapAddr.at(address);
+    }
+
+    nid_type NextIdForTest() const
+    {
+        LOCK(m_impl->cs);
+        return m_impl->nIdCount;
+    }
+
+    int CheckForTest() const
+    {
+        LOCK(m_impl->cs);
+        return m_impl->CheckAddrman();
+    }
+};
 
 static NetGroupManager EMPTY_NETGROUPMAN{std::vector<bool>()};
 static const bool DETERMINISTIC{true};
@@ -59,6 +93,60 @@ static std::vector<bool> FromBytes(const unsigned char* source, int vector_size)
 }
 
 BOOST_FIXTURE_TEST_SUITE(addrman_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(addrman_ids_cross_int32_boundary)
+{
+    AddrManDeterministic addrman{EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node)};
+    constexpr nid_type first_id{nid_type{std::numeric_limits<int32_t>::max()} - 18};
+    addrman.SetNextIdForTest(first_id);
+    const CNetAddr source{ResolveIP("252.2.2.2")};
+    std::vector<CAddress> addresses;
+    for (int i = 1; i <= 36; ++i) {
+        CAddress address{ResolveService("250.1.1." + ToString(i)), NODE_NONE};
+        address.nTime = Now<NodeSeconds>();
+        addresses.push_back(address);
+        BOOST_REQUIRE(addrman.Add({address}, source));
+        BOOST_CHECK_EQUAL(addrman.IdForTest(address), first_id + i - 1);
+        // With the deterministic bucket key, entry 36 collides with entry 19.
+        BOOST_CHECK_EQUAL(addrman.Good(address), i != 36);
+        BOOST_CHECK_EQUAL(addrman.CheckForTest(), 0);
+    }
+    BOOST_CHECK_EQUAL(addrman.NextIdForTest(), first_id + 36);
+    BOOST_REQUIRE_EQUAL(addrman.Size(), 36U);
+
+    const auto incumbent{addrman.SelectTriedCollision().first};
+    BOOST_REQUIRE_EQUAL(incumbent.ToStringAddrPort(), "250.1.1.19:0");
+    BOOST_CHECK_EQUAL(addrman.IdForTest(incumbent), std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!addrman.Good(incumbent, NodeSeconds{1s}));
+    addrman.Attempt(incumbent, /*fCountFailure=*/false, Now<NodeSeconds>() - 61s);
+    addrman.ResolveCollisions();
+    BOOST_REQUIRE(addrman.FindAddressEntry(addresses.back()).has_value());
+    BOOST_CHECK(addrman.FindAddressEntry(addresses.back())->tried);
+    BOOST_CHECK(!addrman.FindAddressEntry(incumbent)->tried);
+    BOOST_CHECK_EQUAL(addrman.CheckForTest(), 0);
+    for (int i = 0; i < 32; ++i) {
+        BOOST_CHECK(addrman.FindAddressEntry(addrman.Select().first).has_value());
+    }
+    BOOST_CHECK_EQUAL(addrman.GetAddr(0, 0, std::nullopt).size(), addresses.size());
+
+    DataStream serialized{};
+    serialized << addrman;
+    // Private IDs are remapped to compact indices in the unchanged v4 format.
+    BOOST_REQUIRE(serialized.size() >= 2);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(serialized[0]), 4U);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(serialized[1]), 36U);
+    AddrManDeterministic restored{EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node)};
+    serialized >> restored;
+    BOOST_CHECK(serialized.empty());
+    BOOST_CHECK_EQUAL(restored.Size(), addresses.size());
+    BOOST_CHECK_EQUAL(restored.NextIdForTest(), addresses.size());
+    BOOST_CHECK_EQUAL(restored.CheckForTest(), 0);
+    for (const auto& address : addresses) {
+        const auto restored_position{restored.FindAddressEntry(address)};
+        BOOST_REQUIRE(restored_position.has_value());
+        BOOST_CHECK_EQUAL(restored_position->tried, addrman.FindAddressEntry(address)->tried);
+    }
+}
 
 BOOST_AUTO_TEST_CASE(addrman_simple)
 {

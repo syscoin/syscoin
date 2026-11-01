@@ -25,6 +25,7 @@ void CBatchedLogger::Flush()
     if (!m_accept || m_msg.empty()) {
         return;
     }
-    LogInstance().LogPrintStr(m_msg, m_logging_function, m_source_file, m_source_line, m_category, m_level);
+    LogInstance().LogPrintStr(m_msg, m_logging_function, m_source_file, m_source_line, m_category, m_level,
+                             m_level == BCLog::Level::None || m_level >= BCLog::Level::Info);
     m_msg.clear();
 }

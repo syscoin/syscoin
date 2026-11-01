@@ -235,8 +235,28 @@ extern const HashWriter HASHER_TAPSIGHASH; //!< Hasher with tag "TapSighash" pre
 extern const HashWriter HASHER_TAPLEAF;    //!< Hasher with tag "TapLeaf" pre-fed to it.
 extern const HashWriter HASHER_TAPBRANCH;  //!< Hasher with tag "TapBranch" pre-fed to it.
 
+/** Cache ECDSA sighash midstates for one immutable transaction, input and amount. */
+class SigHashCache
+{
+    struct Entry {
+        CScript script_code;
+        HashWriter writer;
+        SigVersion sigversion;
+    };
+
+    // Hash types sharing a serialization differ only in the final hash-type word.
+    // A different scriptCode or signature version replaces the corresponding entry.
+    std::optional<Entry> m_cache_entries[6];
+
+    static int CacheIndex(int hash_type) noexcept;
+
+public:
+    [[nodiscard]] std::optional<HashWriter> Load(int hash_type, const CScript& script_code, SigVersion sigversion) const noexcept;
+    void Store(int hash_type, const CScript& script_code, SigVersion sigversion, const HashWriter& writer);
+};
+
 template <class T>
-uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache = nullptr);
+uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache = nullptr, SigHashCache* sighash_cache = nullptr);
 
 class BaseSignatureChecker
 {
@@ -285,6 +305,7 @@ private:
     unsigned int nIn;
     const CAmount amount;
     const PrecomputedTransactionData* txdata;
+    mutable SigHashCache m_sighash_cache;
 
 protected:
     virtual bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;

@@ -4,13 +4,23 @@
 
 #include <chainparams.h>
 #include <clientversion.h>
+#include <chain.h>
+#include <compat/compat.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
 #include <script/solver.h>
 #include <primitives/block.h>
+#include <streams.h>
+#include <undo.h>
 #include <util/chaintype.h>
+#include <util/fs_helpers.h>
 #include <validation.h>
+
+#ifdef WIN32
+#include <io.h>
+#include <winioctl.h>
+#endif
 
 #include <boost/test/unit_test.hpp>
 #include <test/util/logging.h>
@@ -20,6 +30,20 @@ using node::BLOCK_SERIALIZATION_HEADER_SIZE;
 using node::BlockManager;
 using node::KernelNotifications;
 using node::MAX_BLOCKFILE_SIZE;
+
+namespace node {
+struct BlockManagerTestAccess {
+    static bool FindUndoPos(BlockManager& blockman, BlockValidationState& state, int file_number, FlatFilePos& pos, uint64_t add_size)
+    {
+        return blockman.FindUndoPos(state, file_number, pos, add_size);
+    }
+
+    static fs::path UndoFileName(const BlockManager& blockman, const FlatFilePos& pos)
+    {
+        return blockman.UndoFileSeq().FileName(pos);
+    }
+};
+} // namespace node
 
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
@@ -50,6 +74,94 @@ BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
     // add another 8 bytes for the second block's serialization header and we get 293 + 8 = 301
     FlatFilePos actual{blockman.SaveBlockToDisk(params->GenesisBlock(), 1, nullptr)};
     BOOST_CHECK_EQUAL(actual.nPos, BLOCK_SERIALIZATION_HEADER_SIZE + ::GetSerializeSize(params->GenesisBlock(), CLIENT_VERSION) + BLOCK_SERIALIZATION_HEADER_SIZE);
+}
+
+BOOST_AUTO_TEST_CASE(blockmanager_undo_positions_do_not_wrap_at_4gb)
+{
+    const auto params{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    KernelNotifications notifications{m_node.exit_status};
+    const BlockManager::Options options{
+        .chainparams = *params,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+    };
+    BlockManager blockman{m_node.kernel->interrupt, options};
+    BOOST_REQUIRE(!blockman.SaveBlockToDisk(params->GenesisBlock(), 0, nullptr).IsNull());
+    const uint64_t high{(uint64_t{1} << 32) + 100};
+    blockman.GetBlockFileInfo(0)->nUndoSize = high;
+    BlockValidationState state;
+    FlatFilePos first;
+    BOOST_REQUIRE(node::BlockManagerTestAccess::FindUndoPos(blockman, state, 0, first, 20));
+    BOOST_CHECK_EQUAL(first.nPos, high);
+    BOOST_CHECK_EQUAL(blockman.GetBlockFileInfo(0)->nUndoSize, high + 20);
+    FlatFilePos second;
+    BOOST_REQUIRE(node::BlockManagerTestAccess::FindUndoPos(blockman, state, 0, second, 30));
+    BOOST_CHECK_EQUAL(second.nPos, high + 20);
+    BOOST_CHECK_EQUAL(blockman.GetBlockFileInfo(0)->nUndoSize, high + 50);
+    // Both positions stay in the same preallocation chunk; allocation creates no file.
+    const auto undo_path{node::BlockManagerTestAccess::UndoFileName(blockman, first)};
+    BOOST_CHECK(!fs::exists(undo_path));
+#if !defined(WIN32)
+    if (sizeof(off_t) < sizeof(int64_t)) return;
+#endif
+    const uint8_t marker{0x5a};
+    {
+        CAutoFile low{fsbridge::fopen(undo_path, "wb"), CLIENT_VERSION};
+        BOOST_REQUIRE(!low.IsNull());
+#ifdef WIN32
+        DWORD returned{};
+        BOOST_REQUIRE(DeviceIoControl(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(low.Get()))),
+                                      FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr));
+#endif
+        low << marker;
+    }
+
+    // Exercise the actual undo writer and checksum reader above the old 32-bit limit.
+    const uint256 previous_hash{params->GenesisBlock().GetHash()};
+    CBlockIndex previous;
+    previous.phashBlock = &previous_hash;
+    CBlockIndex block;
+    block.pprev = &previous;
+    block.nHeight = 1;
+    {
+        LOCK(::cs_main);
+        block.nFile = 0;
+        BOOST_REQUIRE(blockman.WriteUndoDataForBlock(CBlockUndo{}, state, block));
+        BOOST_CHECK_EQUAL(block.nUndoPos, high + 50 + BLOCK_SERIALIZATION_HEADER_SIZE);
+    }
+    CBlockUndo decoded;
+    BOOST_REQUIRE(blockman.UndoReadFromDisk(decoded, block));
+    BOOST_CHECK(decoded.vtxundo.empty());
+    CAutoFile low{fsbridge::fopen(undo_path, "rb"), CLIENT_VERSION};
+    uint8_t actual{};
+    low >> actual;
+    BOOST_CHECK_EQUAL(actual, marker);
+}
+
+BOOST_AUTO_TEST_CASE(blockmanager_large_positions_serialize)
+{
+    const uint64_t high{(uint64_t{1} << 32) + 123};
+    CBlockFileInfo file_info;
+    file_info.nSize = high;
+    file_info.nUndoSize = high + 1;
+    DataStream file_stream;
+    file_stream << file_info;
+    CBlockFileInfo decoded_file_info;
+    file_stream >> decoded_file_info;
+    BOOST_CHECK_EQUAL(decoded_file_info.nSize, high);
+    BOOST_CHECK_EQUAL(decoded_file_info.nUndoSize, high + 1);
+
+    LOCK(::cs_main);
+    CBlockIndex index;
+    index.nStatus = BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO;
+    index.nDataPos = high;
+    index.nUndoPos = high + 1;
+    DataStream index_stream;
+    index_stream << CDiskBlockIndex{&index};
+    CDiskBlockIndex decoded_index;
+    index_stream >> decoded_index;
+    BOOST_CHECK_EQUAL(decoded_index.nDataPos, high);
+    BOOST_CHECK_EQUAL(decoded_index.nUndoPos, high + 1);
 }
 
 BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain100Setup)

@@ -132,6 +132,78 @@ class SyscoinGovernanceTest (DashTestFramework):
             self.connect_nodes(node.index, 0)
         self.wait_until(outbound_ready, timeout=5)
 
+    def wait_for_superblock_votes(self, sb_block_height):
+        required_votes = max(self.nodes[0].getgovernanceinfo()['governanceminquorum'], self.mn_count // 10)
+
+        def funding_state(node, trigger_hash, trigger):
+            votes = {vote_hash: vote for vote_hash, vote in node.gobject_getcurrentvotes(trigger_hash).items()
+                     if vote.endswith(':funding')}
+            return (trigger['Hash'], trigger['YesCount'], trigger['NoCount'], trigger['AbstainCount'],
+                    trigger['AbsoluteYesCount'], votes)
+
+        def has_irreversible_lead(node, triggers, winner_hash, winner_state):
+            winner_votes = winner_state[-1]
+            voters = {vote.rsplit(':', 3)[0] for vote in winner_votes.values()}
+            if len(voters) != self.mn_count:
+                return False
+            votes_by_trigger = {}
+            yes_trigger_by_voter = {}
+            for trigger_hash, trigger in triggers.items():
+                votes = (winner_votes if trigger_hash == winner_hash
+                         else funding_state(node, trigger_hash, trigger)[-1])
+                outcomes = {vote.rsplit(':', 3)[0]: vote.rsplit(':', 3)[2] for vote in votes.values()}
+                if not outcomes.keys() <= voters:
+                    return False
+                votes_by_trigger[trigger_hash] = outcomes
+                for voter, outcome in outcomes.items():
+                    if outcome == 'yes':
+                        if voter in yes_trigger_by_voter and yes_trigger_by_voter[voter] != trigger_hash:
+                            return False
+                        yes_trigger_by_voter[voter] = trigger_hash
+
+            # A node which has not voted YES yet could still support a new
+            # trigger. A NO from a voter already committed elsewhere cannot
+            # turn into a YES for this rival during the current cycle.
+            uncommitted = self.mn_count - len(yes_trigger_by_voter)
+            if winner_state[4] <= uncommitted:
+                return False
+            for trigger_hash, outcomes in votes_by_trigger.items():
+                if trigger_hash == winner_hash:
+                    continue
+                possible_yes = sum(outcome == 'yes' for outcome in outcomes.values()) + uncommitted
+                fixed_no = sum(outcome == 'no' and voter in yes_trigger_by_voter
+                               and yes_trigger_by_voter[voter] != trigger_hash
+                               for voter, outcome in outcomes.items())
+                if winner_state[4] <= possible_yes - fixed_no:
+                    return False
+            return True
+
+        def winning_votes_synced():
+            self._throttled_bump_mocktime("feature_governance_superblock_votes", step=1)
+            triggers_by_node = [{trigger_hash: trigger for trigger_hash, trigger in node.gobject_list("valid", "triggers").items()
+                                 if json.loads(trigger['DataString'])['event_block_height'] == sb_block_height}
+                                for node in self.nodes]
+            for trigger_hash, trigger in triggers_by_node[0].items():
+                if trigger['YesCount'] + trigger['NoCount'] + trigger['AbstainCount'] != self.mn_count:
+                    continue
+                if trigger['AbsoluteYesCount'] < required_votes:
+                    continue
+                expected = funding_state(self.nodes[0], trigger_hash, trigger)
+                if len(expected[-1]) != self.mn_count:
+                    continue
+                if all(trigger_hash in triggers and funding_state(node, trigger_hash, triggers[trigger_hash]) == expected
+                       for node, triggers in zip(self.nodes[1:], triggers_by_node[1:])):
+                    # The winner's full vote map is stable: each MN supports
+                    # at most one trigger per cycle and never votes NO for it.
+                    if trigger['AbsoluteYesCount'] > self.mn_count - trigger['YesCount']:
+                        return True
+                    if all(has_irreversible_lead(node, triggers, trigger_hash, expected)
+                           for node, triggers in zip(self.nodes, triggers_by_node)):
+                        return True
+            return False
+
+        self.wait_until(winning_votes_synced, timeout=30)
+
     def wait_for_trigger(self, sb_block_height, timeout=10):
         def check_for_trigger():
             if((self.nodes[0].getblockcount()+1) >= sb_block_height):
@@ -146,6 +218,9 @@ class SyscoinGovernanceTest (DashTestFramework):
 
     def generate_synced_blocks(self, count):
         for _ in range(count):
+            next_height = self.nodes[0].getblockcount() + 1
+            if next_height == self.nodes[0].getgovernanceinfo()['nextsuperblock']:
+                self.wait_for_superblock_votes(next_height)
             self.bump_mocktime(1)
             self.generate(self.nodes[0], 1)
         
