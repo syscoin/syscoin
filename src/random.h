@@ -45,14 +45,14 @@
  *
  * - RandAddPeriodic() seeds everything that fast seeding includes, but additionally:
  *   - A high-precision timestamp
- *   - Dynamic environment data (performance monitoring, ...)
+ *   - Dynamic environment data (clocks, resource usage, ...)
  *   - Strengthen the entropy for 10 ms using repeated SHA512.
  *   This is run once every minute.
  *
  * On first use of the RNG (regardless of what function is called first), all entropy
  * sources used in the 'slow' seeder are included, but also:
  * - 256 bits from the hardware RNG (rdseed or rdrand) when available.
- * - Dynamic environment data (performance monitoring, ...)
+ * - Dynamic environment data (clocks, resource usage, ...)
  * - Static environment data
  * - Strengthen the entropy for 100 ms using repeated SHA512.
  *
