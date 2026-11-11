@@ -26,7 +26,7 @@ static inline size_t RecursiveDynamicUsage(const CTxIn& in) {
 }
 
 static inline size_t RecursiveDynamicUsage(const CTxOut& out) {
-    return RecursiveDynamicUsage(out.scriptPubKey);
+    return RecursiveDynamicUsage(out.scriptPubKey) + memusage::DynamicUsage(out.vchNEVMData);
 }
 
 static inline size_t RecursiveDynamicUsage(const CTransaction& tx) {

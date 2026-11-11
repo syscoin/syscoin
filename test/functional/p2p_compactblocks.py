@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test compact blocks (BIP 152)."""
 import random
+from copy import deepcopy
 
 from test_framework.blocktools import (
     COINBASE_MATURITY,
@@ -827,6 +828,64 @@ class CompactBlocksTest(SyscoinTestFramework):
         hb_test_node.send_and_ping(msg_sendcmpct(announce=False, version=2))
         assert_highbandwidth_states(self.nodes[0], hb_to=True, hb_from=False)
 
+    def test_compactblock_witness_retry(self, test_node):
+        node = self.nodes[0]
+        for prefilled in (False, True):
+            block = self.build_block_with_transactions(node, self.utxos[0], 1)
+            add_witness_commitment(block)
+            block.solve()
+            altered = deepcopy(block)
+            altered.vtx[0].wit.vtxinwit = []
+
+            compact = HeaderAndShortIDs()
+            compact.initialize_from_block(altered, prefill_list=[0, 1] if prefilled else [0], use_witness=True)
+            with p2p_lock:
+                test_node.last_message.pop("getdata", None)
+                test_node.last_message.pop("getblocktxn", None)
+            test_node.send_and_ping(msg_cmpctblock(compact.to_p2p()))
+            if not prefilled:
+                test_node.wait_until(lambda: "getblocktxn" in test_node.last_message)
+                response = msg_blocktxn()
+                response.block_transactions = BlockTransactions(block.sha256, block.vtx[1:])
+                test_node.send_and_ping(response)
+
+            test_node.wait_until(lambda: "getdata" in test_node.last_message)
+            with p2p_lock:
+                requests = test_node.last_message["getdata"].inv
+                assert_equal([(item.type, item.hash) for item in requests], [(MSG_BLOCK | MSG_WITNESS_FLAG, block.sha256)])
+            assert_equal(int(node.getbestblockhash(), 16), block.hashPrevBlock)
+            test_node.send_and_ping(msg_block(block))
+            assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+            self.utxos[0] = [block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue]
+
+    def test_compactblock_parallel_witness(self, stalling_peer, delivery_peer, inbound_peer, outbound_peer):
+        node = self.nodes[0]
+        block = self.build_block_with_transactions(node, self.utxos[0], 1)
+        add_witness_commitment(block)
+        block.solve()
+        compact = HeaderAndShortIDs()
+        compact.initialize_from_block(block, use_witness=True)
+        for peer in (stalling_peer, delivery_peer, outbound_peer):
+            peer.clear_getblocktxn()
+            peer.send_and_ping(msg_cmpctblock(compact.to_p2p()))
+            peer.wait_until(lambda: "getblocktxn" in peer.last_message)
+
+        # All parallel download slots are occupied. This copy is reconstructed
+        # optimistically and must leave the outstanding downloads available.
+        altered = deepcopy(block)
+        altered.vtx[0].wit.vtxinwit = []
+        compact.initialize_from_block(altered, prefill_list=[0, 1], use_witness=True)
+        inbound_peer.send_and_ping(msg_cmpctblock(compact.to_p2p()))
+        assert_equal(int(node.getbestblockhash(), 16), block.hashPrevBlock)
+        height = node.getblockcount() + 1
+        assert_equal(sum(height in peer["inflight"] for peer in node.getpeerinfo()), 3)
+
+        response = msg_blocktxn()
+        response.block_transactions = BlockTransactions(block.sha256, block.vtx[1:])
+        stalling_peer.send_and_ping(response)
+        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+        self.utxos[0] = [block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue]
+
     def test_compactblock_reconstruction_parallel_reconstruction(self, stalling_peer, delivery_peer, inbound_peer, outbound_peer):
         """ All p2p connections are inbound except outbound_peer. We test that ultimate parallel slot
             can only be taken by an outbound node unless prior attempts were done by an outbound
@@ -944,6 +1003,10 @@ class CompactBlocksTest(SyscoinTestFramework):
 
         self.log.info("Testing reconstructing compact blocks from multiple peers...")
         self.test_compactblock_reconstruction_parallel_reconstruction(stalling_peer=self.segwit_node, inbound_peer=self.onemore_inbound_node, delivery_peer=self.additional_segwit_node, outbound_peer=self.outbound_node)
+
+        self.log.info("Testing compact block witness retries...")
+        self.test_compactblock_parallel_witness(stalling_peer=self.segwit_node, inbound_peer=self.onemore_inbound_node, delivery_peer=self.additional_segwit_node, outbound_peer=self.outbound_node)
+        self.test_compactblock_witness_retry(self.segwit_node)
 
         # Test that if we submitblock to node1, we'll get a compact block
         # announcement to all peers.

@@ -33,7 +33,6 @@
 extern bool EraseMempoolNEVMData(const std::vector<uint8_t>&, const uint256&);
 extern void ReleaseMempoolNEVMDataOwner(const std::vector<uint8_t>&, const uint256&);
 extern NEVMMintTxSet setMintTxsMempool;
-extern std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
 
 #include <cmath>
 #include <numeric>
@@ -770,8 +769,29 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     );
 
     const uint256 hash = it->GetTx().GetHash();
-    for (const CTxIn& txin : it->GetTx().vin)
-        mapNextTx.erase(txin.prevout);
+    for (const CTxIn& txin : it->GetTx().vin) {
+        const auto next{mapNextTx.find(txin.prevout)};
+        if (next != mapNextTx.end() && next->second == &it->GetTx()) {
+            mapNextTx.erase(txin.prevout);
+        }
+        const auto conflict{mapAssetAllocationConflicts.find(txin.prevout)};
+        if (conflict == mapAssetAllocationConflicts.end()) continue;
+        const auto& [first, second] = conflict->second;
+        if (first != hash && second != hash) continue;
+        const uint256& remaining{first == hash ? second : first};
+        // The removed transaction may own mapNextTx's key even when the
+        // other accepted spender survives eviction, replacement or a reorg.
+        // Retain the warning and consumed allowance until an input confirms.
+        const auto survivor{mapTx.find(remaining)};
+        if (survivor != mapTx.end()) {
+            for (const CTxIn& input : survivor->GetTx().vin) {
+                if (input.prevout == txin.prevout) {
+                    mapNextTx.insert(std::make_pair(&input.prevout, &survivor->GetTx()));
+                    break;
+                }
+            }
+        }
+    }
         
 
     RemoveUnbroadcastTx(hash, true /* add logging because unchecked */ );
@@ -1065,6 +1085,43 @@ void CTxMemPool::removeProTxNEVMKeyConflicts(const CTransaction &tx, const std::
     }
 }
 
+std::optional<std::pair<uint256, uint256>> CTxMemPool::GetZDAGConflict(const COutPoint& outpoint) const
+{
+    AssertLockHeld(cs);
+    const auto it{mapAssetAllocationConflicts.find(outpoint)};
+    return it == mapAssetAllocationConflicts.end() ? std::nullopt
+        : std::make_optional(it->second);
+}
+
+void CTxMemPool::RegisterZDAGConflict(const COutPoint& outpoint,
+                                     const uint256& txid, const uint256& first_seen)
+{
+    AssertLockHeld(cs);
+    const auto candidate{mapTx.find(txid)};
+    const auto incumbent{mapTx.find(first_seen)};
+    if (candidate == mapTx.end()) return;
+    // Deferred publication runs after trimming. If that removed the incumbent,
+    // restore the surviving candidate's input index before recording evidence.
+    for (const auto& input : candidate->GetTx().vin) {
+        if (input.prevout == outpoint) {
+            mapNextTx.insert(std::make_pair(&input.prevout, &candidate->GetTx()));
+            break;
+        }
+    }
+    const auto spends = [&](const CTransaction& tx) {
+        return std::any_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& input) {
+            return input.prevout == outpoint;
+        });
+    };
+    assert(txid != first_seen && spends(candidate->GetTx()));
+    assert(incumbent == mapTx.end() || spends(incumbent->GetTx()));
+    // The incumbent was accepted when PreChecks staged its identity. Its
+    // eviction during trimming cannot erase the observed double-spend warning.
+    const bool inserted{mapAssetAllocationConflicts.try_emplace(
+        outpoint, txid, first_seen).second};
+    assert(inserted);
+}
+
 // SYSCOIN
 void CTxMemPool::removeZDAGConflicts(const CTransaction &tx)
 {
@@ -1075,13 +1132,16 @@ void CTxMemPool::removeZDAGConflicts(const CTransaction &tx)
         auto it = mapAssetAllocationConflicts.find(txin.prevout);
         // remove the two transactions linked to this prevout in event of a conflict
         if (it != mapAssetAllocationConflicts.end()) {
-            if(it->second.first) {
-                ClearPrioritisation(it->second.first->GetHash());
-                removeRecursive(*it->second.first, MemPoolRemovalReason::CONFLICT);
+            const auto first{get(it->second.first)};
+            const auto second{get(it->second.second)};
+            mapAssetAllocationConflicts.erase(it);
+            if(first) {
+                ClearPrioritisation(first->GetHash());
+                removeRecursive(*first, MemPoolRemovalReason::CONFLICT);
             }
-            if(it->second.second) {
-                ClearPrioritisation(it->second.second->GetHash());
-                removeRecursive(*it->second.second, MemPoolRemovalReason::CONFLICT);
+            if(second) {
+                ClearPrioritisation(second->GetHash());
+                removeRecursive(*second, MemPoolRemovalReason::CONFLICT);
             }
         } 
     }
@@ -1100,13 +1160,13 @@ bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
         // if it is one of those transactions that propagated double spent input related to syscoin asset tx
         if (it != mapAssetAllocationConflicts.end()) {
             txiter thisit, conflictit;
-            txiter firstit = mapTx.find(it->second.first->GetHash());
+            txiter firstit = mapTx.find(it->second.first);
             thisit = mapTx.end();
             if(firstit != mapTx.end()){
                 if(firstit->GetTx() == tx)
                     thisit = firstit;
             }
-            txiter secondit = mapTx.find(it->second.second->GetHash());
+            txiter secondit = mapTx.find(it->second.second);
             if(secondit != mapTx.end()){
                 if(secondit->GetTx() == tx) {
                     thisit = secondit;
@@ -1121,10 +1181,12 @@ bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
             }
             // if first tx found not second, true if first one is tx, otherwise false
             if (firstit != mapTx.end() && secondit == mapTx.end()) {
-                return firstit == thisit;
+                if (firstit != thisit) return false;
+                continue;
             // if second tx found not first, true if second one is tx, otherwise false
             } else if (secondit != mapTx.end() && firstit == mapTx.end()) {
-                return secondit == thisit;
+                if (secondit != thisit) return false;
+                continue;
             // if first tx and second tx are not in mempool
             } else if(firstit == mapTx.end() && secondit == mapTx.end())
                 return false;
@@ -1139,7 +1201,7 @@ bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
                 return false;
             // if this transaction is non-RBF but conflict signals it, prefer this one regardless of time order
             } else if(!thisRBF && otherRBF) {
-                return true;
+                continue;
             }
             // if conflicting transaction was received before the transaction in question
             // idea is to mine the oldest transaction in event of conflict
@@ -1148,8 +1210,9 @@ bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
             const auto time2 = thisit->GetTime();
             if(time1 < time2){
                 return false;
-            } else if(time1 == time2) {
-                return thisit->GetTx().GetHash() < conflictit->GetTx().GetHash();
+            } else if(time1 == time2 &&
+                      !(thisit->GetTx().GetHash() < conflictit->GetTx().GetHash())) {
+                return false;
             }
         }
     }
@@ -2066,9 +2129,9 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
                 }
             }
         }
-        removeConflicts(*tx);
-        // SYSCOIN
+        // Snapshot both ZDAG spenders before ordinary removal erases their row.
         removeZDAGConflicts(*tx);
+        removeConflicts(*tx);
         removeProTxConflicts(*tx);
         ClearPrioritisation(tx->GetHash());
     }
@@ -2132,7 +2195,7 @@ void CTxMemPool::check(const CCoinsViewCache& active_coins_tip, int64_t spendhei
                 // does dbl-spend conflict exist, we don't have enough info to check tx otherwise if no conflict
                 if(itzdagconflict != mapAssetAllocationConflicts.end()) {
                     // the tx must be one of the dbl-spend conflicts
-                    assert((itzdagconflict->second.first && *itzdagconflict->second.first == tx) || (itzdagconflict->second.second && *itzdagconflict->second.second == tx));
+                    assert(itzdagconflict->second.first == tx.GetHash() || itzdagconflict->second.second == tx.GetHash());
                 }
             } else {
                 assert(it3->first == &txin.prevout);
@@ -2654,6 +2717,7 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
     return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 15 * sizeof(void*)) *
                mapTx.size() +
            memusage::DynamicUsage(mapNextTx) +
+           memusage::DynamicUsage(mapAssetAllocationConflicts) +
            memusage::DynamicUsage(mapDeltas) +
            memusage::DynamicUsage(vTxHashes) +
            memusage::DynamicUsage(mapMintTxs) +

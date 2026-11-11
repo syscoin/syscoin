@@ -4695,6 +4695,61 @@ BOOST_AUTO_TEST_CASE(cnode_listen_port)
     BOOST_CHECK(port == altPort);
 }
 
+BOOST_AUTO_TEST_CASE(inbound_onion_permissions)
+{
+    struct CaptureConnections : NetEventsInterface {
+        CNode* last_node{nullptr};
+        void InitializeNode(CNode& node, ServiceFlags) override { last_node = &node; }
+        void FinalizeNode(const CNode&) override {}
+        void ProcessAsyncCompletions() override {}
+        bool ProcessMessages(CNode*, std::atomic<bool>&) override { return true; }
+        bool SendMessages(CNode*) override { return true; }
+    } events;
+
+    const CAddress remote{LookupNumeric("127.0.0.1", 12345), NODE_NONE};
+    const CAddress normal_bind{LookupNumeric("127.0.0.1", 18444), NODE_NONE};
+    const CAddress onion_bind{LookupNumeric("127.0.0.1", 18445), NODE_NONE};
+    for (const std::string whitelist : {"127.0.0.1", "noban,mempool@127.0.0.1"}) {
+        ConnmanTestMsg connman{0, 0, *m_node.addrman, *m_node.netgroupman, Params()};
+        CConnman::Options options{};
+        options.nMaxConnections = 8;
+        options.m_msgproc = &events;
+        options.onion_binds = {onion_bind};
+        NetWhitelistPermissions permissions;
+        bilingual_str error;
+        BOOST_REQUIRE(NetWhitelistPermissions::TryParse(whitelist, permissions, error));
+        options.vWhitelistedRange = {permissions};
+        connman.Init(options);
+
+        const auto accept = [&](const CAddress& bind, NetPermissionFlags flags) {
+            events.last_node = nullptr;
+            connman.CreateNodeFromAcceptedSocket(std::make_unique<StaticContentsSock>(""), flags, bind, remote);
+            BOOST_REQUIRE(events.last_node);
+            return events.last_node;
+        };
+
+        const auto normal = accept(normal_bind, NetPermissionFlags::None);
+        BOOST_CHECK(!normal->m_inbound_onion);
+        BOOST_CHECK(normal->HasPermission(NetPermissionFlags::NoBan));
+        BOOST_CHECK(normal->HasPermission(NetPermissionFlags::Mempool));
+
+        const auto onion = accept(onion_bind, NetPermissionFlags::None);
+        BOOST_CHECK(onion->m_inbound_onion);
+        BOOST_CHECK(onion->m_permission_flags == NetPermissionFlags::None);
+
+        const auto explicit_bind = accept(onion_bind, NetPermissionFlags::BloomFilter);
+        BOOST_CHECK(explicit_bind->m_inbound_onion);
+        BOOST_CHECK(explicit_bind->m_permission_flags == NetPermissionFlags::BloomFilter);
+
+        const auto implicit_bind = accept(onion_bind, NetPermissionFlags::Implicit);
+        BOOST_CHECK(implicit_bind->m_inbound_onion);
+        BOOST_CHECK(implicit_bind->HasPermission(NetPermissionFlags::NoBan));
+        BOOST_CHECK(implicit_bind->HasPermission(NetPermissionFlags::Mempool));
+        BOOST_CHECK(implicit_bind->HasPermission(NetPermissionFlags::Relay));
+        BOOST_CHECK(!implicit_bind->HasPermission(NetPermissionFlags::Implicit));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(paused_current_protocol_peer_retains_ping_timeout)
 {
     auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};

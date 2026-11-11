@@ -8,6 +8,7 @@
 #include <coins.h>
 #include <consensus/merkle.h>
 #include <evo/specialtx.h>
+#include <hash.h>
 #include <llmq/pq_btcc.h>
 #include <validation.h>
 #include <pow.h>
@@ -27,6 +28,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <array>
 #include <vector>
 #include <test/util/txmempool.h>
 
@@ -634,6 +636,233 @@ struct NexusAuxpowWrapperSetup : TestChain100Setup {
   Consensus::Params& consensus;
   const int original_nexus_start;
 };
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_pq_activation_requires_modern_child_chain_id,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+  struct RestoreParams {
+    Consensus::Params& consensus;
+    const int activation{consensus.nPQActivationHeight};
+    const int dip3{consensus.DIP0003Height};
+    const int dip3_enforcement{consensus.DIP0003EnforcementHeight};
+    ~RestoreParams()
+    {
+      consensus.nPQActivationHeight = activation;
+      consensus.DIP0003Height = dip3;
+      consensus.DIP0003EnforcementHeight = dip3_enforcement;
+    }
+  } restore{consensus};
+
+  CBlock child{BuildAuxpowChildTemplate(m_node)};
+  child.nVersion = 0x20100180;
+  CBlock legacy_child{child};
+  legacy_child.nVersion = 0x30000180;
+  BOOST_REQUIRE_EQUAL(child.GetChainId(), consensus.nAuxpowChainId);
+  BOOST_REQUIRE_EQUAL(legacy_child.GetChainId(), 0);
+  BOOST_REQUIRE_EQUAL(legacy_child.GetOldChainId(),
+                      consensus.nAuxpowOldChainId);
+
+  // Build one 32-leaf parent commitment containing both child hashes.
+  constexpr unsigned merkle_height{5};
+  constexpr uint32_t nonce{7};
+  const int legacy_slot{CAuxPow::getExpectedIndex(nonce, 0, merkle_height)};
+  const int modern_slot{CAuxPow::getExpectedIndex(
+      nonce, consensus.nAuxpowChainId, merkle_height)};
+  BOOST_REQUIRE_NE(legacy_slot, modern_slot);
+
+  std::vector<uint256> layer(1u << merkle_height);
+  for (size_t i{0}; i < layer.size(); ++i) {
+    layer[i] = ArithToUint256(arith_uint256{i + 1});
+  }
+  layer[legacy_slot] = legacy_child.GetHash();
+  layer[modern_slot] = child.GetHash();
+  std::array<std::vector<uint256>, 2> branches;
+  std::array<unsigned, 2> positions{
+      static_cast<unsigned>(legacy_slot), static_cast<unsigned>(modern_slot)};
+  for (unsigned h{0}; h < merkle_height; ++h) {
+    for (size_t i{0}; i < branches.size(); ++i) {
+      branches[i].push_back(layer[positions[i] ^ 1u]);
+      positions[i] >>= 1;
+    }
+    std::vector<uint256> next;
+    next.reserve(layer.size() / 2);
+    for (size_t i{0}; i < layer.size(); i += 2) {
+      next.push_back(Hash(layer[i], layer[i + 1]));
+    }
+    layer = std::move(next);
+  }
+  BOOST_REQUIRE_EQUAL(layer.size(), 1U);
+  valtype root{ToByteVector(layer[0])};
+  std::reverse(root.begin(), root.end());
+
+  CAuxpowBuilder builder{/*baseVersion=*/5, /*chainId=*/42};
+  builder.setCoinbase(CScript{} << CAuxpowBuilder::buildCoinbaseData(
+      /*header=*/true, root, merkle_height, nonce));
+  const CScript tag{CurrentAuxpowTag(chainman)};
+  CMutableTransaction parent_coinbase{*builder.parentBlock.vtx[0]};
+  parent_coinbase.vout.emplace_back(/*nValue=*/0, tag);
+  builder.parentBlock.vtx[0] =
+      MakeTransactionRef(std::move(parent_coinbase));
+  builder.parentBlock.hashMerkleRoot = BlockMerkleRoot(builder.parentBlock);
+  mineBlock(builder.parentBlock, /*ok=*/true, child.nBits);
+
+  auto legacy{std::make_shared<CBlock>(legacy_child)};
+  builder.auxpowChainMerkleBranch = branches[0];
+  builder.auxpowChainIndex = legacy_slot;
+  legacy->SetAuxpow(builder.getUnique());
+  auto modern{std::make_shared<CBlock>(child)};
+  builder.auxpowChainMerkleBranch = branches[1];
+  builder.auxpowChainIndex = modern_slot;
+  modern->SetAuxpow(builder.getUnique());
+  BOOST_REQUIRE(legacy->auxpow->getParentBlockHash() ==
+                modern->auxpow->getParentBlockHash());
+  BOOST_REQUIRE(HasValidProofOfWork({*modern}, consensus));
+  BOOST_REQUIRE(HasValidProofOfWork({*legacy}, consensus));
+
+  consensus.DIP0003Height = 100;
+  consensus.DIP0003EnforcementHeight = 100;
+  consensus.nPQActivationHeight = 101;
+
+  BlockValidationState modern_state;
+  const CBlockIndex* modern_index{nullptr};
+  BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+      {modern->GetBlockHeader()}, /*min_pow_checked=*/true,
+      modern_state, &modern_index));
+  BOOST_REQUIRE(modern_index != nullptr);
+
+  BlockValidationState legacy_state;
+  const CBlockIndex* legacy_index{nullptr};
+  BOOST_REQUIRE(!chainman.ProcessNewBlockHeaders(
+      {legacy->GetBlockHeader()}, /*min_pow_checked=*/true,
+      legacy_state, &legacy_index));
+  BOOST_CHECK_EQUAL(legacy_state.GetRejectReason(), "bad-auxpow-chainid");
+  BOOST_CHECK(legacy_index == nullptr);
+
+  consensus.nPQActivationHeight = 102;
+  BlockValidationState preactivation_state;
+  BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+      {legacy->GetBlockHeader()}, /*min_pow_checked=*/true,
+      preactivation_state, &legacy_index));
+  BOOST_REQUIRE(legacy_index != nullptr);
+
+  consensus.nPQActivationHeight = 101;
+  BlockValidationState duplicate_state;
+  BOOST_REQUIRE(!chainman.ProcessNewBlockHeaders(
+      {legacy->GetBlockHeader()}, /*min_pow_checked=*/true,
+      duplicate_state));
+  BOOST_CHECK_EQUAL(duplicate_state.GetRejectReason(), "bad-auxpow-chainid");
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    auxpow_pq_activation_requires_one_exact_parent_tag,
+    NexusAuxpowWrapperSetup)
+{
+  ChainstateManager& chainman{*Assert(m_node.chainman)};
+  auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+  struct RestoreParams {
+    Consensus::Params& consensus;
+    const int activation{consensus.nPQActivationHeight};
+    const int dip3{consensus.DIP0003Height};
+    const int dip3_enforcement{consensus.DIP0003EnforcementHeight};
+    ~RestoreParams()
+    {
+      consensus.nPQActivationHeight = activation;
+      consensus.DIP0003Height = dip3;
+      consensus.DIP0003EnforcementHeight = dip3_enforcement;
+    }
+  } restore{consensus};
+
+  const CScript exact{CurrentAuxpowTag(chainman)};
+  BOOST_REQUIRE_EQUAL(exact.size(), 41U);
+  BOOST_REQUIRE_EQUAL(exact[0], OP_RETURN);
+  BOOST_REQUIRE_EQUAL(exact[1], 39U);
+  CScript trailing{exact};
+  trailing << OP_0;
+
+  // The old search finds the expected tuple after an earlier decoy in the
+  // same output. The post-activation rule must reject the whole script.
+  std::vector<unsigned char> two_records{'s', 'y', 's'};
+  two_records.resize(39, 0);
+  two_records.insert(two_records.end(), exact.begin() + 2, exact.end());
+  const CScript decoy_then_real{CScript{} << OP_RETURN << two_records};
+
+  CBlock child{BuildAuxpowChildTemplate(m_node)};
+  child.nVersion = 0x20100180;
+  BOOST_REQUIRE_EQUAL(child.GetChainId(), consensus.nAuxpowChainId);
+  consensus.DIP0003Height = 100;
+  consensus.DIP0003EnforcementHeight = 100;
+  const uint256 parent_prev{ArithToUint256(arith_uint256{509})};
+  uint32_t time_offset{0};
+  const auto make_wrapper = [&](const CScript& tag) {
+    CBlock candidate{child};
+    candidate.nTime += ++time_offset;
+    return BuildAuxpowWrapper(candidate, parent_prev, tag);
+  };
+
+  consensus.nPQActivationHeight = 102;
+  for (const CScript& tag : {trailing, decoy_then_real}) {
+    const auto historical{make_wrapper(tag)};
+    BlockValidationState state;
+    const CBlockIndex* index{nullptr};
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+        {historical->GetBlockHeader()}, /*min_pow_checked=*/true,
+        state, &index), state.ToString());
+    BOOST_REQUIRE(index != nullptr);
+  }
+
+  consensus.nPQActivationHeight = 101;
+  for (const CScript& tag : {trailing, decoy_then_real}) {
+    const auto malformed{make_wrapper(tag)};
+    BlockValidationState state;
+    const CBlockIndex* index{nullptr};
+    BOOST_REQUIRE(!chainman.ProcessNewBlockHeaders(
+        {malformed->GetBlockHeader()}, /*min_pow_checked=*/true,
+        state, &index));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-auxpow-tag-format");
+    BOOST_CHECK(index == nullptr);
+  }
+
+  CBlock canonical_child{child};
+  canonical_child.nTime += ++time_offset;
+  const auto canonical{BuildAuxpowWrapper(canonical_child, parent_prev, exact)};
+  BlockValidationState state;
+  const CBlockIndex* index{nullptr};
+  BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+      {canonical->GetBlockHeader()}, /*min_pow_checked=*/true,
+      state, &index), state.ToString());
+  BOOST_REQUIRE(index != nullptr);
+
+  // A previously accepted child header cannot make a different, malformed
+  // AuxPoW wrapper eligible as its first stored full block.
+  const auto bad_wrapper{BuildAuxpowWrapper(canonical_child, parent_prev, trailing)};
+  BOOST_REQUIRE(bad_wrapper->GetHash() == canonical->GetHash());
+  {
+    LOCK(cs_main);
+    bool is_new{false};
+    CBlockIndex* candidate_index{nullptr};
+    BlockValidationState bad_state;
+    BOOST_REQUIRE(!chainman.AcceptBlock(
+        bad_wrapper, bad_state, &candidate_index,
+        /*fRequested=*/true, /*dbp=*/nullptr, &is_new,
+        /*min_pow_checked=*/true));
+    BOOST_CHECK(candidate_index == index);
+    BOOST_CHECK_EQUAL(bad_state.GetRejectReason(), "bad-auxpow-tag-format");
+    BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+    BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+
+    BlockValidationState good_state;
+    BOOST_REQUIRE_MESSAGE(chainman.AcceptBlock(
+        canonical, good_state, &candidate_index,
+        /*fRequested=*/true, /*dbp=*/nullptr, &is_new,
+        /*min_pow_checked=*/true), good_state.ToString());
+    BOOST_CHECK(candidate_index == index);
+    BOOST_CHECK(is_new);
+    BOOST_CHECK(index->nStatus & BLOCK_HAVE_DATA);
+  }
+}
 
 class AuxpowConnectedObserver final : public CValidationInterface {
 public:

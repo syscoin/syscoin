@@ -466,6 +466,9 @@ private:
     // SYSCOIN
     // NEVM proof identity -> pending Syscoin transaction owner.
     std::map<uint256, uint256> mapMintTxs GUARDED_BY(cs);
+    // Retain accepted conflict identities until confirmation without owning payloads.
+    std::unordered_map<COutPoint, std::pair<uint256, uint256>,
+                       SaltedOutpointHasher> mapAssetAllocationConflicts GUARDED_BY(cs);
     std::multimap<uint256, uint256> mapProTxRefs; // proTxHash -> transaction (all TXs that refer to an existing proTx)
     // Consensus allows only one PQ registry mutation per operator in a block.
     std::map<uint256, uint256> mapPQOperatorUpdates; // proTxHash -> transaction
@@ -502,6 +505,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
 
     friend struct PQMempoolTestAccess;
+    friend struct ZdagMempoolTestAccess;
 
 
     /**
@@ -576,6 +580,10 @@ public:
                           std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeRecursive(const CTransaction& tx, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    std::optional<std::pair<uint256, uint256>> GetZDAGConflict(const COutPoint& outpoint) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void RegisterZDAGConflict(const COutPoint& outpoint, const uint256& txid,
+                              const uint256& first_seen) EXCLUSIVE_LOCKS_REQUIRED(cs);
     // SYSCOIN
     void removeProTxPubKeyConflicts(const CTransaction &tx, const CKeyID &keyId) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxNEVMKeyConflicts(const CTransaction &tx, const std::vector<unsigned char> &vchNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);

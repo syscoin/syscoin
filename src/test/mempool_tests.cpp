@@ -5,6 +5,7 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <common/system.h>
+#include <core_memusage.h>
 #include <evo/deterministicmns.h> // SYSCOIN: deterministic provider-state fixtures.
 #include <evo/pq_providertx.h> // SYSCOIN: PQ provider transaction fixtures.
 #include <evo/pq_registry.h> // SYSCOIN: PQ registry reservation fixtures.
@@ -12,6 +13,7 @@
 #include <evo/specialtx.h> // SYSCOIN: special-transaction mempool fixtures.
 #include <llmq/quorums_commitment.h>
 #include <netbase.h> // SYSCOIN: provider service fixtures.
+#include <nevm/sha3.h>
 #include <node/mempool_args.h>
 #include <policy/policy.h>
 #include <test/util/logging.h>
@@ -1910,6 +1912,106 @@ BOOST_AUTO_TEST_CASE(MempoolAncestorIndexingTest)
     CheckSort<ancestor_score>(pool, sortedOrder);
 }
 
+
+// SYSCOIN: PoDA sidecars remain attached to the immutable mempool transaction.
+BOOST_AUTO_TEST_CASE(PoDARecursiveDynamicUsage)
+{
+    CMutableTransaction tx;
+    tx.vout.emplace_back(0, CScript() << OP_RETURN);
+    auto& output = tx.vout.back();
+    const size_t output_without_data = RecursiveDynamicUsage(output);
+    const size_t transaction_without_data = RecursiveDynamicUsage(tx);
+
+    output.vchNEVMData.reserve(128 * 1024);
+    output.vchNEVMData.resize(64 * 1024, 0x42);
+    const size_t allocation = memusage::DynamicUsage(output.vchNEVMData);
+    BOOST_REQUIRE(allocation >= output.vchNEVMData.capacity());
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(output), output_without_data + allocation);
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(tx), transaction_without_data + allocation);
+
+    // Reducing the payload length does not release its retained allocation.
+    output.vchNEVMData.resize(1);
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(tx), transaction_without_data + allocation);
+    output.vchNEVMData.clear();
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(tx), transaction_without_data + allocation);
+
+    const auto immutable = MakeTransactionRef(std::move(tx));
+    BOOST_CHECK_EQUAL(memusage::DynamicUsage(immutable->vout.back().vchNEVMData), allocation);
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(*immutable), transaction_without_data + allocation);
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(immutable),
+                      memusage::DynamicUsage(immutable) + transaction_without_data + allocation);
+
+    CMutableTransaction released{*immutable};
+    std::vector<uint8_t>{}.swap(released.vout.back().vchNEVMData);
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(released), transaction_without_data);
+    BOOST_CHECK_EQUAL(RecursiveDynamicUsage(*immutable), transaction_without_data + allocation);
+}
+
+BOOST_AUTO_TEST_CASE(PoDAMempoolMemoryLimit)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+
+    CMutableTransaction ordinary;
+    ordinary.vin.emplace_back(COutPoint{PQMempoolHash(90'001), 0});
+    ordinary.vout.emplace_back(1, CScript() << OP_TRUE);
+    BOOST_REQUIRE(pool.addUnchecked(entry.Fee(100'000).FromTx(ordinary)));
+
+    CMutableTransaction mutable_poda;
+    mutable_poda.nVersion = SYSCOIN_TX_VERSION_NEVM_DATA_SHA3;
+    mutable_poda.vin.emplace_back(COutPoint{PQMempoolHash(90'002), 0});
+    mutable_poda.vout.emplace_back(0, CScript{});
+    auto& output = mutable_poda.vout.back();
+    output.vchNEVMData.reserve(128 * 1024);
+    output.vchNEVMData.resize(64 * 1024, 0x42);
+    CNEVMData payload;
+    payload.vchVersionHash = dev::sha3(output.vchNEVMData).asBytes();
+    std::vector<unsigned char> commitment;
+    payload.SerializeData(commitment);
+    output.scriptPubKey = CScript() << OP_RETURN << commitment;
+    const auto poda = MakeTransactionRef(std::move(mutable_poda));
+    const size_t sidecar_usage = memusage::DynamicUsage(poda->vout.back().vchNEVMData);
+    BOOST_REQUIRE(sidecar_usage > poda->vout.back().vchNEVMData.size());
+
+    // Exercise the validation-to-storage transition: extracting PoDA metadata
+    // must not make the still-attached transaction sidecar disappear from usage.
+    PoDAMAPMemory extracted;
+    BOOST_REQUIRE(ProcessNEVMData(m_node.chainman->m_blockman, *poda, 100, 100, extracted) ==
+                  ProcessNEVMDataResult::VALID);
+    BOOST_REQUIRE_EQUAL(extracted.size(), 1U);
+    BOOST_REQUIRE(extracted.begin()->second.vchNEVMData);
+    BOOST_CHECK(*extracted.begin()->second.vchNEVMData == poda->vout.back().vchNEVMData);
+    BOOST_CHECK_EQUAL(memusage::DynamicUsage(poda->vout.back().vchNEVMData), sidecar_usage);
+
+    CMutableTransaction stripped{*poda};
+    std::vector<uint8_t>{}.swap(stripped.vout.back().vchNEVMData);
+    BOOST_CHECK(stripped.GetHash() == poda->GetHash());
+    const auto stripped_entry = entry.Fee(1'000).FromTx(stripped);
+    const auto retained_entry = entry.FromTx(poda);
+    BOOST_CHECK_EQUAL(retained_entry.DynamicMemoryUsage(),
+                      stripped_entry.DynamicMemoryUsage() + sidecar_usage);
+
+    BOOST_REQUIRE(pool.addUnchecked(stripped_entry));
+    const size_t limit_without_sidecar = pool.DynamicMemoryUsage();
+    pool.removeRecursive(*poda, MemPoolRemovalReason::REPLACED);
+    const size_t ordinary_usage = pool.DynamicMemoryUsage();
+    BOOST_REQUIRE(pool.addUnchecked(retained_entry));
+    BOOST_CHECK(pool.get(poda->GetHash()) == poda);
+    BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), limit_without_sidecar + sidecar_usage);
+
+    // This limit fitted both entries when the retained allocation was omitted.
+    // The low-fee PoDA transaction must now be evicted, leaving the ordinary one.
+    pool.TrimToSize(limit_without_sidecar);
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(poda->GetHash())));
+    BOOST_CHECK(pool.exists(GenTxid::Txid(ordinary.GetHash())));
+    BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), ordinary_usage);
+
+    BOOST_REQUIRE(pool.addUnchecked(retained_entry));
+    BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), limit_without_sidecar + sidecar_usage);
+    pool.removeRecursive(*poda, MemPoolRemovalReason::REPLACED);
+    BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), ordinary_usage);
+}
 
 BOOST_AUTO_TEST_CASE(MempoolSizeLimitTest)
 {

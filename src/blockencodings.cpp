@@ -190,7 +190,7 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
-ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing)
+ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool segwit_active)
 {
     if (header.IsNull()) return READ_STATUS_INVALID;
 
@@ -232,6 +232,11 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
             state.GetResult() == BlockValidationResult::BLOCK_AUX_DATA_INVALID)
             return READ_STATUS_FAILED;
         return READ_STATUS_CHECKBLOCK_FAILED;
+    }
+
+    CheckWitnessFn check_witness = m_check_witness_mock ? m_check_witness_mock : CheckWitnessMalleation;
+    if (!check_witness(block, state, segwit_active)) {
+        return READ_STATUS_FAILED;
     }
 
     LogPrint(BCLog::CMPCTBLOCK, "Successfully reconstructed block %s with %lu txn prefilled, %lu txn from mempool (incl at least %lu from extra pool) and %lu txn requested\n", hash.ToString(), prefilled_count, mempool_count, extra_count, vtx_missing.size());

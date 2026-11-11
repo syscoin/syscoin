@@ -143,13 +143,16 @@ public:
     // Can be overridden for testing
     using CheckBlockFn = std::function<bool(const CBlock&, BlockValidationState&, const Consensus::Params&, bool, bool)>;
     CheckBlockFn m_check_block_mock{nullptr};
+    using CheckWitnessFn = std::function<bool(const CBlock&, BlockValidationState&, bool)>;
+    CheckWitnessFn m_check_witness_mock{nullptr};
 
     explicit PartiallyDownloadedBlock(CTxMemPool* poolIn) : pool(poolIn) {}
 
     // extra_txn is a list of extra transactions to look at, in <witness hash, reference> form
     ReadStatus InitData(CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn);
     bool IsTxAvailable(size_t index) const;
-    ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing);
+    // Check witness commitments before reporting a completed reconstruction.
+    ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool segwit_active);
 };
 
 #endif // SYSCOIN_BLOCKENCODINGS_H

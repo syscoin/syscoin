@@ -1853,7 +1853,9 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     int nMaxInbound = nMaxConnections - m_max_outbound;
     // SYSCOIN
     int nVerifiedInboundMasternodes = 0;
-    AddWhitelistPermissionFlags(permission_flags, addr);
+    const bool inbound_onion = std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
+    // Onion inbound connections do not reveal the remote peer's IP address.
+    if (!inbound_onion) AddWhitelistPermissionFlags(permission_flags, addr);
     if (NetPermissions::HasFlag(permission_flags, NetPermissionFlags::Implicit)) {
         NetPermissions::ClearFlag(permission_flags, NetPermissionFlags::Implicit);
         if (gArgs.GetBoolArg("-whitelistforcerelay", DEFAULT_WHITELISTFORCERELAY)) NetPermissions::AddFlag(permission_flags, NetPermissionFlags::ForceRelay);
@@ -1940,7 +1942,6 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         nodeServices = static_cast<ServiceFlags>(nodeServices | NODE_BLOOM);
     }
 
-    const bool inbound_onion = std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
     // The V2Transport transparently falls back to V1 behavior when an incoming V1 connection is
     // detected, so use it whenever we signal NODE_P2P_V2.
     const bool use_v2transport(nodeServices & NODE_P2P_V2);

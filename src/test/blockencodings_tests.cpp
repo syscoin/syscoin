@@ -6,10 +6,12 @@
 #include <chainparams.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <hash.h>
 #include <pow.h>
 #include <streams.h>
 #include <test/util/random.h>
 #include <test/util/txmempool.h>
+#include <validation.h>
 
 #include <test/util/setup_common.h>
 
@@ -95,21 +97,21 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest)
         CBlock block2;
         {
             PartiallyDownloadedBlock tmp = partialBlock;
-            BOOST_CHECK(partialBlock.FillBlock(block2, {}) == READ_STATUS_INVALID); // No transactions
+            BOOST_CHECK(partialBlock.FillBlock(block2, {}, /*segwit_active=*/true) == READ_STATUS_INVALID); // No transactions
             partialBlock = tmp;
         }
 
         // Wrong transaction
         {
             PartiallyDownloadedBlock tmp = partialBlock;
-            partialBlock.FillBlock(block2, {block.vtx[2]}); // Current implementation doesn't check txn here, but don't require that
+            partialBlock.FillBlock(block2, {block.vtx[2]}, /*segwit_active=*/true); // Current implementation doesn't check txn here, but don't require that
             partialBlock = tmp;
         }
         bool mutated;
         BOOST_CHECK(block.hashMerkleRoot != BlockMerkleRoot(block2, &mutated));
 
         CBlock block3;
-        BOOST_CHECK(partialBlock.FillBlock(block3, {block.vtx[1]}) == READ_STATUS_OK);
+        BOOST_CHECK(partialBlock.FillBlock(block3, {block.vtx[1]}, /*segwit_active=*/true) == READ_STATUS_OK);
         BOOST_CHECK_EQUAL(block.GetHash().ToString(), block3.GetHash().ToString());
         BOOST_CHECK_EQUAL(block.hashMerkleRoot.ToString(), BlockMerkleRoot(block3, &mutated).ToString());
         BOOST_CHECK(!mutated);
@@ -135,7 +137,7 @@ BOOST_AUTO_TEST_CASE(FillBlockValidationResultTest)
         };
 
         CBlock reconstructed_block;
-        BOOST_CHECK(partial_block.FillBlock(reconstructed_block, {block.vtx[1], block.vtx[2]}) == expected_status);
+        BOOST_CHECK(partial_block.FillBlock(reconstructed_block, {block.vtx[1], block.vtx[2]}, /*segwit_active=*/true) == expected_status);
         BOOST_CHECK(check_block_called);
         BOOST_CHECK_EQUAL(reconstructed_block.GetHash().ToString(), block.GetHash().ToString());
         BOOST_CHECK(reconstructed_block.vtx == block.vtx);
@@ -145,6 +147,84 @@ BOOST_AUTO_TEST_CASE(FillBlockValidationResultTest)
     check_status(BlockValidationResult::BLOCK_AUX_DATA_INVALID, READ_STATUS_FAILED);
     check_status(BlockValidationResult::BLOCK_CONSENSUS, READ_STATUS_CHECKBLOCK_FAILED);
     check_status(std::nullopt, READ_STATUS_OK);
+}
+
+BOOST_AUTO_TEST_CASE(WitnessReconstructionTest)
+{
+    class MutableShortTxIDs final : public CBlockHeaderAndShortTxIDs {
+    public:
+        using CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs;
+        void PrefillAll(const CBlock& block)
+        {
+            shorttxids.clear();
+            prefilledtxn = {{0, block.vtx[0]}, {0, block.vtx[1]}, {0, block.vtx[2]}};
+        }
+    };
+    CTxMemPool pool{MemPoolOptionsForTest(m_node)};
+    CBlock block{BuildBlockTestCase()};
+    CMutableTransaction tx{*block.vtx[1]};
+    tx.vin[0].scriptWitness.stack = {{1, 2, 3}};
+    block.vtx[1] = MakeTransactionRef(tx);
+
+    CMutableTransaction coinbase{*block.vtx[0]};
+    coinbase.vin[0].scriptWitness.stack = {std::vector<unsigned char>(32, 0)};
+    uint256 witness_root = BlockWitnessMerkleRoot(block, nullptr);
+    CHash256().Write(witness_root).Write(coinbase.vin[0].scriptWitness.stack[0]).Finalize(witness_root);
+    std::vector<unsigned char> commitment{0xaa, 0x21, 0xa9, 0xed};
+    commitment.insert(commitment.end(), witness_root.begin(), witness_root.end());
+    coinbase.vout.emplace_back(0, CScript() << OP_RETURN << commitment);
+    block.vtx[0] = MakeTransactionRef(coinbase);
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    while (!CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus())) ++block.nNonce;
+
+    const auto check_reconstruction = [&](const CBlock& candidate, bool segwit_active, ReadStatus expected, const std::string& reject_reason) {
+        BlockValidationState state;
+        BOOST_CHECK_EQUAL(CheckWitnessMalleation(candidate, state, segwit_active), reject_reason.empty());
+        if (!reject_reason.empty()) {
+            BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+            BOOST_CHECK_EQUAL(state.GetRejectReason(), reject_reason);
+        }
+        for (bool prefilled : {false, true}) {
+            MutableShortTxIDs short_ids{candidate};
+            std::vector<CTransactionRef> missing{candidate.vtx[1], candidate.vtx[2]};
+            if (prefilled) {
+                short_ids.PrefillAll(candidate);
+                missing.clear();
+            }
+            PartiallyDownloadedBlock partial_block{&pool};
+            BOOST_REQUIRE(partial_block.InitData(short_ids, {}) == READ_STATUS_OK);
+            CBlock reconstructed;
+            BOOST_CHECK(partial_block.FillBlock(reconstructed, missing, segwit_active) == expected);
+            BOOST_CHECK_EQUAL(reconstructed.GetHash().ToString(), candidate.GetHash().ToString());
+        }
+    };
+
+    check_reconstruction(block, true, READ_STATUS_OK, "");
+
+    CBlock altered{block};
+    coinbase.vin[0].scriptWitness.stack.clear();
+    altered.vtx[0] = MakeTransactionRef(coinbase);
+    check_reconstruction(altered, true, READ_STATUS_FAILED, "bad-witness-nonce-size");
+
+    coinbase.vin[0].scriptWitness.stack = {std::vector<unsigned char>(32, 1)};
+    altered.vtx[0] = MakeTransactionRef(coinbase);
+    check_reconstruction(altered, true, READ_STATUS_FAILED, "bad-witness-merkle-match");
+
+    altered = block;
+    tx.vin[0].scriptWitness.stack = {{4, 5, 6}};
+    altered.vtx[1] = MakeTransactionRef(tx);
+    check_reconstruction(altered, true, READ_STATUS_FAILED, "bad-witness-merkle-match");
+    check_reconstruction(block, false, READ_STATUS_FAILED, "unexpected-witness");
+
+    const CBlock legacy{BuildBlockTestCase()};
+    check_reconstruction(legacy, false, READ_STATUS_OK, "");
+    check_reconstruction(legacy, true, READ_STATUS_OK, "");
+
+    altered = legacy;
+    tx = CMutableTransaction{*legacy.vtx[1]};
+    tx.vin[0].scriptWitness.stack = {{1}};
+    altered.vtx[1] = MakeTransactionRef(tx);
+    check_reconstruction(altered, true, READ_STATUS_FAILED, "unexpected-witness");
 }
 
 class TestHeaderAndShortIDs {
@@ -213,14 +293,14 @@ BOOST_AUTO_TEST_CASE(NonCoinbasePreforwardRTTest)
         CBlock block2;
         {
             PartiallyDownloadedBlock tmp = partialBlock;
-            BOOST_CHECK(partialBlock.FillBlock(block2, {}) == READ_STATUS_INVALID); // No transactions
+            BOOST_CHECK(partialBlock.FillBlock(block2, {}, /*segwit_active=*/true) == READ_STATUS_INVALID); // No transactions
             partialBlock = tmp;
         }
 
         // Wrong transaction
         {
             PartiallyDownloadedBlock tmp = partialBlock;
-            partialBlock.FillBlock(block2, {block.vtx[1]}); // Current implementation doesn't check txn here, but don't require that
+            partialBlock.FillBlock(block2, {block.vtx[1]}, /*segwit_active=*/true); // Current implementation doesn't check txn here, but don't require that
             partialBlock = tmp;
         }
         BOOST_CHECK_EQUAL(pool.mapTx.find(block.vtx[2]->GetHash())->GetSharedTx().use_count(), SHARED_TX_OFFSET + 2); // +2 because of partialBlock and block2
@@ -229,7 +309,7 @@ BOOST_AUTO_TEST_CASE(NonCoinbasePreforwardRTTest)
 
         CBlock block3;
         PartiallyDownloadedBlock partialBlockCopy = partialBlock;
-        BOOST_CHECK(partialBlock.FillBlock(block3, {block.vtx[0]}) == READ_STATUS_OK);
+        BOOST_CHECK(partialBlock.FillBlock(block3, {block.vtx[0]}, /*segwit_active=*/true) == READ_STATUS_OK);
         BOOST_CHECK_EQUAL(block.GetHash().ToString(), block3.GetHash().ToString());
         BOOST_CHECK_EQUAL(block.hashMerkleRoot.ToString(), BlockMerkleRoot(block3, &mutated).ToString());
         BOOST_CHECK(!mutated);
@@ -282,7 +362,7 @@ BOOST_AUTO_TEST_CASE(SufficientPreforwardRTTest)
 
         CBlock block2;
         PartiallyDownloadedBlock partialBlockCopy = partialBlock;
-        BOOST_CHECK(partialBlock.FillBlock(block2, {}) == READ_STATUS_OK);
+        BOOST_CHECK(partialBlock.FillBlock(block2, {}, /*segwit_active=*/true) == READ_STATUS_OK);
         BOOST_CHECK_EQUAL(block.GetHash().ToString(), block2.GetHash().ToString());
         bool mutated;
         BOOST_CHECK_EQUAL(block.hashMerkleRoot.ToString(), BlockMerkleRoot(block2, &mutated).ToString());
@@ -333,7 +413,7 @@ BOOST_AUTO_TEST_CASE(EmptyBlockRoundTripTest)
 
         CBlock block2;
         std::vector<CTransactionRef> vtx_missing;
-        BOOST_CHECK(partialBlock.FillBlock(block2, vtx_missing) == READ_STATUS_OK);
+        BOOST_CHECK(partialBlock.FillBlock(block2, vtx_missing, /*segwit_active=*/true) == READ_STATUS_OK);
         BOOST_CHECK_EQUAL(block.GetHash().ToString(), block2.GetHash().ToString());
         BOOST_CHECK_EQUAL(block.hashMerkleRoot.ToString(), BlockMerkleRoot(block2, &mutated).ToString());
         BOOST_CHECK(!mutated);

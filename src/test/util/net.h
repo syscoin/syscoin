@@ -19,6 +19,7 @@
 
 struct ConnmanTestMsg : public CConnman {
     using CConnman::CConnman;
+    using CConnman::CreateNodeFromAcceptedSocket;
 
     bool IsTestMasternodeFallbackOnly(const uint256& identity)
     {

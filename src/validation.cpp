@@ -132,7 +132,6 @@ RecursiveMutex cs_geth;
 RecursiveMutex cs_btcheader;
 static const char* GETH_STATE_BOOTSTRAP_STATUS_FILENAME = "state-bootstrap.status";
 NEVMMintTxSet setMintTxsMempool;
-std::unordered_map<COutPoint, std::pair<CTransactionRef, CTransactionRef>, SaltedOutpointHasher> mapAssetAllocationConflicts;
 std::map<uint256, int64_t> mapRejectedBlocks GUARDED_BY(cs_main);
 
 static bool IsManagedGethStarted()
@@ -722,6 +721,8 @@ private:
         std::set<uint256> m_conflicts;
         /** Txids of mempool asset transactions that this transaction directly conflicts with. */
         std::set<uint256> m_conflictsAsset;
+        // A first ZDAG conflict is published only with successful admission.
+        std::vector<std::pair<COutPoint, uint256>> m_zdag_conflicts;
         /** Iterators to mempool entries that this transaction directly conflicts with. */
         CTxMemPool::setEntries m_iters_conflicting;
         /** Iterators to mempool asset entries that this transaction directly conflicts with. */
@@ -833,6 +834,15 @@ private:
         return true;
     }
 
+    void PublishPackageZDAGConflicts() EXCLUSIVE_LOCKS_REQUIRED(m_pool.cs)
+    {
+        for (const auto& reservation : m_package_zdag_conflicts) {
+            m_pool.RegisterZDAGConflict(reservation.outpoint, reservation.txid,
+                                        reservation.first_seen);
+        }
+        m_package_zdag_conflicts.clear();
+    }
+
 private:
     CTxMemPool& m_pool;
     CCoinsViewCache m_view;
@@ -843,6 +853,12 @@ private:
 
     /** Whether the transaction(s) would replace any mempool transactions. If so, RBF rules apply. */
     bool m_rbf{false};
+    struct ZDAGReservation {
+        COutPoint outpoint;
+        uint256 txid;
+        uint256 first_seen;
+    };
+    std::vector<ZDAGReservation> m_package_zdag_conflicts;
 };
 
 bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs)
@@ -910,14 +926,29 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     const bool IsZTx = IsZdagTx(tx.nVersion);
     for (const CTxIn &txin : tx.vin)
     {
+        const auto known_conflict{m_pool.GetZDAGConflict(txin.prevout)};
+        if (known_conflict && hash != known_conflict->first && hash != known_conflict->second) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict-zdag");
+        }
         const CTransaction* ptxConflicting = m_pool.GetConflictTx(txin.prevout);
         if (ptxConflicting) {
             if (!args.m_allow_replacement) {
                 // Transaction conflicts with a mempool tx, but we're not allowing replacements.
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
             }
-            // SYSCOIN
-            if (!ws.m_conflicts.count(ptxConflicting->GetHash()) && !ws.m_conflictsAsset.count(ptxConflicting->GetHash()))
+            // Every shared input needs its own reservation, even when several
+            // inputs conflict with the same transaction.
+            if (known_conflict || (!m_pool.m_full_rbf && !SignalsOptInRBF(*ptxConflicting))) {
+                if (!IsZTx && !known_conflict) {
+                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
+                }
+                if (!known_conflict) {
+                    ws.m_zdag_conflicts.emplace_back(txin.prevout, ptxConflicting->GetHash());
+                }
+                ws.m_conflictsAsset.insert(ptxConflicting->GetHash());
+                continue;
+            }
+            if (!ws.m_conflicts.count(ptxConflicting->GetHash()))
             {
                 // Transactions that don't explicitly signal replaceability are
                 // *not* replaceable with the current logic, even if one of their
@@ -929,27 +960,6 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
                 //
                 // If replaceability signaling is ignored due to node setting,
                 // replacement is always allowed.
-                if (!m_pool.m_full_rbf && !SignalsOptInRBF(*ptxConflicting)) {
-                    // if not RBF then allow first double spend to be relayed, ZDAG by default isn't RBF enabled because it shouldn't be replaceable and because of checks below
-                    // neither are its ancestors, they will be locked in as soon as you have a ZDAG tx because ZDAG isn't compliant with RBF.
-                    if(IsZTx){
-                        // allow the first time this outpoint was found in conflict
-                        auto it = mapAssetAllocationConflicts.try_emplace(txin.prevout, ptx, MakeTransactionRef(*ptxConflicting));
-                        // if was inserted (not found)
-                        if(it.second) {
-                            // if just testing, and this is the first conflict for this prevout then let it go through but just don't add it to the global mapAssetAllocationConflicts
-                            if(args.m_test_accept) {
-                                mapAssetAllocationConflicts.erase(txin.prevout);
-                            }
-                            ws.m_conflictsAsset.insert(ptxConflicting->GetHash());
-                            break;
-                        }
-                        else
-                            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict-zdag");
-                    }
-                    else
-                        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
-                }
                 // regardless of RBF flag this tx as per BTC policy but JFYI we don't want to limit asset allocation txs to use NON-RBF,
                 // its still valid to send asset allocations with RBF for normal use-case, just that verifyzdag will flag it as a warning and shouldn't be accepted at point-of-sale
                 ws.m_conflicts.insert(ptxConflicting->GetHash());
@@ -1398,6 +1408,13 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
         if (!m_pool.exists(GenTxid::Txid(hash)))
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
     }
+    for (const auto& [outpoint, first_seen] : ws.m_zdag_conflicts) {
+        if (args.m_package_submission) {
+            m_package_zdag_conflicts.push_back({outpoint, hash, first_seen});
+        } else {
+            m_pool.RegisterZDAGConflict(outpoint, hash, first_seen);
+        }
+    }
     return true;
 }
 
@@ -1829,6 +1846,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
     // Make sure we haven't exceeded max mempool size.
     // Package transactions that were submitted to mempool or already in mempool may be evicted.
     LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+    PublishPackageZDAGConflicts();
 
     for (const auto& tx : package) {
         const auto& wtxid = tx->GetWitnessHash();
@@ -1892,8 +1910,6 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
 
         for (const COutPoint& hashTx : coins_to_uncache) {
             active_chainstate.CoinsTip().Uncache(hashTx);
-            // SYSCOIN
-            mapAssetAllocationConflicts.erase(hashTx);
         }
         TRACE2(mempool, rejected,
                 tx->GetHash().data(),
@@ -2024,6 +2040,12 @@ bool CheckProofOfWork(const CBlockHeader& block, const Consensus::Params& params
 // SYSCOIN END: Keep mutable wrapper failures out of child-index invalidity.
 
 // SYSCOIN BEGIN: PQ receipt validation and branch-state transitions.
+static bool CheckContextualAuxPow(const CBlockHeader& block,
+                                     BlockValidationState& state,
+                                     const Consensus::Params& consensus,
+                                     const CBlockIndex* pindexPrev)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
 static bool CheckDirectBlockNotAuxpowParent(const CBlock& block, BlockValidationState& state,
                                             int nHeight, const Consensus::Params& consensus)
 {
@@ -6288,6 +6310,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
     // SYSCOIN: Apply fork-specific AuxPoW and BTCPREV context at the Bitcoin
     // ConnectBlock boundary, including replay of previously indexed blocks.
+    if (pindex->pprev && pindex->nHeight >= params.GetConsensus().nPQActivationHeight &&
+        !CheckContextualAuxPow(block, state, params.GetConsensus(), pindex->pprev)) {
+        return error("%s: Contextual AuxPoW check failed: %s", __func__, state.ToString());
+    }
     if (!CheckDirectBlockNotAuxpowParent(block, state, pindex->nHeight, params.GetConsensus())) {
         return error("%s: CheckDirectBlockNotAuxpowParent: %s", __func__, state.ToString());
     }
@@ -10426,9 +10452,9 @@ arith_uint256 CalculateHeadersWork(const std::vector<CBlockHeader>& headers)
     return total_work;
 }
 
-// SYSCOIN BEGIN: Validate the mutable parent-chain wrapper independently from
-// the pure child-header identity used by the block index.
-static bool CheckContextualAuxPowTag(const CBlockHeader& block,
+// SYSCOIN BEGIN: Apply height-dependent child-ID rules and validate the mutable
+// parent-chain wrapper independently from the child identity in the block index.
+static bool CheckContextualAuxPow(const CBlockHeader& block,
                                      BlockValidationState& state,
                                      const Consensus::Params& consensus,
                                      const CBlockIndex* pindexPrev)
@@ -10436,7 +10462,17 @@ static bool CheckContextualAuxPowTag(const CBlockHeader& block,
 {
     assert(pindexPrev != nullptr);
     const int nHeight{pindexPrev->nHeight + 1};
-    if (nHeight < consensus.nNexusStartBlock || !block.IsAuxpow()) {
+    if (!block.IsAuxpow()) {
+        return true;
+    }
+    // The context-free proof check retains the historical legacy-ID fallback.
+    // Once PQ activates, every admitted child must use the configured modern ID.
+    if (nHeight >= consensus.nPQActivationHeight &&
+        block.GetChainId() != consensus.nAuxpowChainId) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-auxpow-chainid",
+                             "Non-canonical AuxPoW child chain identifier");
+    }
+    if (nHeight < consensus.nNexusStartBlock) {
         return true;
     }
     if (!block.auxpow) {
@@ -10463,6 +10499,13 @@ static bool CheckContextualAuxPowTag(const CBlockHeader& block,
     expectedData << refIndex->GetBlockHash()
                  << static_cast<uint32_t>(refIndex->nHeight);
     const auto expectedBytes{MakeUCharSpan(expectedData)};
+    CDataStream canonicalData{SER_NETWORK, PROTOCOL_VERSION};
+    canonicalData << pchSyscoinHeader << refIndex->GetBlockHash()
+                  << static_cast<uint32_t>(refIndex->nHeight);
+    const auto canonicalBytes{MakeUCharSpan(canonicalData)};
+    const CScript canonicalScript{
+        CScript{} << OP_RETURN <<
+            std::vector<unsigned char>{canonicalBytes.begin(), canonicalBytes.end()}};
     const unsigned char* const sysHeaderBegin{pchSyscoinHeader};
     const unsigned char* const sysHeaderEnd{
         sysHeaderBegin + sizeof(pchSyscoinHeader)};
@@ -10483,6 +10526,14 @@ static bool CheckContextualAuxPowTag(const CBlockHeader& block,
             return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
                                  "bad-auxpow-tag",
                                  "SYSCOIN AuxPoW tag mismatch (hash or height)");
+        }
+        // The activated format binds the sole record to this exact output,
+        // preventing a later record from satisfying a different first tag.
+        if (nHeight >= consensus.nPQActivationHeight &&
+            txout.scriptPubKey != canonicalScript) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                 "bad-auxpow-tag-format",
+                                 "Non-canonical SYSCOIN AuxPoW tag output");
         }
         if (foundSysTag) {
             return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
@@ -10573,7 +10624,48 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, strprintf("bad-version(0x%08x)", baseVer),
                                     strprintf("rejected nVersion=0x%08x block", block.nVersion));
     }
-    return CheckContextualAuxPowTag(block, state, consensusParams, pindexPrev);
+    return CheckContextualAuxPow(block, state, consensusParams, pindexPrev);
+}
+
+bool CheckWitnessMalleation(const CBlock& block, BlockValidationState& state, bool expect_witness)
+{
+    // Validation for witness commitments.
+    // * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
+    //   coinbase (where 0x0000....0000 is used instead).
+    // * The coinbase scriptWitness is a stack of a single 32-byte vector, containing a witness reserved value (unconstrained).
+    // * We build a merkle tree with all those witness hashes as leaves (similar to the hashMerkleRoot in the block header).
+    // * There must be at least one output whose scriptPubKey is a single 36-byte push, the first 4 bytes of which are
+    //   {0xaa, 0x21, 0xa9, 0xed}, and the following 32 bytes are SHA256^2(witness root, witness reserved value). In case there are
+    //   multiple, the last one is used.
+    bool fHaveWitness = false;
+    if (expect_witness) {
+        int commitpos = GetWitnessCommitmentIndex(block);
+        if (commitpos != NO_WITNESS_COMMITMENT) {
+            bool malleated = false;
+            uint256 hashWitness = BlockWitnessMerkleRoot(block, &malleated);
+            // The malleation check is ignored; as the transaction tree itself
+            // already does not permit it, it is impossible to trigger in the
+            // witness tree.
+            if (block.vtx[0]->vin[0].scriptWitness.stack.size() != 1 || block.vtx[0]->vin[0].scriptWitness.stack[0].size() != 32) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-witness-nonce-size", strprintf("%s : invalid witness reserved value size", __func__));
+            }
+            CHash256().Write(hashWitness).Write(block.vtx[0]->vin[0].scriptWitness.stack[0]).Finalize(hashWitness);
+            if (memcmp(hashWitness.begin(), &block.vtx[0]->vout[commitpos].scriptPubKey[6], 32)) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-witness-merkle-match", strprintf("%s : witness merkle commitment mismatch", __func__));
+            }
+            fHaveWitness = true;
+        }
+    }
+
+    // No witness data is allowed in blocks that don't commit to witness data, as this would otherwise leave room for spam
+    if (!fHaveWitness) {
+      for (const auto& tx : block.vtx) {
+            if (tx->HasWitness()) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "unexpected-witness", strprintf("%s : unexpected witness data found", __func__));
+            }
+        }
+    }
+    return true;
 }
 
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
@@ -10617,41 +10709,8 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         }
     }
 
-    // Validation for witness commitments.
-    // * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
-    //   coinbase (where 0x0000....0000 is used instead).
-    // * The coinbase scriptWitness is a stack of a single 32-byte vector, containing a witness reserved value (unconstrained).
-    // * We build a merkle tree with all those witness hashes as leaves (similar to the hashMerkleRoot in the block header).
-    // * There must be at least one output whose scriptPubKey is a single 36-byte push, the first 4 bytes of which are
-    //   {0xaa, 0x21, 0xa9, 0xed}, and the following 32 bytes are SHA256^2(witness root, witness reserved value). In case there are
-    //   multiple, the last one is used.
-    bool fHaveWitness = false;
-    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT)) {
-        int commitpos = GetWitnessCommitmentIndex(block);
-        if (commitpos != NO_WITNESS_COMMITMENT) {
-            bool malleated = false;
-            uint256 hashWitness = BlockWitnessMerkleRoot(block, &malleated);
-            // The malleation check is ignored; as the transaction tree itself
-            // already does not permit it, it is impossible to trigger in the
-            // witness tree.
-            if (block.vtx[0]->vin[0].scriptWitness.stack.size() != 1 || block.vtx[0]->vin[0].scriptWitness.stack[0].size() != 32) {
-                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-witness-nonce-size", strprintf("%s : invalid witness reserved value size", __func__));
-            }
-            CHash256().Write(hashWitness).Write(block.vtx[0]->vin[0].scriptWitness.stack[0]).Finalize(hashWitness);
-            if (memcmp(hashWitness.begin(), &block.vtx[0]->vout[commitpos].scriptPubKey[6], 32)) {
-                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-witness-merkle-match", strprintf("%s : witness merkle commitment mismatch", __func__));
-            }
-            fHaveWitness = true;
-        }
-    }
-
-    // No witness data is allowed in blocks that don't commit to witness data, as this would otherwise leave room for spam
-    if (!fHaveWitness) {
-      for (const auto& tx : block.vtx) {
-            if (tx->HasWitness()) {
-                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "unexpected-witness", strprintf("%s : unexpected witness data found", __func__));
-            }
-        }
+    if (!CheckWitnessMalleation(block, state, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT))) {
+        return false;
     }
     // SYSCOIN: Contextual checks reject malformed candidates before storing them. The
     // same helper also runs in ConnectBlock and rollforward because those paths
@@ -10759,18 +10818,17 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 LogPrintf("ERROR: %s: block %s is marked conflicting\n", __func__, hash.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "duplicate");
             }
-            // SYSCOIN BEGIN: A full block for a known child-header ID must
-            // validate the mutable AuxPoW wrapper that can become its stored
-            // representation.
-            if (bForBlock && !(pindex->nStatus & BLOCK_HAVE_DATA) &&
-                !CheckContextualAuxPowTag(block, state, GetConsensus(),
-                                          pindex->pprev)) {
+            // Recheck activated rules even for an indexed header. A first full
+            // block must also validate the wrapper that can become stored data.
+            if (pindex->pprev &&
+                (pindex->nHeight >= GetConsensus().nPQActivationHeight ||
+                 (bForBlock && !(pindex->nStatus & BLOCK_HAVE_DATA))) &&
+                !CheckContextualAuxPow(block, state, GetConsensus(), pindex->pprev)) {
                 LogPrint(BCLog::VALIDATION,
                          "%s: contextual AuxPoW wrapper check failed for %s: %s\n",
                          __func__, hash.ToString(), state.ToString());
                 return false;
             }
-            // SYSCOIN END: Validate a known header's first storable wrapper.
             return true;
         }
 
@@ -11464,6 +11522,10 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
     }
     BlockValidationState state;
     std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample> recovery_work;
+    if (pindex->pprev && pindex->nHeight >= chainParams.nPQActivationHeight &&
+        !CheckContextualAuxPow(block, state, chainParams, pindex->pprev)) {
+        return error("%s: Contextual AuxPoW check failed: %s", __func__, state.ToString());
+    }
     if (!CheckRecoveryRefreshWorkCommitment(
             block, state, *pindex, chainParams, &recovery_work)) {
         return error("ReplayBlock(): CheckRecoveryRefreshWorkCommitment failed at %d, "
