@@ -858,6 +858,45 @@ class CompactBlocksTest(SyscoinTestFramework):
             assert_equal(int(node.getbestblockhash(), 16), block.sha256)
             self.utxos[0] = [block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue]
 
+    def test_repeated_blocktxn_after_fallback(self, recovery_peer):
+        node = self.nodes[0]
+        for failure in ("witness", "prefilled-witness", "merkle"):
+            peer = node.add_p2p_connection(TestP2PConn())
+            block = self.build_block_with_transactions(node, self.utxos[0], 1)
+            add_witness_commitment(block)
+            block.solve()
+            altered = deepcopy(block)
+            if failure != "merkle":
+                altered.vtx[0].wit.vtxinwit = []
+
+            compact = HeaderAndShortIDs()
+            prefilled = failure == "prefilled-witness"
+            compact.initialize_from_block(altered, prefill_list=[0, 1] if prefilled else [0], use_witness=True)
+            peer.send_and_ping(msg_cmpctblock(compact.to_p2p()))
+            response = msg_blocktxn()
+            transactions = deepcopy(block.vtx[1:])
+            if failure == "merkle":
+                transactions[0].vout[0].nValue += 1
+                transactions[0].rehash()
+            response.block_transactions = BlockTransactions(block.sha256, transactions)
+            if not prefilled:
+                peer.wait_until(lambda: "getblocktxn" in peer.last_message)
+                peer.send_and_ping(response)
+            peer.wait_until(lambda: "getdata" in peer.last_message)
+            with p2p_lock:
+                requests = peer.last_message["getdata"].inv
+                assert_equal([(item.type, item.hash) for item in requests], [(MSG_BLOCK | MSG_WITNESS_FLAG, block.sha256)])
+
+            # The retained request outlives its consumed reconstruction header.
+            # A repeated response must be rejected without aborting the node.
+            with node.assert_debug_log(["invalid compact block/non-matching block transactions"]):
+                peer.send_message(response)
+                peer.wait_for_disconnect()
+            assert_equal(int(node.getbestblockhash(), 16), block.hashPrevBlock)
+            recovery_peer.send_and_ping(msg_block(block))
+            assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+            self.utxos[0] = [block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue]
+
     def test_compactblock_parallel_witness(self, stalling_peer, delivery_peer, inbound_peer, outbound_peer):
         node = self.nodes[0]
         block = self.build_block_with_transactions(node, self.utxos[0], 1)
@@ -1007,6 +1046,7 @@ class CompactBlocksTest(SyscoinTestFramework):
         self.log.info("Testing compact block witness retries...")
         self.test_compactblock_parallel_witness(stalling_peer=self.segwit_node, inbound_peer=self.onemore_inbound_node, delivery_peer=self.additional_segwit_node, outbound_peer=self.outbound_node)
         self.test_compactblock_witness_retry(self.segwit_node)
+        self.test_repeated_blocktxn_after_fallback(self.segwit_node)
 
         # Test that if we submitblock to node1, we'll get a compact block
         # announcement to all peers.

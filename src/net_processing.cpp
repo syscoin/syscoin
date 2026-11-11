@@ -6647,7 +6647,9 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         }
 
         PartiallyDownloadedBlock& partialBlock = *range_flight.first->second.second->partialBlock;
-        const CBlockIndex* prev_block = Assert(m_chainman.m_blockman.LookupBlockIndex(partialBlock.header.hashPrevBlock));
+        // FillBlock consumes the reconstruction header, but a full-block retry
+        // retains the request and its validated block index.
+        const CBlockIndex* prev_block = range_flight.first->second.second->pindex->pprev;
         ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn,
                                                    DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
         if (status == READ_STATUS_INVALID) {
