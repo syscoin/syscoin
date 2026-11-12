@@ -10,7 +10,7 @@ Test that permissions are correctly calculated and applied
 from test_framework.messages import (
     SEQUENCE_FINAL,
 )
-from test_framework.p2p import P2PDataStore, P2PInterface
+from test_framework.p2p import P2PDataStore, P2PInterface  # SYSCOIN: Exercise onion and whitebind listeners directly.
 from test_framework.test_node import ErrorMatch
 from test_framework.test_framework import SyscoinTestFramework
 from test_framework.util import (
@@ -83,13 +83,14 @@ class P2PPermissionsTests(SyscoinTestFramework):
             ["-whitelist=all@127.0.0.1"],
             ["forcerelay", "noban", "mempool", "bloomfilter", "relay", "download", "addr"])
 
-        self.check_onion_permissions()
+        self.check_onion_permissions()  # SYSCOIN: Check onion permission isolation.
 
         self.stop_node(1)
         self.nodes[1].assert_start_raises_init_error(["-whitelist=oopsie@127.0.0.1"], "Invalid P2P permission", match=ErrorMatch.PARTIAL_REGEX)
         self.nodes[1].assert_start_raises_init_error(["-whitelist=noban@127.0.0.1:230"], "Invalid netmask specified in", match=ErrorMatch.PARTIAL_REGEX)
         self.nodes[1].assert_start_raises_init_error(["-whitebind=noban@127.0.0.1/10"], "Cannot resolve -whitebind address", match=ErrorMatch.PARTIAL_REGEX)
         self.nodes[1].assert_start_raises_init_error(["-whitebind=noban@127.0.0.1", "-bind=127.0.0.1", "-listen=0"], "Cannot set -bind or -whitebind together with -listen=0", match=ErrorMatch.PARTIAL_REGEX)
+        # SYSCOIN BEGIN: Reject wildcard onion binds even when automatic onion listening is disabled.
         for address in ("0.0.0.0", "[::]"):
             for listenonion in (0, 1):
                 bind = f"{address}:{p2p_port(2)}=onion"
@@ -98,6 +99,9 @@ class P2PPermissionsTests(SyscoinTestFramework):
                     f"Error: Cannot use a wildcard address for -bind={bind}. Use a concrete address for an onion bind.",
                 )
 
+        # SYSCOIN END: Reject wildcard onion binds even when automatic onion listening is disabled.
+
+    # SYSCOIN BEGIN: Preserve ordinary wildcard and explicit whitebind permissions while isolating onion peers.
     def check_onion_permissions(self):
         node = self.nodes[1]
         normal_port, onion_port, whitebind_port = [p2p_port(i) for i in (1, 2, 3)]
@@ -122,6 +126,7 @@ class P2PPermissionsTests(SyscoinTestFramework):
             assert_equal(set(peers[whitebind_port]["permissions"]), expected | {"bloomfilter"})
         node.replace_in_config([("bind=0.0.0.0", "bind=127.0.0.1")])
 
+    # SYSCOIN END: Preserve ordinary wildcard and explicit whitebind permissions while isolating onion peers.
     def check_tx_relay(self):
         self.log.debug("Create a connection from a forcerelay peer that rebroadcasts raw txs")
         # A test framework p2p connection is needed to send the raw transaction directly. If a full node was used, it could only
