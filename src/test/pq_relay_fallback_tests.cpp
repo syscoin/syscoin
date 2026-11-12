@@ -30,7 +30,9 @@ using namespace llmq::pq;
 uint256 Identity(uint32_t value)
 {
     uint256 hash;
-    for (unsigned i{0}; i < 4; ++i) hash.begin()[i] = value >> (i * 8);
+    for (unsigned i{0}; i < 4; ++i) {
+        hash.begin()[i] = static_cast<unsigned char>((value >> (i * 8)) & 0xffU);
+    }
     return hash;
 }
 

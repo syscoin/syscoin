@@ -225,6 +225,7 @@ class PQOperatorLifecycleTest(AuxPoWMiningMixin, SyscoinTestFramework):
         assert reject_reason.startswith((
             "mandatory-script-verify-flag-failed",
             "non-mandatory-script-verify-flag",
+            "mempool-script-verify-flag-failed",
         )), reject_reason
         assert not reject_reason.startswith("bad-pq-"), reject_reason
 
