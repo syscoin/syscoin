@@ -8,7 +8,7 @@
 #include <coins.h>
 #include <consensus/merkle.h>
 #include <evo/specialtx.h>
-#include <hash.h>
+#include <hash.h> // SYSCOIN: Construct paired modern and legacy AuxPoW commitments.
 #include <llmq/pq_btcc.h>
 #include <validation.h>
 #include <pow.h>
@@ -28,7 +28,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
-#include <array>
+#include <array> // SYSCOIN: Retain both AuxPoW commitment branches.
 #include <vector>
 #include <test/util/txmempool.h>
 
@@ -637,6 +637,7 @@ struct NexusAuxpowWrapperSetup : TestChain100Setup {
   const int original_nexus_start;
 };
 
+// SYSCOIN BEGIN: Cover activated AuxPoW identities and canonical parent tags.
 BOOST_FIXTURE_TEST_CASE(
     auxpow_pq_activation_requires_modern_child_chain_id,
     NexusAuxpowWrapperSetup)
@@ -864,6 +865,7 @@ BOOST_FIXTURE_TEST_CASE(
   }
 }
 
+// SYSCOIN END: Cover activated AuxPoW identities and canonical parent tags.
 class AuxpowConnectedObserver final : public CValidationInterface {
 public:
   explicit AuxpowConnectedObserver(const uint256& target) : target{target} {}

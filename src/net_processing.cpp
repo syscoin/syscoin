@@ -6647,11 +6647,13 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         }
 
         PartiallyDownloadedBlock& partialBlock = *range_flight.first->second.second->partialBlock;
+        // SYSCOIN BEGIN: Preserve activation context across compact-block fallback.
         // FillBlock consumes the reconstruction header, but a full-block retry
         // retains the request and its validated block index.
         const CBlockIndex* prev_block = range_flight.first->second.second->pindex->pprev;
         ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn,
                                                    DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
+        // SYSCOIN END: Preserve activation context across compact-block fallback.
         if (status == READ_STATUS_INVALID) {
             RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
             Misbehaving(peer, 100, "invalid compact block/non-matching block transactions");
@@ -8230,6 +8232,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     return;
                 }
                 std::vector<CTransactionRef> dummy;
+                // SYSCOIN: Check reconstructed witnesses using the indexed activation context.
                 status = tempBlock.FillBlock(*pblock, dummy,
                                              DeploymentActiveAfter(pindex->pprev, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
                 if (status == READ_STATUS_OK) {

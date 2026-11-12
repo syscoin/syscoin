@@ -190,6 +190,7 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
+// SYSCOIN: Carry activation context into the Bitcoin witness-validation backport.
 ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool segwit_active)
 {
     if (header.IsNull()) return READ_STATUS_INVALID;
@@ -234,11 +235,13 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
         return READ_STATUS_CHECKBLOCK_FAILED;
     }
 
+    // SYSCOIN BEGIN: Validate witnesses before accepting compact reconstruction.
     CheckWitnessFn check_witness = m_check_witness_mock ? m_check_witness_mock : CheckWitnessMalleation;
     if (!check_witness(block, state, segwit_active)) {
         return READ_STATUS_FAILED;
     }
 
+    // SYSCOIN END: Validate witnesses before accepting compact reconstruction.
     LogPrint(BCLog::CMPCTBLOCK, "Successfully reconstructed block %s with %lu txn prefilled, %lu txn from mempool (incl at least %lu from extra pool) and %lu txn requested\n", hash.ToString(), prefilled_count, mempool_count, extra_count, vtx_missing.size());
     if (vtx_missing.size() < 5) {
         for (const auto& tx : vtx_missing) {

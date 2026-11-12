@@ -85,8 +85,10 @@ enum {
 	ZDAG_WARNING_RBF,
     ZDAG_WARNING_NOT_ZDAG_TX,
     ZDAG_WARNING_SIZE_OVER_POLICY,
+    // SYSCOIN BEGIN: Append the evidence-budget warning without renumbering existing statuses.
 	ZDAG_MAJOR_CONFLICT,
     ZDAG_WARNING_VERIFICATION_INCOMPLETE
+    // SYSCOIN END: Append the evidence-budget warning without renumbering existing statuses.
 };
 
 /** An outpoint - a combination of a transaction hash and an index n into its vout */

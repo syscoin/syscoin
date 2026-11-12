@@ -26,6 +26,7 @@ static inline size_t RecursiveDynamicUsage(const CTxIn& in) {
 }
 
 static inline size_t RecursiveDynamicUsage(const CTxOut& out) {
+    // SYSCOIN: Include retained PoDA payload allocation in the mempool budget.
     return RecursiveDynamicUsage(out.scriptPubKey) + memusage::DynamicUsage(out.vchNEVMData);
 }
 

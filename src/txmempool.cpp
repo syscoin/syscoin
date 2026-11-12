@@ -33,6 +33,7 @@
 extern bool EraseMempoolNEVMData(const std::vector<uint8_t>&, const uint256&);
 extern void ReleaseMempoolNEVMDataOwner(const std::vector<uint8_t>&, const uint256&);
 extern NEVMMintTxSet setMintTxsMempool;
+// SYSCOIN: Retained ZDAG conflict identities now belong to each CTxMemPool.
 
 #include <cmath>
 #include <numeric>
@@ -549,6 +550,7 @@ CTxMemPool::CTxMemPool(const Options& opts)
       m_full_rbf{opts.full_rbf},
       m_limits{opts.limits}
 {
+    // SYSCOIN: Reserve at most one tenth of the configured budget for ZDAG evidence.
     m_max_zdag_conflicts = static_cast<size_t>(std::max<int64_t>(0, opts.max_size_bytes)) /
         10 / memusage::IncrementalDynamicUsage(mapAssetAllocationConflicts);
 }
@@ -771,6 +773,7 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     );
 
     const uint256 hash = it->GetTx().GetHash();
+    // SYSCOIN BEGIN: Preserve the surviving ZDAG spender's input index on eviction.
     for (const CTxIn& txin : it->GetTx().vin) {
         const auto next{mapNextTx.find(txin.prevout)};
         if (next != mapNextTx.end() && next->second == &it->GetTx()) {
@@ -794,6 +797,7 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
             }
         }
     }
+    // SYSCOIN END: Preserve the surviving ZDAG spender's input index on eviction.
         
 
     RemoveUnbroadcastTx(hash, true /* add logging because unchecked */ );
@@ -1087,6 +1091,7 @@ void CTxMemPool::removeProTxNEVMKeyConflicts(const CTransaction &tx, const std::
     }
 }
 
+// SYSCOIN BEGIN: Retain bounded conflict identities and report incomplete ZDAG verification.
 std::optional<std::pair<uint256, uint256>> CTxMemPool::GetZDAGConflict(const COutPoint& outpoint) const
 {
     AssertLockHeld(cs);
@@ -1152,6 +1157,7 @@ void CTxMemPool::RegisterZDAGConflict(const COutPoint& outpoint,
     assert(inserted);
 }
 
+// SYSCOIN END: Retain bounded conflict identities and report incomplete ZDAG verification.
 // SYSCOIN
 void CTxMemPool::removeZDAGConflicts(const CTransaction &tx)
 {
@@ -1177,6 +1183,7 @@ void CTxMemPool::removeZDAGConflicts(const CTransaction &tx)
     }
 }
 
+// SYSCOIN BEGIN: Check every retained conflict when choosing the first ZDAG spender.
 // true if other tx (conflicting) was first in mempool and it was involved in asset double spend
 bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
     AssertLockHeld(cs);
@@ -1249,6 +1256,7 @@ bool CTxMemPool::isSyscoinConflictIsFirstSeen(const CTransaction &tx) const {
     return true;
 }
 
+// SYSCOIN END: Check every retained conflict when choosing the first ZDAG spender.
 void CTxMemPool::removeProTxPubKeyConflicts(const CTransaction &tx, const CKeyID &keyId)
 {
     if (mapProTxPubKeyIDs.count(keyId)) {
@@ -2159,9 +2167,10 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
                 }
             }
         }
-        // Snapshot both ZDAG spenders before ordinary removal erases their row.
+        // SYSCOIN BEGIN: Snapshot both ZDAG spenders before ordinary conflict removal.
         removeZDAGConflicts(*tx);
         removeConflicts(*tx);
+        // SYSCOIN END: Snapshot both ZDAG spenders before ordinary conflict removal.
         removeProTxConflicts(*tx);
         ClearPrioritisation(tx->GetHash());
     }
@@ -2225,6 +2234,7 @@ void CTxMemPool::check(const CCoinsViewCache& active_coins_tip, int64_t spendhei
                 // does dbl-spend conflict exist, we don't have enough info to check tx otherwise if no conflict
                 if(itzdagconflict != mapAssetAllocationConflicts.end()) {
                     // the tx must be one of the dbl-spend conflicts
+                    // SYSCOIN: Conflict evidence owns transaction identities, not payloads.
                     assert(itzdagconflict->second.first == tx.GetHash() || itzdagconflict->second.second == tx.GetHash());
                 }
             } else {
@@ -2747,7 +2757,7 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
     return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 15 * sizeof(void*)) *
                mapTx.size() +
            memusage::DynamicUsage(mapNextTx) +
-           memusage::DynamicUsage(mapAssetAllocationConflicts) +
+           memusage::DynamicUsage(mapAssetAllocationConflicts) + // SYSCOIN: Charge retained ZDAG evidence.
            memusage::DynamicUsage(mapDeltas) +
            memusage::DynamicUsage(vTxHashes) +
            memusage::DynamicUsage(mapMintTxs) +

@@ -5,7 +5,7 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <common/system.h>
-#include <core_memusage.h>
+#include <core_memusage.h> // SYSCOIN: Exercise retained PoDA memory accounting.
 #include <evo/deterministicmns.h> // SYSCOIN: deterministic provider-state fixtures.
 #include <evo/pq_providertx.h> // SYSCOIN: PQ provider transaction fixtures.
 #include <evo/pq_registry.h> // SYSCOIN: PQ registry reservation fixtures.
@@ -13,7 +13,7 @@
 #include <evo/specialtx.h> // SYSCOIN: special-transaction mempool fixtures.
 #include <llmq/quorums_commitment.h>
 #include <netbase.h> // SYSCOIN: provider service fixtures.
-#include <nevm/sha3.h>
+#include <nevm/sha3.h> // SYSCOIN: Commit test PoDA payloads.
 #include <node/mempool_args.h>
 #include <policy/policy.h>
 #include <test/util/logging.h>
@@ -1913,7 +1913,8 @@ BOOST_AUTO_TEST_CASE(MempoolAncestorIndexingTest)
 }
 
 
-// SYSCOIN: PoDA sidecars remain attached to the immutable mempool transaction.
+// SYSCOIN BEGIN: Cover retained PoDA allocation and mempool size-limit enforcement.
+// PoDA sidecars remain attached to the immutable mempool transaction.
 BOOST_AUTO_TEST_CASE(PoDARecursiveDynamicUsage)
 {
     CMutableTransaction tx;
@@ -2013,6 +2014,7 @@ BOOST_AUTO_TEST_CASE(PoDAMempoolMemoryLimit)
     BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), ordinary_usage);
 }
 
+// SYSCOIN END: Cover retained PoDA allocation and mempool size-limit enforcement.
 BOOST_AUTO_TEST_CASE(MempoolSizeLimitTest)
 {
     auto& pool = static_cast<MemPoolTest&>(*Assert(m_node.mempool));

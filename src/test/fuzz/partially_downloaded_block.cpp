@@ -125,10 +125,11 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
             std::optional<BlockValidationResult>{validation_result} :
             std::nullopt);
 
-    // Witness validation is covered independently from the CheckBlock result.
+    // SYSCOIN: Witness validation is covered independently from the CheckBlock result.
     pdb.m_check_witness_mock = [](const CBlock&, BlockValidationState&, bool) { return true; };
 
     CBlock reconstructed_block;
+    // SYSCOIN: Supply the activation context required by compact witness validation.
     auto fill_status{pdb.FillBlock(reconstructed_block, missing, fuzzed_data_provider.ConsumeBool())};
     switch (fill_status) {
     case READ_STATUS_OK:

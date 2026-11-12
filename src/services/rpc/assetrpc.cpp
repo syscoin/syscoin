@@ -59,6 +59,7 @@ int CheckActorsInTransactionGraph(const CTxMemPool& mempool, const uint256& look
                 return ZDAG_WARNING_NOT_ZDAG_TX;
         }  
     }
+    // SYSCOIN: Preserve specific conflict warnings before reporting incomplete evidence.
     if (mempool.IsZDAGVerificationIncomplete())
         return ZDAG_WARNING_VERIFICATION_INCOMPLETE;
     return ZDAG_STATUS_OK;
@@ -74,6 +75,7 @@ int VerifyTransactionGraph(const CTxMemPool& mempool, const uint256& lookForTxHa
 
 static RPCHelpMan assetallocationverifyzdag()
 {
+    // SYSCOIN: Document all existing ZDAG statuses and the bounded-evidence warning.
     return RPCHelpMan{"assetallocationverifyzdag",
         "\nShow status as it pertains to any current Z-DAG conflicts or warnings related to a ZDAG transaction.\n"
         "Return value is in the status field.\n"

@@ -3,20 +3,21 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/validation.h>
-#include <key_io.h>
-#include <policy/packages.h>
+#include <key_io.h> // SYSCOIN: Sign ZDAG conflict fixtures.
+#include <policy/packages.h> // SYSCOIN: Exercise deferred ZDAG package admission.
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
-#include <script/sign.h>
+#include <script/sign.h> // SYSCOIN: Authenticate ZDAG conflict fixtures.
 #include <test/util/setup_common.h>
-#include <test/util/txmempool.h>
+#include <test/util/txmempool.h> // SYSCOIN: Construct authenticated ZDAG mempool fixtures.
 #include <validation.h>
-#include <validationinterface.h>
+#include <validationinterface.h> // SYSCOIN: Drain callbacks before checking retained payloads.
 
 #include <boost/test/unit_test.hpp>
 
 
+// SYSCOIN BEGIN: Inspect bounded conflict evidence without changing the production API.
 struct ZdagMempoolTestAccess {
     static const auto& Conflicts(const CTxMemPool& pool) EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
     {
@@ -30,6 +31,7 @@ struct ZdagMempoolTestAccess {
 };
 
 int CheckActorsInTransactionGraph(const CTxMemPool& mempool, const uint256& lookForTxHash);
+// SYSCOIN END: Inspect bounded conflict evidence without changing the production API.
 
 BOOST_AUTO_TEST_SUITE(txvalidation_tests)
 
@@ -66,6 +68,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_reject_coinbase, TestChain100Setup)
     BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
 }
 
+// SYSCOIN BEGIN: Cover authenticated ZDAG admission, retention, limits, and warning precedence.
 struct ZdagMempoolSetup : TestChain100Setup {
     explicit ZdagMempoolSetup(bool tiny_mempool = false)
         : TestChain100Setup(ChainType::REGTEST,
@@ -657,4 +660,5 @@ BOOST_FIXTURE_TEST_CASE(zdag_evidence_cap_bounds_repeated_unconfirmed_parent_rep
     BOOST_CHECK(!pool.HasZDAGConflictCapacity(1));
     pool.check(m_node.chainman->ActiveChainstate().CoinsTip(), 111);
 }
+// SYSCOIN END: Cover authenticated ZDAG admission, retention, limits, and warning precedence.
 BOOST_AUTO_TEST_SUITE_END()

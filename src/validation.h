@@ -514,7 +514,10 @@ static_assert(std::is_nothrow_destructible_v<CScriptCheck>);
 /** Context-independent validity checks */
 bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
 
-/** Check witness commitments and uncommitted witness data after CheckBlock succeeds. */
+/**
+ * Check witness commitments and uncommitted witness data after CheckBlock succeeds.
+ * SYSCOIN: Bitcoin witness-validation backport, shared by full and compact blocks.
+ */
 bool CheckWitnessMalleation(const CBlock& block, BlockValidationState& state, bool expect_witness);
 
 /** Check a block is completely valid from start to finish (only works on top of our current best block) */

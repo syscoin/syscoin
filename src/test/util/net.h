@@ -19,7 +19,7 @@
 
 struct ConnmanTestMsg : public CConnman {
     using CConnman::CConnman;
-    using CConnman::CreateNodeFromAcceptedSocket;
+    using CConnman::CreateNodeFromAcceptedSocket; // SYSCOIN: Exercise inbound onion permissions.
 
     bool IsTestMasternodeFallbackOnly(const uint256& identity)
     {

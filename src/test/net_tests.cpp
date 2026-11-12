@@ -4695,6 +4695,7 @@ BOOST_AUTO_TEST_CASE(cnode_listen_port)
     BOOST_CHECK(port == altPort);
 }
 
+// SYSCOIN BEGIN: Cover the onion permission-isolation backport with explicit whitebind controls.
 BOOST_AUTO_TEST_CASE(inbound_onion_permissions)
 {
     struct CaptureConnections : NetEventsInterface {
@@ -4750,6 +4751,7 @@ BOOST_AUTO_TEST_CASE(inbound_onion_permissions)
     }
 }
 
+// SYSCOIN END: Cover the onion permission-isolation backport with explicit whitebind controls.
 BOOST_AUTO_TEST_CASE(paused_current_protocol_peer_retains_ping_timeout)
 {
     auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};

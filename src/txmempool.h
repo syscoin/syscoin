@@ -466,11 +466,13 @@ private:
     // SYSCOIN
     // NEVM proof identity -> pending Syscoin transaction owner.
     std::map<uint256, uint256> mapMintTxs GUARDED_BY(cs);
+    // SYSCOIN BEGIN: Bound retained ZDAG conflict identities without owning payloads.
     // Retain accepted conflict identities until confirmation without owning payloads.
     std::map<COutPoint, std::pair<uint256, uint256>> mapAssetAllocationConflicts GUARDED_BY(cs);
     // Leave at least 90% of the configured pool budget available to transactions.
     size_t m_max_zdag_conflicts{0};
     bool m_zdag_verification_incomplete GUARDED_BY(cs){false};
+    // SYSCOIN END: Bound retained ZDAG conflict identities without owning payloads.
     std::multimap<uint256, uint256> mapProTxRefs; // proTxHash -> transaction (all TXs that refer to an existing proTx)
     // Consensus allows only one PQ registry mutation per operator in a block.
     std::map<uint256, uint256> mapPQOperatorUpdates; // proTxHash -> transaction
@@ -507,7 +509,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
 
     friend struct PQMempoolTestAccess;
-    friend struct ZdagMempoolTestAccess;
+    friend struct ZdagMempoolTestAccess; // SYSCOIN: Exercise retained-evidence limits.
 
 
     /**
@@ -582,6 +584,7 @@ public:
                           std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeRecursive(const CTransaction& tx, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    // SYSCOIN BEGIN: Expose bounded ZDAG evidence and conservative warning state.
     std::optional<std::pair<uint256, uint256>> GetZDAGConflict(const COutPoint& outpoint) const
         EXCLUSIVE_LOCKS_REQUIRED(cs);
     void RegisterZDAGConflict(const COutPoint& outpoint, const uint256& txid,
@@ -590,6 +593,7 @@ public:
     size_t ZDAGConflictMemoryUsage(size_t count) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     void MarkZDAGVerificationIncomplete() EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool IsZDAGVerificationIncomplete() const EXCLUSIVE_LOCKS_REQUIRED(cs);
+    // SYSCOIN END: Expose bounded ZDAG evidence and conservative warning state.
     // SYSCOIN
     void removeProTxPubKeyConflicts(const CTransaction &tx, const CKeyID &keyId) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     void removeProTxNEVMKeyConflicts(const CTransaction &tx, const std::vector<unsigned char> &vchNEVMAddress) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);

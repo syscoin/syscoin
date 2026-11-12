@@ -132,6 +132,7 @@ RecursiveMutex cs_geth;
 RecursiveMutex cs_btcheader;
 static const char* GETH_STATE_BOOTSTRAP_STATUS_FILENAME = "state-bootstrap.status";
 NEVMMintTxSet setMintTxsMempool;
+// SYSCOIN: Retained ZDAG conflict identities now belong to each CTxMemPool.
 std::map<uint256, int64_t> mapRejectedBlocks GUARDED_BY(cs_main);
 
 static bool IsManagedGethStarted()
@@ -357,6 +358,7 @@ bool CheckSequenceLocksAtTip(CBlockIndex* tip,
 // Returns the script flags which should be checked for a given block
 static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
 
+// SYSCOIN: Reserve room for ZDAG evidence published after transaction trimming.
 static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache,
                              size_t reserved_bytes = 0)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, pool.cs)
@@ -369,8 +371,10 @@ static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache,
     }
 
     std::vector<COutPoint> vNoSpendsRemaining;
+    // SYSCOIN BEGIN: Charge deferred ZDAG records against the shared memory budget.
     const size_t max_size{static_cast<size_t>(std::max<int64_t>(0, pool.m_max_size_bytes))};
     pool.TrimToSize(max_size - std::min(max_size, reserved_bytes), &vNoSpendsRemaining);
+    // SYSCOIN END: Charge deferred ZDAG records against the shared memory budget.
     for (const COutPoint& removed : vNoSpendsRemaining)
         coins_cache.Uncache(removed);
 }
@@ -723,7 +727,7 @@ private:
         std::set<uint256> m_conflicts;
         /** Txids of mempool asset transactions that this transaction directly conflicts with. */
         std::set<uint256> m_conflictsAsset;
-        // A first ZDAG conflict is published only with successful admission.
+        // SYSCOIN: A first ZDAG conflict is published only with successful admission.
         std::vector<std::pair<COutPoint, uint256>> m_zdag_conflicts;
         /** Iterators to mempool entries that this transaction directly conflicts with. */
         CTxMemPool::setEntries m_iters_conflicting;
@@ -836,6 +840,7 @@ private:
         return true;
     }
 
+    // SYSCOIN BEGIN: Reserve and publish only authenticated, retained ZDAG evidence.
     void PublishPackageZDAGConflicts() EXCLUSIVE_LOCKS_REQUIRED(m_pool.cs)
     {
         for (const auto& reservation : m_package_zdag_conflicts) {
@@ -871,6 +876,7 @@ private:
         return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
                                    "zdag-conflict-evidence-full");
     }
+    // SYSCOIN END: Reserve and publish only authenticated, retained ZDAG evidence.
 
 private:
     CTxMemPool& m_pool;
@@ -882,12 +888,14 @@ private:
 
     /** Whether the transaction(s) would replace any mempool transactions. If so, RBF rules apply. */
     bool m_rbf{false};
+    // SYSCOIN BEGIN: Retain package conflict identities until final trimming completes.
     struct ZDAGReservation {
         COutPoint outpoint;
         uint256 txid;
         uint256 first_seen;
     };
     std::vector<ZDAGReservation> m_package_zdag_conflicts;
+    // SYSCOIN END: Retain package conflict identities until final trimming completes.
 };
 
 bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint_txs)
@@ -955,16 +963,19 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
     const bool IsZTx = IsZdagTx(tx.nVersion);
     for (const CTxIn &txin : tx.vin)
     {
+        // SYSCOIN BEGIN: Admit only the two spenders retained for a ZDAG outpoint.
         const auto known_conflict{m_pool.GetZDAGConflict(txin.prevout)};
         if (known_conflict && hash != known_conflict->first && hash != known_conflict->second) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict-zdag");
         }
+        // SYSCOIN END: Admit only the two spenders retained for a ZDAG outpoint.
         const CTransaction* ptxConflicting = m_pool.GetConflictTx(txin.prevout);
         if (ptxConflicting) {
             if (!args.m_allow_replacement) {
                 // Transaction conflicts with a mempool tx, but we're not allowing replacements.
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
             }
+            // SYSCOIN BEGIN: Stage every ZDAG conflict without mutating retained evidence.
             // Every shared input needs its own reservation, even when several
             // inputs conflict with the same transaction.
             if (known_conflict || (!m_pool.m_full_rbf && !SignalsOptInRBF(*ptxConflicting))) {
@@ -977,6 +988,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
                 ws.m_conflictsAsset.insert(ptxConflicting->GetHash());
                 continue;
             }
+            // SYSCOIN END: Stage every ZDAG conflict without mutating retained evidence.
+            // SYSCOIN: ZDAG conflicts were staged above; deduplicate only ordinary RBF conflicts here.
             if (!ws.m_conflicts.count(ptxConflicting->GetHash()))
             {
                 // Transactions that don't explicitly signal replaceability are
@@ -989,6 +1002,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws, NEVMMintTxSet& mint
                 //
                 // If replaceability signaling is ignored due to node setting,
                 // replacement is always allowed.
+                // SYSCOIN: Non-RBF ZDAG handling moved above; retain Bitcoin RBF processing here.
                 // regardless of RBF flag this tx as per BTC policy but JFYI we don't want to limit asset allocation txs to use NON-RBF,
                 // its still valid to send asset allocations with RBF for normal use-case, just that verifyzdag will flag it as a warning and shouldn't be accepted at point-of-sale
                 ws.m_conflicts.insert(ptxConflicting->GetHash());
@@ -1383,8 +1397,10 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     TxValidationState& state = ws.m_state;
     const bool bypass_limits = args.m_bypass_limits;
 
+    // SYSCOIN BEGIN: Check evidence capacity before any mempool mutation.
     auto zdag_reservations{PendingZDAGConflictOutpoints()};
     if (!CheckZDAGConflictCapacity(args, ws, zdag_reservations)) return false;
+    // SYSCOIN END: Check evidence capacity before any mempool mutation.
 
     std::unique_ptr<CTxMemPoolEntry>& entry = ws.m_entry;
     // Remove conflicting transactions from the mempool
@@ -1436,11 +1452,13 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     // in the package. LimitMempoolSize() should be called at the very end to make sure the mempool
     // is still within limits and package submission happens atomically.
     if (!args.m_package_submission && !bypass_limits) {
+        // SYSCOIN: Reserve the bytes needed by accepted but unpublished conflicts.
         LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip(),
                          m_pool.ZDAGConflictMemoryUsage(zdag_reservations.size()));
         if (!m_pool.exists(GenTxid::Txid(hash)))
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
     }
+    // SYSCOIN BEGIN: Publish successful single admissions or defer package evidence.
     for (const auto& [outpoint, first_seen] : ws.m_zdag_conflicts) {
         if (args.m_package_submission) {
             m_package_zdag_conflicts.push_back({outpoint, hash, first_seen});
@@ -1448,6 +1466,7 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
             m_pool.RegisterZDAGConflict(outpoint, hash, first_seen);
         }
     }
+    // SYSCOIN END: Publish successful single admissions or defer package evidence.
     return true;
 }
 
@@ -1552,10 +1571,12 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     // Tx was accepted, but not added
     if (args.m_test_accept) {
         assert(ws.m_special_tx_auth_checked);
+        // SYSCOIN BEGIN: Apply evidence limits in dry runs without publishing warnings.
         auto zdag_reservations{PendingZDAGConflictOutpoints()};
         if (!CheckZDAGConflictCapacity(args, ws, zdag_reservations)) {
             return MempoolAcceptResult::Failure(ws.m_state);
         }
+        // SYSCOIN END: Apply evidence limits in dry runs without publishing warnings.
         return MempoolAcceptResult::Success(std::move(ws.m_replaced_transactions), ws.m_vsize,
                                             ws.m_base_fees, effective_feerate, single_wtxid);
     }
@@ -1691,6 +1712,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         }
     }
 
+    // SYSCOIN BEGIN: Reserve evidence for the authenticated subpackage atomically.
     // Reserve the whole authenticated subpackage before any member is inserted.
     // Previously accepted subpackages may still have deferred conflict records.
     auto zdag_reservations{PendingZDAGConflictOutpoints()};
@@ -1702,6 +1724,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
             return PackageMempoolAcceptResult(package_state, std::move(results));
         }
     }
+    // SYSCOIN END: Reserve evidence for the authenticated subpackage atomically.
     if (args.m_test_accept) return PackageMempoolAcceptResult(package_state, std::move(results));
 
     if (!SubmitPackage(args, workspaces, package_state, results)) {
@@ -1893,9 +1916,11 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
 
     // Make sure we haven't exceeded max mempool size.
     // Package transactions that were submitted to mempool or already in mempool may be evicted.
+    // SYSCOIN BEGIN: Reserve retained-evidence bytes before final package publication.
     LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip(),
                      m_pool.ZDAGConflictMemoryUsage(PendingZDAGConflictOutpoints().size()));
     PublishPackageZDAGConflicts();
+    // SYSCOIN END: Reserve retained-evidence bytes before final package publication.
 
     for (const auto& tx : package) {
         const auto& wtxid = tx->GetWitnessHash();
@@ -1959,6 +1984,7 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
 
         for (const COutPoint& hashTx : coins_to_uncache) {
             active_chainstate.CoinsTip().Uncache(hashTx);
+            // SYSCOIN: Rejected admissions cannot erase evidence from accepted conflicts.
         }
         TRACE2(mempool, rejected,
                 tx->GetHash().data(),
@@ -10673,9 +10699,10 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, strprintf("bad-version(0x%08x)", baseVer),
                                     strprintf("rejected nVersion=0x%08x block", block.nVersion));
     }
-    return CheckContextualAuxPow(block, state, consensusParams, pindexPrev);
+    return CheckContextualAuxPow(block, state, consensusParams, pindexPrev); // SYSCOIN: Apply contextual AuxPoW rules.
 }
 
+// SYSCOIN BEGIN: Share Bitcoin's witness checks with compact-block reconstruction.
 bool CheckWitnessMalleation(const CBlock& block, BlockValidationState& state, bool expect_witness)
 {
     // Validation for witness commitments.
@@ -10717,6 +10744,7 @@ bool CheckWitnessMalleation(const CBlock& block, BlockValidationState& state, bo
     return true;
 }
 
+// SYSCOIN END: Share Bitcoin's witness checks with compact-block reconstruction.
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
  *  should consider upgrade issues if we change which consensus rules are
  *  enforced in this function (eg by adding a new consensus rule). See comment
@@ -10758,6 +10786,7 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         }
     }
 
+    // SYSCOIN: Bitcoin witness checks were moved into the shared helper above.
     if (!CheckWitnessMalleation(block, state, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT))) {
         return false;
     }
@@ -10867,6 +10896,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 LogPrintf("ERROR: %s: block %s is marked conflicting\n", __func__, hash.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CHAINLOCK, "duplicate");
             }
+            // SYSCOIN BEGIN: Revalidate AuxPoW for known child headers and their first stored wrapper.
             // Recheck activated rules even for an indexed header. A first full
             // block must also validate the wrapper that can become stored data.
             if (pindex->pprev &&
@@ -10878,6 +10908,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                          __func__, hash.ToString(), state.ToString());
                 return false;
             }
+            // SYSCOIN END: Revalidate AuxPoW for known child headers and their first stored wrapper.
             return true;
         }
 
@@ -11571,10 +11602,12 @@ bool Chainstate::RollforwardBlock(CBlockIndex* pindex, CCoinsViewCache& inputs, 
     }
     BlockValidationState state;
     std::optional<llmq::pq::ValidatedRecoveryRefreshWorkSample> recovery_work;
+    // SYSCOIN BEGIN: Enforce activated AuxPoW rules during crash-recovery replay.
     if (pindex->pprev && pindex->nHeight >= chainParams.nPQActivationHeight &&
         !CheckContextualAuxPow(block, state, chainParams, pindex->pprev)) {
         return error("%s: Contextual AuxPoW check failed: %s", __func__, state.ToString());
     }
+    // SYSCOIN END: Enforce activated AuxPoW rules during crash-recovery replay.
     if (!CheckRecoveryRefreshWorkCommitment(
             block, state, *pindex, chainParams, &recovery_work)) {
         return error("ReplayBlock(): CheckRecoveryRefreshWorkCommitment failed at %d, "
