@@ -59,6 +59,8 @@ int CheckActorsInTransactionGraph(const CTxMemPool& mempool, const uint256& look
                 return ZDAG_WARNING_NOT_ZDAG_TX;
         }  
     }
+    if (mempool.IsZDAGVerificationIncomplete())
+        return ZDAG_WARNING_VERIFICATION_INCOMPLETE;
     return ZDAG_STATUS_OK;
 }
 
@@ -74,11 +76,14 @@ static RPCHelpMan assetallocationverifyzdag()
 {
     return RPCHelpMan{"assetallocationverifyzdag",
         "\nShow status as it pertains to any current Z-DAG conflicts or warnings related to a ZDAG transaction.\n"
-        "Return value is in the status field and can represent 3 levels(0, 1 or 2)\n"
-        "Level -1 means not found, not a ZDAG transaction, perhaps it is already confirmed.\n"
+        "Return value is in the status field.\n"
+        "Level -1 means not found, perhaps it is already confirmed.\n"
         "Level 0 means OK.\n"
-        "Level 1 means warning (checked that in the mempool there are more spending balances than current POW sender balance). An active stance should be taken and perhaps a deeper analysis as to potential conflicts related to the sender.\n"
-        "Level 2 means an active double spend was found and any depending asset allocation sends are also flagged as dangerous and should wait for POW confirmation before proceeding.\n",
+        "Level 1 warns that the transaction or an ancestor signals replacement.\n"
+        "Level 2 means the transaction or an ancestor is not a ZDAG transaction.\n"
+        "Level 3 warns that the transaction or an ancestor exceeds ZDAG size policy.\n"
+        "Level 4 means a double spend was found; wait for POW confirmation.\n"
+        "Level 5 means conflict verification is incomplete after the evidence budget was exhausted; wait for POW confirmation. This warning persists until the node restarts.\n",
         {
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id of the ZDAG transaction."}
         },

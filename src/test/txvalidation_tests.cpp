@@ -22,7 +22,14 @@ struct ZdagMempoolTestAccess {
     {
         return pool.mapAssetAllocationConflicts;
     }
+
+    static void SetConflictCapacity(CTxMemPool& pool, size_t capacity) EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
+    {
+        pool.m_max_zdag_conflicts = capacity;
+    }
 };
+
+int CheckActorsInTransactionGraph(const CTxMemPool& mempool, const uint256& lookForTxHash);
 
 BOOST_AUTO_TEST_SUITE(txvalidation_tests)
 
@@ -73,14 +80,24 @@ struct ZdagMempoolSetup : TestChain100Setup {
     ~ZdagMempoolSetup() { consensus.nNexusStartBlock = old_nexus; }
 
     CMutableTransaction Spend(CAmount fee, uint8_t memo,
-                              const std::vector<size_t>& funding = {0})
+                              const std::vector<size_t>& funding = {0},
+                              uint32_t sequence = CTxIn::SEQUENCE_FINAL)
+    {
+        std::vector<CTransactionRef> parents;
+        for (const auto index : funding) parents.push_back(m_coinbase_txns[index]);
+        return SpendOutputs(parents, fee, memo, sequence);
+    }
+
+    CMutableTransaction SpendOutputs(const std::vector<CTransactionRef>& funding,
+                                     CAmount fee, uint8_t memo,
+                                     uint32_t sequence = CTxIn::SEQUENCE_FINAL)
     {
         CMutableTransaction tx;
         tx.nVersion = SYSCOIN_TX_VERSION_ALLOCATION_SEND;
         CAmount total{0};
-        for (const auto index : funding) {
-            tx.vin.emplace_back(COutPoint{m_coinbase_txns[index]->GetHash(), 0});
-            total += m_coinbase_txns[index]->vout[0].nValue;
+        for (const auto& parent : funding) {
+            tx.vin.emplace_back(COutPoint{parent->GetHash(), 0}, CScript{}, sequence);
+            total += parent->vout[0].nValue;
         }
         tx.vout.emplace_back(total - fee,
                             GetScriptForDestination(PKHash(coinbaseKey.GetPubKey())));
@@ -90,7 +107,7 @@ struct ZdagMempoolSetup : TestChain100Setup {
         provider.AddKey(coinbaseKey);
         for (size_t i{0}; i < funding.size(); ++i) {
             SignatureData data;
-            BOOST_REQUIRE(SignSignature(provider, *m_coinbase_txns[funding[i]], tx, i,
+            BOOST_REQUIRE(SignSignature(provider, *funding[i], tx, i,
                                         SIGHASH_ALL, data));
         }
         return tx;
@@ -209,6 +226,8 @@ struct ZdagTinyMempoolSetup : ZdagMempoolSetup {
         BOOST_REQUIRE_EQUAL(limited.m_max_size_bytes, 0);
         LOCK(cs_main);
         LOCK(limited.cs);
+        // Isolate transaction-size eviction from the independent evidence cap.
+        ZdagMempoolTestAccess::SetConflictCapacity(limited, 1);
         const auto first{MakeTransactionRef(Spend(10000, 1))};
         const auto initial{AcceptToMemoryPool(chainstate, first, GetTime(),
                                             /*bypass_limits=*/true, /*test_accept=*/false)};
@@ -407,5 +426,235 @@ BOOST_FIXTURE_TEST_CASE(zdag_trimmed_incumbent_does_not_erase_new_warning,
     BOOST_REQUIRE(pool.GetZDAGConflict(outpoint).has_value());
     BOOST_CHECK(pool.existsConflicts(*candidate));
     BOOST_CHECK(pool.GetConflictTx(outpoint) == candidate.get());
+}
+
+BOOST_FIXTURE_TEST_CASE(zdag_evidence_cap_requires_authentication_and_real_admission,
+                        ZdagMempoolSetup)
+{
+    auto& pool{*m_node.mempool};
+    LOCK(cs_main);
+    LOCK(pool.cs);
+    const size_t default_capacity{static_cast<size_t>(pool.m_max_size_bytes) /
+                                  10 / pool.ZDAGConflictMemoryUsage(1)};
+    BOOST_CHECK(pool.HasZDAGConflictCapacity(default_capacity));
+    BOOST_CHECK(!pool.HasZDAGConflictCapacity(default_capacity + 1));
+    ZdagMempoolTestAccess::SetConflictCapacity(pool, 1);
+    const auto first{Accept(Spend(1000, 1))};
+    const auto second{Accept(Spend(2000, 2))};
+    const auto other{Accept(Spend(1000, 3, {1}))};
+    const auto evidence{ZdagMempoolTestAccess::Conflicts(pool)};
+    const auto memory_usage{pool.DynamicMemoryUsage()};
+    BOOST_REQUIRE_EQUAL(evidence.size(), 1U);
+    BOOST_CHECK(!pool.HasZDAGConflictCapacity(1));
+    BOOST_CHECK(!pool.IsZDAGVerificationIncomplete());
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, other->GetHash()), ZDAG_STATUS_OK);
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, first->GetHash()), ZDAG_MAJOR_CONFLICT);
+
+    auto bad_signature{Spend(2000, 4, {1})};
+    bad_signature.vin[0].scriptSig = CScript{} << OP_0;
+    const auto invalid{MakeTransactionRef(bad_signature)};
+    const auto invalid_child{MakeTransactionRef(SpendOutputs({invalid}, 1000, 5))};
+    for (const bool test_accept : {false, true}) {
+        const auto rejected{m_node.chainman->ProcessTransaction(invalid, test_accept)};
+        BOOST_CHECK(rejected.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+        BOOST_CHECK(rejected.m_state.GetRejectReason() != "zdag-conflict-evidence-full");
+        const auto package{ProcessNewPackage(m_node.chainman->ActiveChainstate(), pool,
+                                             {invalid, invalid_child}, test_accept)};
+        BOOST_CHECK(!package.m_state.IsValid());
+        BOOST_CHECK(!pool.IsZDAGVerificationIncomplete());
+        BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool) == evidence);
+        BOOST_CHECK_EQUAL(pool.size(), 3U);
+        BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), memory_usage);
+        BOOST_CHECK(pool.GetConflictTx(other->vin[0].prevout) == other.get());
+    }
+
+    const auto candidate{MakeTransactionRef(Spend(2000, 6, {1}))};
+    const auto dry_run{m_node.chainman->ProcessTransaction(candidate, /*test_accept=*/true)};
+    BOOST_CHECK(dry_run.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK_EQUAL(dry_run.m_state.GetRejectReason(), "zdag-conflict-evidence-full");
+    BOOST_CHECK(!pool.IsZDAGVerificationIncomplete());
+    BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool) == evidence);
+    BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), memory_usage);
+
+    const auto rejected{m_node.chainman->ProcessTransaction(candidate)};
+    BOOST_CHECK(rejected.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK_EQUAL(rejected.m_state.GetRejectReason(), "zdag-conflict-evidence-full");
+    BOOST_CHECK(pool.IsZDAGVerificationIncomplete());
+    BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool) == evidence);
+    BOOST_CHECK_EQUAL(pool.size(), 3U);
+    BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), memory_usage);
+    BOOST_CHECK(pool.GetConflictTx(other->vin[0].prevout) == other.get());
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, first->GetHash()), ZDAG_MAJOR_CONFLICT);
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, second->GetHash()), ZDAG_MAJOR_CONFLICT);
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, other->GetHash()), ZDAG_WARNING_VERIFICATION_INCOMPLETE);
+    const auto unrelated{Accept(Spend(1000, 7, {2}))};
+    BOOST_CHECK_EQUAL(pool.size(), 4U);
+    BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool) == evidence);
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, unrelated->GetHash()), ZDAG_WARNING_VERIFICATION_INCOMPLETE);
+}
+
+BOOST_FIXTURE_TEST_CASE(zdag_evidence_cap_reserves_all_inputs_before_mutating_pool,
+                        ZdagMempoolSetup)
+{
+    auto& pool{*m_node.mempool};
+    LOCK(cs_main);
+    LOCK(pool.cs);
+    ZdagMempoolTestAccess::SetConflictCapacity(pool, 1);
+    const auto first{Accept(Spend(1000, 1, {0, 1}))};
+    const auto candidate{MakeTransactionRef(Spend(2000, 2, {0, 1}))};
+    const auto memory_usage{pool.DynamicMemoryUsage()};
+    const auto rejected{m_node.chainman->ProcessTransaction(candidate)};
+    BOOST_CHECK(rejected.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK_EQUAL(rejected.m_state.GetRejectReason(), "zdag-conflict-evidence-full");
+    BOOST_CHECK(pool.IsZDAGVerificationIncomplete());
+    BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool).empty());
+    BOOST_CHECK_EQUAL(pool.size(), 1U);
+    BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), memory_usage);
+    for (const auto& input : first->vin) {
+        BOOST_CHECK(pool.GetConflictTx(input.prevout) == first.get());
+    }
+    // A failed two-input reservation must not consume the one available slot.
+    const auto one_input{Accept(Spend(2000, 3, {0}))};
+    BOOST_CHECK_EQUAL(ZdagMempoolTestAccess::Conflicts(pool).size(), 1U);
+    BOOST_CHECK(pool.GetZDAGConflict(first->vin[0].prevout).has_value());
+    BOOST_CHECK(!pool.GetZDAGConflict(first->vin[1].prevout).has_value());
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, one_input->GetHash()), ZDAG_MAJOR_CONFLICT);
+    pool.check(m_node.chainman->ActiveChainstate().CoinsTip(), 111);
+}
+
+BOOST_FIXTURE_TEST_CASE(zdag_evidence_cap_retains_pairs_and_recovers_only_after_confirmation,
+                        ZdagMempoolSetup)
+{
+    auto& pool{*m_node.mempool};
+    const auto first_tx{Spend(1000, 1)};
+    const auto second_tx{Spend(2000, 2)};
+    const auto first{Accept(first_tx)};
+    const auto second{Accept(second_tx)};
+    const auto other{Accept(Spend(1000, 3, {1}))};
+    {
+        LOCK(cs_main);
+        LOCK(pool.cs);
+        ZdagMempoolTestAccess::SetConflictCapacity(pool, 1);
+        const auto rejected{m_node.chainman->ProcessTransaction(MakeTransactionRef(Spend(2000, 4, {1})))};
+        BOOST_REQUIRE(rejected.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+        BOOST_REQUIRE(pool.IsZDAGVerificationIncomplete());
+        const auto evidence{ZdagMempoolTestAccess::Conflicts(pool)};
+        pool.TrimToSize(0);
+        BOOST_CHECK_EQUAL(pool.size(), 0U);
+        BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool) == evidence);
+        BOOST_CHECK(!pool.HasZDAGConflictCapacity(1));
+        // Only bypass the fee floor raised by TrimToSize. Capacity still applies.
+        for (const auto& tx : {first, second}) {
+            const auto restored{AcceptToMemoryPool(m_node.chainman->ActiveChainstate(),
+                                                   tx, GetTime(), true, false)};
+            BOOST_REQUIRE_MESSAGE(restored.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                                  restored.m_state.ToString());
+            BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, tx->GetHash()), ZDAG_MAJOR_CONFLICT);
+        }
+        const auto third{AcceptToMemoryPool(m_node.chainman->ActiveChainstate(),
+            MakeTransactionRef(Spend(3000, 5)), GetTime(), true, false)};
+        BOOST_CHECK(third.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+        BOOST_CHECK_EQUAL(third.m_state.GetRejectReason(), "txn-mempool-conflict-zdag");
+        BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool) == evidence);
+    }
+
+    const CBlock block{CreateAndProcessBlock({first_tx},
+        GetScriptForDestination(PKHash(coinbaseKey.GetPubKey())))};
+    LOCK(cs_main);
+    LOCK(pool.cs);
+    BOOST_REQUIRE(m_node.chainman->ActiveTip()->GetBlockHash() == block.GetHash());
+    BOOST_CHECK(ZdagMempoolTestAccess::Conflicts(pool).empty());
+    BOOST_CHECK(pool.HasZDAGConflictCapacity(1));
+    BOOST_CHECK(pool.IsZDAGVerificationIncomplete());
+    BOOST_CHECK_EQUAL(pool.size(), 0U);
+    const auto restored{AcceptToMemoryPool(m_node.chainman->ActiveChainstate(),
+                                           other, GetTime(), true, false)};
+    BOOST_REQUIRE_MESSAGE(restored.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                          restored.m_state.ToString());
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, other->GetHash()), ZDAG_WARNING_VERIFICATION_INCOMPLETE);
+    const auto new_pair{AcceptToMemoryPool(m_node.chainman->ActiveChainstate(),
+        MakeTransactionRef(Spend(2000, 6, {1})), GetTime(), true, false)};
+    BOOST_REQUIRE_MESSAGE(new_pair.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                          new_pair.m_state.ToString());
+    BOOST_CHECK_EQUAL(ZdagMempoolTestAccess::Conflicts(pool).size(), 1U);
+    BOOST_CHECK(pool.IsZDAGVerificationIncomplete());
+    BOOST_CHECK_EQUAL(CheckActorsInTransactionGraph(pool, other->GetHash()), ZDAG_MAJOR_CONFLICT);
+}
+
+BOOST_FIXTURE_TEST_CASE(zdag_evidence_cap_counts_deferred_package_conflicts,
+                        ZdagMempoolSetup)
+{
+    auto& pool{*m_node.mempool};
+    LOCK(cs_main);
+    LOCK(pool.cs);
+    ZdagMempoolTestAccess::SetConflictCapacity(pool, 1);
+    const auto first{Accept(Spend(1000, 1, {0}))};
+    const auto other{Accept(Spend(1000, 2, {1}))};
+    const auto candidate{MakeTransactionRef(Spend(2000, 3, {0}))};
+    const auto excess{MakeTransactionRef(Spend(2000, 4, {1}))};
+    const auto child{MakeTransactionRef(SpendOutputs({candidate, excess}, 2000, 5))};
+    const auto result{ProcessNewPackage(m_node.chainman->ActiveChainstate(), pool,
+                                        {candidate, excess, child}, false)};
+    BOOST_CHECK(!result.m_state.IsValid());
+    // The first parent is accepted before its evidence is published; the second
+    // must see that pending reservation even though the map is still empty.
+    BOOST_CHECK(result.m_tx_results.at(candidate->GetWitnessHash()).m_result_type ==
+                MempoolAcceptResult::ResultType::VALID);
+    BOOST_CHECK(result.m_tx_results.at(excess->GetWitnessHash()).m_result_type ==
+                MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK(pool.exists(GenTxid::Txid(candidate->GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(excess->GetHash())));
+    BOOST_CHECK(!pool.exists(GenTxid::Txid(child->GetHash())));
+    BOOST_CHECK_EQUAL(pool.size(), 3U);
+    BOOST_CHECK_EQUAL(ZdagMempoolTestAccess::Conflicts(pool).size(), 1U);
+    BOOST_CHECK(pool.GetZDAGConflict(first->vin[0].prevout).has_value());
+    BOOST_CHECK(!pool.GetZDAGConflict(other->vin[0].prevout).has_value());
+    BOOST_CHECK(pool.GetConflictTx(other->vin[0].prevout) == other.get());
+    BOOST_CHECK(pool.IsZDAGVerificationIncomplete());
+    pool.check(m_node.chainman->ActiveChainstate().CoinsTip(), 111);
+}
+
+BOOST_FIXTURE_TEST_CASE(zdag_evidence_cap_bounds_repeated_unconfirmed_parent_replacement,
+                        ZdagMempoolSetup)
+{
+    auto& pool{*m_node.mempool};
+    LOCK(cs_main);
+    LOCK(pool.cs);
+    constexpr size_t capacity{3};
+    ZdagMempoolTestAccess::SetConflictCapacity(pool, capacity);
+    std::vector<COutPoint> retained_outpoints;
+    CTransactionRef previous_parent;
+    for (size_t round{0}; round < capacity + 2; ++round) {
+        // Replacing the RBF parent removes both child spenders but cannot erase
+        // their evidence: the parent remains unconfirmed and may return later.
+        const auto parent{Accept(Spend(100000 * (round + 1), static_cast<uint8_t>(round),
+                                       {0}, CTxIn::SEQUENCE_FINAL - 2))};
+        if (previous_parent) BOOST_CHECK(!pool.exists(GenTxid::Txid(previous_parent->GetHash())));
+        const auto first{Accept(SpendOutputs({parent}, 1000, 10))};
+        const auto second{MakeTransactionRef(SpendOutputs({parent}, 2000, 11))};
+        const auto result{m_node.chainman->ProcessTransaction(second)};
+        if (round < capacity) {
+            BOOST_REQUIRE_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                                  result.m_state.ToString());
+            retained_outpoints.push_back(first->vin[0].prevout);
+            BOOST_CHECK_EQUAL(pool.size(), 3U);
+            BOOST_CHECK(!pool.IsZDAGVerificationIncomplete());
+        } else {
+            BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+            BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "zdag-conflict-evidence-full");
+            BOOST_CHECK_EQUAL(pool.size(), 2U);
+            BOOST_CHECK(pool.GetConflictTx(first->vin[0].prevout) == first.get());
+            BOOST_CHECK(!pool.GetZDAGConflict(first->vin[0].prevout).has_value());
+            BOOST_CHECK(pool.IsZDAGVerificationIncomplete());
+        }
+        BOOST_CHECK_EQUAL(ZdagMempoolTestAccess::Conflicts(pool).size(), retained_outpoints.size());
+        for (const auto& outpoint : retained_outpoints) {
+            BOOST_CHECK(pool.GetZDAGConflict(outpoint).has_value());
+        }
+        previous_parent = parent;
+    }
+    BOOST_CHECK_EQUAL(ZdagMempoolTestAccess::Conflicts(pool).size(), capacity);
+    BOOST_CHECK(!pool.HasZDAGConflictCapacity(1));
+    pool.check(m_node.chainman->ActiveChainstate().CoinsTip(), 111);
 }
 BOOST_AUTO_TEST_SUITE_END()

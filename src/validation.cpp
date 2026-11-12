@@ -357,7 +357,8 @@ bool CheckSequenceLocksAtTip(CBlockIndex* tip,
 // Returns the script flags which should be checked for a given block
 static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
 
-static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache)
+static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache,
+                             size_t reserved_bytes = 0)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, pool.cs)
 {
     AssertLockHeld(::cs_main);
@@ -368,7 +369,8 @@ static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache)
     }
 
     std::vector<COutPoint> vNoSpendsRemaining;
-    pool.TrimToSize(pool.m_max_size_bytes, &vNoSpendsRemaining);
+    const size_t max_size{static_cast<size_t>(std::max<int64_t>(0, pool.m_max_size_bytes))};
+    pool.TrimToSize(max_size - std::min(max_size, reserved_bytes), &vNoSpendsRemaining);
     for (const COutPoint& removed : vNoSpendsRemaining)
         coins_cache.Uncache(removed);
 }
@@ -841,6 +843,33 @@ private:
                                         reservation.first_seen);
         }
         m_package_zdag_conflicts.clear();
+    }
+
+    std::set<COutPoint> PendingZDAGConflictOutpoints() const EXCLUSIVE_LOCKS_REQUIRED(m_pool.cs)
+    {
+        std::set<COutPoint> outpoints;
+        for (const auto& reservation : m_package_zdag_conflicts) {
+            if (m_pool.exists(GenTxid::Txid(reservation.txid)) &&
+                !m_pool.GetZDAGConflict(reservation.outpoint)) {
+                outpoints.insert(reservation.outpoint);
+            }
+        }
+        return outpoints;
+    }
+
+    bool CheckZDAGConflictCapacity(const ATMPArgs& args, Workspace& ws,
+                                   std::set<COutPoint>& reservations)
+        EXCLUSIVE_LOCKS_REQUIRED(m_pool.cs)
+    {
+        for (const auto& [outpoint, first_seen] : ws.m_zdag_conflicts) {
+            if (!m_pool.GetZDAGConflict(outpoint)) reservations.insert(outpoint);
+        }
+        if (m_pool.HasZDAGConflictCapacity(reservations.size())) return true;
+        // Only authenticated real admissions can make verification incomplete.
+        // Test-only and invalid transactions must not change warning state.
+        if (!args.m_test_accept) m_pool.MarkZDAGVerificationIncomplete();
+        return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                                   "zdag-conflict-evidence-full");
     }
 
 private:
@@ -1354,6 +1383,9 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     TxValidationState& state = ws.m_state;
     const bool bypass_limits = args.m_bypass_limits;
 
+    auto zdag_reservations{PendingZDAGConflictOutpoints()};
+    if (!CheckZDAGConflictCapacity(args, ws, zdag_reservations)) return false;
+
     std::unique_ptr<CTxMemPoolEntry>& entry = ws.m_entry;
     // Remove conflicting transactions from the mempool
     for (CTxMemPool::txiter it : ws.m_all_conflicting)
@@ -1404,7 +1436,8 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     // in the package. LimitMempoolSize() should be called at the very end to make sure the mempool
     // is still within limits and package submission happens atomically.
     if (!args.m_package_submission && !bypass_limits) {
-        LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+        LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip(),
+                         m_pool.ZDAGConflictMemoryUsage(zdag_reservations.size()));
         if (!m_pool.exists(GenTxid::Txid(hash)))
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
     }
@@ -1519,6 +1552,10 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     // Tx was accepted, but not added
     if (args.m_test_accept) {
         assert(ws.m_special_tx_auth_checked);
+        auto zdag_reservations{PendingZDAGConflictOutpoints()};
+        if (!CheckZDAGConflictCapacity(args, ws, zdag_reservations)) {
+            return MempoolAcceptResult::Failure(ws.m_state);
+        }
         return MempoolAcceptResult::Success(std::move(ws.m_replaced_transactions), ws.m_vsize,
                                             ws.m_base_fees, effective_feerate, single_wtxid);
     }
@@ -1654,6 +1691,17 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         }
     }
 
+    // Reserve the whole authenticated subpackage before any member is inserted.
+    // Previously accepted subpackages may still have deferred conflict records.
+    auto zdag_reservations{PendingZDAGConflictOutpoints()};
+    for (Workspace& ws : workspaces) {
+        if (!CheckZDAGConflictCapacity(args, ws, zdag_reservations)) {
+            SetPackageTransactionError(package_state, ws.m_state);
+            results.erase(ws.m_ptx->GetWitnessHash());
+            results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
+            return PackageMempoolAcceptResult(package_state, std::move(results));
+        }
+    }
     if (args.m_test_accept) return PackageMempoolAcceptResult(package_state, std::move(results));
 
     if (!SubmitPackage(args, workspaces, package_state, results)) {
@@ -1845,7 +1893,8 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
 
     // Make sure we haven't exceeded max mempool size.
     // Package transactions that were submitted to mempool or already in mempool may be evicted.
-    LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+    LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip(),
+                     m_pool.ZDAGConflictMemoryUsage(PendingZDAGConflictOutpoints().size()));
     PublishPackageZDAGConflicts();
 
     for (const auto& tx : package) {

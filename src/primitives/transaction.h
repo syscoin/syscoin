@@ -85,7 +85,8 @@ enum {
 	ZDAG_WARNING_RBF,
     ZDAG_WARNING_NOT_ZDAG_TX,
     ZDAG_WARNING_SIZE_OVER_POLICY,
-	ZDAG_MAJOR_CONFLICT
+	ZDAG_MAJOR_CONFLICT,
+    ZDAG_WARNING_VERIFICATION_INCOMPLETE
 };
 
 /** An outpoint - a combination of a transaction hash and an index n into its vout */

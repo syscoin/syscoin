@@ -549,6 +549,8 @@ CTxMemPool::CTxMemPool(const Options& opts)
       m_full_rbf{opts.full_rbf},
       m_limits{opts.limits}
 {
+    m_max_zdag_conflicts = static_cast<size_t>(std::max<int64_t>(0, opts.max_size_bytes)) /
+        10 / memusage::IncrementalDynamicUsage(mapAssetAllocationConflicts);
 }
 
 bool CTxMemPool::isSpent(const COutPoint& outpoint) const
@@ -1093,6 +1095,33 @@ std::optional<std::pair<uint256, uint256>> CTxMemPool::GetZDAGConflict(const COu
         : std::make_optional(it->second);
 }
 
+bool CTxMemPool::HasZDAGConflictCapacity(size_t additional) const
+{
+    AssertLockHeld(cs);
+    return mapAssetAllocationConflicts.size() <= m_max_zdag_conflicts &&
+        additional <= m_max_zdag_conflicts - mapAssetAllocationConflicts.size();
+}
+
+size_t CTxMemPool::ZDAGConflictMemoryUsage(size_t count) const
+{
+    AssertLockHeld(cs);
+    return count * memusage::IncrementalDynamicUsage(mapAssetAllocationConflicts);
+}
+
+void CTxMemPool::MarkZDAGVerificationIncomplete()
+{
+    AssertLockHeld(cs);
+    // An authenticated conflict was not retained. Free capacity later cannot
+    // establish that all such conflicts have resolved, so this is process-wide.
+    m_zdag_verification_incomplete = true;
+}
+
+bool CTxMemPool::IsZDAGVerificationIncomplete() const
+{
+    AssertLockHeld(cs);
+    return m_zdag_verification_incomplete;
+}
+
 void CTxMemPool::RegisterZDAGConflict(const COutPoint& outpoint,
                                      const uint256& txid, const uint256& first_seen)
 {
@@ -1117,6 +1146,7 @@ void CTxMemPool::RegisterZDAGConflict(const COutPoint& outpoint,
     assert(incumbent == mapTx.end() || spends(incumbent->GetTx()));
     // The incumbent was accepted when PreChecks staged its identity. Its
     // eviction during trimming cannot erase the observed double-spend warning.
+    assert(HasZDAGConflictCapacity(1));
     const bool inserted{mapAssetAllocationConflicts.try_emplace(
         outpoint, txid, first_seen).second};
     assert(inserted);
