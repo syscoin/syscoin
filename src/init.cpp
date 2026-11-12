@@ -2896,6 +2896,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 const std::string truncated_bind_arg = bind_arg.substr(0, index);
                 bind_addr = Lookup(truncated_bind_arg, BaseParams().OnionServiceTargetPort(), false);
                 if (bind_addr.has_value()) {
+                    // Accepted sockets expose a concrete local address, so a wildcard
+                    // cannot identify this listener for onion permission handling.
+                    if (bind_addr->IsBindAny()) {
+                        return InitError(strprintf(_("Cannot use a wildcard address for -bind=%s. Use a concrete address for an onion bind."), bind_arg));
+                    }
                     connOptions.onion_binds.push_back(bind_addr.value());
                     continue;
                 }

@@ -90,10 +90,20 @@ class P2PPermissionsTests(SyscoinTestFramework):
         self.nodes[1].assert_start_raises_init_error(["-whitelist=noban@127.0.0.1:230"], "Invalid netmask specified in", match=ErrorMatch.PARTIAL_REGEX)
         self.nodes[1].assert_start_raises_init_error(["-whitebind=noban@127.0.0.1/10"], "Cannot resolve -whitebind address", match=ErrorMatch.PARTIAL_REGEX)
         self.nodes[1].assert_start_raises_init_error(["-whitebind=noban@127.0.0.1", "-bind=127.0.0.1", "-listen=0"], "Cannot set -bind or -whitebind together with -listen=0", match=ErrorMatch.PARTIAL_REGEX)
+        for address in ("0.0.0.0", "[::]"):
+            for listenonion in (0, 1):
+                bind = f"{address}:{p2p_port(2)}=onion"
+                self.nodes[1].assert_start_raises_init_error(
+                    [f"-bind={bind}", f"-listenonion={listenonion}"],
+                    f"Error: Cannot use a wildcard address for -bind={bind}. Use a concrete address for an onion bind.",
+                )
 
     def check_onion_permissions(self):
         node = self.nodes[1]
         normal_port, onion_port, whitebind_port = [p2p_port(i) for i in (1, 2, 3)]
+        # Wildcard ordinary binds remain valid alongside a concrete onion bind
+        # and an explicit whitebind; only wildcard onion binds are rejected.
+        node.replace_in_config([("bind=127.0.0.1", "bind=0.0.0.0")])
         for whitelist, expected in (
             ("127.0.0.1", {"relay", "noban", "mempool", "download"}),
             ("noban,mempool@127.0.0.1", {"noban", "mempool", "download"}),
@@ -110,6 +120,7 @@ class P2PPermissionsTests(SyscoinTestFramework):
             assert_equal(peers[onion_port]["network"], "onion")
             assert_equal(peers[onion_port]["permissions"], [])
             assert_equal(set(peers[whitebind_port]["permissions"]), expected | {"bloomfilter"})
+        node.replace_in_config([("bind=0.0.0.0", "bind=127.0.0.1")])
 
     def check_tx_relay(self):
         self.log.debug("Create a connection from a forcerelay peer that rebroadcasts raw txs")
