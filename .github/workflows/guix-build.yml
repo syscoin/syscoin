@@ -6,6 +6,12 @@ permissions:
 on:
   push:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: Rebuild the builder image and skip restored build caches
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build-image:
@@ -16,6 +22,7 @@ jobs:
     outputs:
       image-tag: ${{ steps.prepare.outputs.image-tag }}
       repo-name: ${{ steps.prepare.outputs.repo-name }}
+      image-digest: ${{ steps.builder.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -46,6 +53,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image
+        id: builder
         uses: docker/build-push-action@v7
         with:
           context: ${{ github.workspace }}/syscoin
@@ -56,6 +64,7 @@ jobs:
             docker_root=${{ github.workspace }}/syscoin/contrib/containers/guix
           file: ./syscoin/contrib/containers/guix/Dockerfile
           push: true
+          no-cache: ${{ inputs.clean_build == true }}
           tags: |
             ghcr.io/${{ steps.prepare.outputs.repo-name }}/syscoin-guix-builder:${{ steps.prepare.outputs.image-tag }}
             ghcr.io/${{ steps.prepare.outputs.repo-name }}/syscoin-guix-builder:latest
@@ -72,6 +81,8 @@ jobs:
       id-token: write
       attestations: write
     strategy:
+      # SYSCOIN: Retain every release target's result after a dependency failure.
+      fail-fast: false
       matrix:
         build_target: [x86_64-linux-gnu, arm-linux-gnueabihf, aarch64-linux-gnu, riscv64-linux-gnu, powerpc64-linux-gnu, x86_64-w64-mingw32, x86_64-apple-darwin, arm64-apple-darwin]
 
@@ -89,6 +100,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache depends sources
+        if: ${{ inputs.clean_build != true }}
         uses: actions/cache@v6
         with:
           path: syscoin/depends/sources
@@ -97,6 +109,7 @@ jobs:
             depends-sources-
 
       - name: Cache Guix and depends
+        if: ${{ inputs.clean_build != true }}
         id: guix-cache-restore
         uses: actions/cache@v6
         with:
@@ -104,14 +117,13 @@ jobs:
             ${{ github.workspace }}/.cache
             ${{ github.workspace }}/syscoin/depends/built
             ${{ github.workspace }}/syscoin/depends/work
-            /gnu/store
-          key: ${{ runner.os }}-guix-${{ matrix.build_target }}-${{ github.sha }}
+          # SYSCOIN: Build intermediates are specific to the native builder architecture.
+          key: ${{ runner.os }}-${{ runner.arch }}-guix-v2-${{ matrix.build_target }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-guix-${{ matrix.build_target }}
-            ${{ runner.os }}-guix-
+            ${{ runner.os }}-${{ runner.arch }}-guix-v2-${{ matrix.build_target }}-
+            ${{ runner.os }}-${{ runner.arch }}-guix-v2-
 
       - name: Create .cache folder if missing
-        if: steps.guix-cache-restore.outputs.cache-hit != 'true'
         run: mkdir -p .cache
 
       - name: Login to GitHub Container Registry
@@ -121,7 +133,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # SYSCOIN: Use this run's immutable builder image rather than a mutable branch tag.
       - name: Run Guix build
+        id: guix_build
         timeout-minutes: 480
         run: |
           docker run --privileged -d --rm -t \
@@ -129,8 +143,28 @@ jobs:
             -v ${{ github.workspace }}/syscoin:/src/syscoin \
             -v ${{ github.workspace }}/.cache:/home/ubuntu/.cache \
             -w /src/syscoin \
-            ghcr.io/${{ needs.build-image.outputs.repo-name }}/syscoin-guix-builder:${{ needs.build-image.outputs.image-tag }} && \
+            ghcr.io/${{ needs.build-image.outputs.repo-name }}/syscoin-guix-builder@${{ needs.build-image.outputs.image-digest }} && \
           docker exec guix-daemon bash -c 'HOSTS=${{ matrix.build_target }} /usr/local/bin/guix-start /src/syscoin'
+
+      # SYSCOIN: Preserve the dependency builder's error before its container is discarded.
+      - name: Collect failed Guix dependency logs
+        if: ${{ failure() && steps.guix_build.outcome == 'failure' }}
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/guix-logs"
+          docker inspect --format '{{.Image}}' guix-daemon > "$RUNNER_TEMP/guix-logs/image-id.txt" 2>&1 || true
+          docker logs guix-daemon > "$RUNNER_TEMP/guix-logs/container.log" 2>&1 || true
+          docker cp guix-daemon:/var/log/guix.log "$RUNNER_TEMP/guix-logs/daemon.log" || true
+          docker cp guix-daemon:/var/log/guix/drvs "$RUNNER_TEMP/guix-logs/derivations" || true
+
+      - name: Upload failed Guix dependency logs
+        if: ${{ failure() && steps.guix_build.outcome == 'failure' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: guix-failure-logs-${{ matrix.build_target }}
+          path: ${{ runner.temp }}/guix-logs
+          if-no-files-found: warn
 
       - name: Ensure build passes
         run: |
