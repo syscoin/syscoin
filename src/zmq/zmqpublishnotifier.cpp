@@ -512,19 +512,7 @@ bool CZMQPublishNEVMBlockInfoNotifier::NotifyGetNEVMBlockInfo(uint64_t &nHeight,
     }
     std::vector<std::string> parts;
     if(ReceiveZmqMessage(parts)) {
-        if(parts.size() != 2) {
-            state = "nevm-response-invalid-parts";
-            return false;
-        }
-        if(parts[0] != MSG_NEVMBLOCKINFO) {
-            state = "nevm-response-wrong-command";
-            return false;
-        }
-        if(!ParseUInt64(parts[1], &nHeight)) {
-            state = "nevm-response-unserialize";
-            return false;
-        }
-            
+        return ParseNEVMBlockInfoResponse(parts, nHeight, state);
     } else {
         state = "nevm-response-not-found";
         return false;
