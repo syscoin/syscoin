@@ -22,6 +22,7 @@ public:
 
     private Q_SLOTS:
     void rpcNestedTests();
+    void rpcPQProviderHistoryFilter();
 };
 
 #endif // SYSCOIN_QT_TEST_RPCNESTEDTESTS_H

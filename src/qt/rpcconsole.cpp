@@ -71,6 +71,13 @@ namespace {
 const QStringList historyFilter = QStringList()
     << "importprivkey"
     << "importpqkey" // SYSCOIN: portable PQ records contain private keys.
+    // SYSCOIN: Provider RPC arguments include SLH signing keys and child seeds.
+    << "protx_register_operator_key"
+    << "protx_register_operator_prepare"
+    << "protx_rotate_operator_key"
+    << "protx_recovery_ready"
+    << "protx_update_service"
+    << "protx_revoke"
     << "importmulti"
     << "sethdseed"
     << "signmessagewithprivkey"

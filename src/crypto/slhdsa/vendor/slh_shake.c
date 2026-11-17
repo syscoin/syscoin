@@ -173,7 +173,11 @@ static void shake_chain(slh_var_t *var, uint8_t *tmp, const uint8_t *x,
 
   if (s == 0)
   { /* no-op */
-    memcpy(tmp, x, n);
+    /* SYSCOIN: WOTS signing may pass the same buffer for input and output. */
+    if (tmp != x)
+    {
+      memcpy(tmp, x, n);
+    }
     return;
   }
 

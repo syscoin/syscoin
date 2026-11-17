@@ -18,10 +18,10 @@ or reconstructed-state checkpoint.
 The design fixes the following decisions:
 
 - Existing masternodes may migrate their ECDSA owner authority to an independent
-  SLH owner key from preparation onward. Active SLH owner and voting keys are
-  required for payment eligibility at activation. New registrations at and
-  above activation require an SLH owner key. The separate owner-delegated PQ
-  voting key controls proposal funding votes, not ownership. Collateral and
+  SLH owner key from preparation onward. Active SLH owner and PQ voting records
+  are required for payment eligibility at activation. New registrations at and
+  above activation require an SLH owner key. The owner-delegated PQ voting role
+  controls proposal funding votes. Collateral and
   ordinary coin spending retain their existing rules; this is not a complete
   post-quantum conversion of every Syscoin authorization path.
 - Each deterministic masternode has a long-lived global
@@ -177,16 +177,21 @@ reuse `CHILD_SCHEDULED_WOTS_SHAKE_128_V1` with a wider authorized domain.
 ### 3.1 Owner authority and migration
 
 Ownership, delegated voting, and operator authority are distinct roles. Each
-has its own signing domain and independent wallet or operator secret. The
+has its own signing domain and key record. The
 collateral outpoint remains the base masternode identity and retains its
 existing spending rules. The legacy voting identifier remains serialized for
 historical replay, but is not accepted as proposal funding authority after
 activation.
 
+Consensus does not require the owner and voting public keys to differ. Use
+separate secrets for meaningful voting delegation. Reusing the owner key for
+voting lets the voting secret holder sign owner authorizations, regardless of
+local wallet-role labels. Separate signing domains do not prevent this reuse.
+
 Existing masternodes keep their ECDSA owner authority until the owner explicitly
 migrates it. Migration is available from the configured preparation height `P`
-onward. At `A`, nodes without both an active SLH owner and an independent PQ
-voting key become payment-ineligible; late enrollment restores eligibility
+onward. At `A`, nodes without both an active SLH owner record and an active PQ
+voting record become payment-ineligible; late enrollment restores eligibility
 when all other payment requirements are met. It does not replace or revoke
 the operator key or child commitment.
 Operator preparation and its cutoff schedule remain separate. New registrations in block `A` or later
@@ -225,14 +230,14 @@ deterministic masternode state.
 
 After migration there is no ECDSA owner fallback. Payout changes, voting
 delegation, owner rotation, and owner-authorized operator bootstrap/recovery
-require the active SLH owner key and version. A voting-only wallet cannot
-exercise these permissions. Collateral spending and re-registration remain
+require the active SLH owner key and version. A wallet holding only a separate
+voting key cannot exercise these permissions. Collateral spending and re-registration remain
 outside this owner-key protection until collateral itself is migrated.
 
 The wallet encrypts owner secrets with its other private material and preserves
 them in `backupwallet`/`restorewallet`. Legacy `dumpwallet`/`importwallet` use a
-separate `pqownerkey=` record, so importing a voting key does not create owner
-authority. Dumps contain unencrypted secrets and must be kept private. Older
+separate `pqownerkey=` record, so importing a voting key does not add a local
+owner role. Dumps contain unencrypted secrets and must be kept private. Older
 wallet backups and descriptor-only exports do not recover these new keys.
 
 The same wallet RPCs manage owner and voting keys in descriptor and legacy
@@ -255,7 +260,7 @@ works while the wallet is locked and does not reveal private material.
 `syspqkey1:` record containing its private material and roles. Treat the entire
 record as a private key; it is unencrypted. `importpqkey` validates the complete
 record before changing the wallet and restores its encoded roles. Importing a
-voting-only record does not grant owner authority or import unrelated wallet
+voting-only record does not add a local owner role or import unrelated wallet
 keys. Both commands require an encrypted wallet to be unlocked, and importing
 private material is unavailable to wallets with private keys disabled or
 external signers.
@@ -269,9 +274,9 @@ In the legacy protocol, `ProRegTx.pubKeyOperator` stored the BLS operator
 public key and an owner-signed `ProUpRegTx` could replace it. After the PQ
 preparation boundary, both PQ `ProRegTx` and `ProUpRegTx` require that legacy
 field to be null. The owner-signed registrar update controls owner migration
-and rotation, the separate PQ voting key, and payout metadata; it cannot rotate
+and rotation, the PQ voting record, and payout metadata; it cannot rotate
 the global PQ operator key. Before activation only the owner-change operation
-is available, optionally enrolling the independent voting key, with the other
+is available, optionally enrolling the voting key, with the other
 historical metadata preserved.
 The first tx86 record is the explicit owner-authorized bootstrap, with a
 proof-of-possession by the new SLH key. Subsequent active-key rotation is tx86
@@ -370,7 +375,7 @@ follows FIPS 205 exactly.
 
 ### 3.2.1 Independent proposal funding key
 
-Proposal `FUNDING` votes use a distinct FIPS 205 SLH-DSA-SHAKE-128s key held by
+Proposal `FUNDING` votes use the registered FIPS 205 SLH-DSA-SHAKE-128s key held by
 the owner or their voting delegate. The operator key cannot authorize those
 votes. Proposal `VALID`, `DELETE`, and `ENDORSED` votes, and every trigger vote,
 remain operator-authorized. The parent object's type determines the signing
@@ -422,7 +427,7 @@ These changes belong to the same scheduled PQ activation. Deploy the upgraded
 software before height `A`; it replays legacy blocks below `A` and enforces the
 new rules at `A`. Existing pre-journal datadirs require a one-time reindex to
 build the inverse history; this journal is not an existing mainnet format.
-Existing masternode owners must register their separate voting key, either
+Existing masternode owners must register their voting key, either
 together with ownership during preparation or through a PQ registrar update
 after activation. Pre-activation ECDSA funding votes stop counting
 at the boundary and must be recast with that key. The wallet signer waits six
@@ -431,7 +436,7 @@ blocks after key registration so its signing-block anchor includes the key.
 PQ funding signatures protect the voting role independently of ownership. An
 unmigrated ECDSA owner can still change the delegated voting key. After explicit
 owner migration, that registrar permission requires the SLH owner key; possession
-of the voting secret alone never grants it.
+of a separate voting secret alone does not grant it.
 
 ### 3.3 Scheduled Merkle-WOTS+ child key
 
@@ -2826,8 +2831,8 @@ Expected failures are fail-closed:
   1,152-block delay.
 - Preparation owner migration preserves historical operator/voting/payout
   state; migrated owners cannot fall back to ECDSA. At activation, root-bearing
-  nodes without both an SLH owner and independent PQ voting key are excluded
-  from payments, including the audit fallback; late enrollment restores
+  nodes without both an active SLH owner record and an active PQ voting record
+  are excluded from payments, including the audit fallback; late enrollment restores
   eligibility without replacing roots.
 - Independent provider and unfunded owner wallets complete prepare/decode/sign/
   submit for both ECDSA and SLH owners. Mutated requests or outputs, wrong

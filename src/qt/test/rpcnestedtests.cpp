@@ -38,6 +38,28 @@ static const CRPCCommand vRPCCommands[] = {
     {"rpcNestedTest", &rpcNestedTest_rpc},
 };
 
+void RPCNestedTests::rpcPQProviderHistoryFilter()
+{
+    std::string result;
+    std::string filtered;
+    for (const char* method : {
+             "protx_register_operator_key", "protx_register_operator_prepare",
+             "protx_rotate_operator_key", "protx_recovery_ready",
+             "protx_update_service", "protx_revoke"}) {
+        const QString name{QString::fromLatin1(method)};
+        const QString command{name + " operator-secret chainlock-seed"};
+        QVERIFY(RPCConsole::RPCParseCommandLine(nullptr, result, command.toStdString(), false, &filtered));
+        QCOMPARE(QString::fromStdString(filtered), name + "(…)");
+        const QString nested{"help(" + name.toUpper() + "(operator-secret,chainlock-seed))"};
+        QVERIFY(RPCConsole::RPCParseCommandLine(nullptr, result, nested.toStdString(), false, &filtered));
+        QCOMPARE(QString::fromStdString(filtered), "help(" + name.toUpper() + "(…))");
+    }
+    // Owner enrollment takes public keys.
+    const std::string public_command{"protx_update_owner protx owner-public-key"};
+    QVERIFY(RPCConsole::RPCParseCommandLine(nullptr, result, public_command, false, &filtered));
+    QCOMPARE(QString::fromStdString(filtered), QString::fromStdString(public_command));
+}
+
 void RPCNestedTests::rpcNestedTests()
 {
     // do some test setup
