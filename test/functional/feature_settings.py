@@ -50,6 +50,26 @@ class SettingsTest(SyscoinTestFramework):
         with settings.open() as fp:
             assert_equal(json.load(fp), {"string": "string", "num": 5, "bool": True, "null": None, "list": [6, 7]})
 
+        # Redact operator credentials even when a higher-priority option overrides
+        # the JSON value or startup rejects the credentials.
+        with settings.open("w") as fp:
+            json.dump({
+                "masternodeslhprivkey": "test-only-operator-key",
+                "masternodechainlockseed": "test-only-seed",
+                "regtest.nomasternodechainlockseed": ["test-only-scoped-seed"],
+            }, fp)
+        with node.assert_debug_log(expected_msgs=[
+                "Setting file arg: masternodeslhprivkey = ****",
+                "Setting file arg: masternodechainlockseed = ****",
+                "Setting file arg: regtest.nomasternodechainlockseed = ****",
+                "Warning: parsed potentially confusing double-negative -masternodechainlockseed=****",
+        ], unexpected_msgs=["test-only-operator-key", "test-only-seed", "test-only-scoped-seed", "test-only-negated-seed"]):
+            node.assert_start_raises_init_error(
+                extra_args=["-nomasternodechainlockseed=test-only-negated-seed"],
+                expected_msg="Invalid masternodechainlockseed",
+                match=ErrorMatch.PARTIAL_REGEX,
+            )
+
         # Test invalid json
         with settings.open("w") as fp:
             fp.write("invalid json")

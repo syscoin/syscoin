@@ -116,7 +116,8 @@ std::optional<common::SettingsValue> InterpretValue(const KeyInfo& key, const st
         }
         // Double negatives like -nofoo=0 are supported (but discouraged)
         if (value && !InterpretBool(*value)) {
-            LogPrintf("Warning: parsed potentially confusing double-negative -%s=%s\n", key.name, *value);
+            LogPrintf("Warning: parsed potentially confusing double-negative -%s=%s\n", key.name,
+                      (flags & ArgsManager::SENSITIVE) ? "****" : *value);
             return true;
         }
         return false;
@@ -807,8 +808,10 @@ void ArgsManager::LogArgs() const
     for (const auto& section : m_settings.ro_config) {
         logArgsPrefix("Config file arg:", section.first, section.second);
     }
-    for (const auto& setting : m_settings.rw_settings) {
-        LogPrintf("Setting file arg: %s = %s\n", setting.first, setting.second.write());
+    for (const auto& [name, value] : m_settings.rw_settings) {
+        const auto flags = GetArgFlags('-' + InterpretKey(name).name);
+        LogPrintf("Setting file arg: %s = %s\n", name,
+                  (flags.value_or(0) & SENSITIVE) ? "****" : value.write());
     }
     logArgsPrefix("Command-line arg:", "", m_settings.command_line_options);
 }
