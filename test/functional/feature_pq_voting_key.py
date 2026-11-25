@@ -55,6 +55,8 @@ class PQVotingKeyTest(DashTestFramework):
             self.mn.proTxHash, "", public_key, "", fee_address)
         if check_fee_bump:
             self.log.info("Provider fee bumps fail before changing wallet replacement state")
+            # Wait for the mempool notification to add the transaction to the wallet.
+            owner.syncwithvalidationinterfacequeue()
             original = owner.gettransaction(txid)
             assert_equal(original["bip125-replaceable"], "yes")
             decoded = owner.decoderawtransaction(original["hex"])
