@@ -11529,8 +11529,6 @@ BOOST_FIXTURE_TEST_CASE(published_rotate_fallback_survives_real_mnauth_and_tip_c
     }
     const bool original_mode{fMasternodeMode};
     const int original_sync{masternodeSync.GetAssetID()};
-    auto* original_handler{llmq::chainLocksHandler};
-    auto* original_overlay{llmq::pqQuorumConnectionOverlay};
     decltype(common::Settings{}.forced_settings) original_args;
     gArgs.LockSettings([&](const common::Settings& settings) { original_args = settings.forced_settings; });
     std::vector<CNode*> registered_peers;
@@ -11548,16 +11546,12 @@ BOOST_FIXTURE_TEST_CASE(published_rotate_fallback_survives_real_mnauth_and_tip_c
         decltype(common::Settings{}.forced_settings)& args;
         bool mode;
         int sync_mode;
-        llmq::CChainLocksHandler* handler;
-        llmq::CPQQuorumConnectionOverlay* overlay;
         ~Restore() {
             SyncWithValidationInterfaceQueue();
             for (auto* peer : peers) peerman.FinalizeNode(*peer);
             connman.ClearTestNodes();
             // VERSION adds a global clock sample even for this test peer.
             TestOnlyResetTimeData();
-            llmq::chainLocksHandler = handler;
-            llmq::pqQuorumConnectionOverlay = overlay;
             WITH_LOCK(::cs_main, chainman.ActiveChainstate().m_chain.SetTip(*tip));
             deterministicMNManager = std::move(manager);
             sporkManager = std::move(sporks);
@@ -11570,7 +11564,7 @@ BOOST_FIXTURE_TEST_CASE(published_rotate_fallback_survives_real_mnauth_and_tip_c
         }
     } restore{chainman, connman, peerman, consensus, original_consensus, original_tip,
               original_manager, original_sporks, original_identity, registered_peers,
-              original_args, original_mode, original_sync, original_handler, original_overlay};
+              original_args, original_mode, original_sync};
 
     consensus.DIP0003Height = PREPARATION_HEIGHT - 1;
     consensus.DIP0003EnforcementHeight = PREPARATION_HEIGHT - 1;
@@ -11797,7 +11791,19 @@ BOOST_FIXTURE_TEST_CASE(published_rotate_fallback_survives_real_mnauth_and_tip_c
     std::unique_ptr<llmq::CChainLocksHandler> handler;
     WITH_LOCK(::cs_main, handler = std::make_unique<llmq::CChainLocksHandler>(connman, peerman, chainman));
     handler->SetQuorumRosterCache(cache);
-    llmq::chainLocksHandler = handler.get();
+    std::unique_ptr<llmq::CPQQuorumConnectionOverlay> overlay;
+    // Restore the globals before either fixture object is destroyed.
+    struct RestoreLLMQ {
+        llmq::CChainLocksHandler* handler;
+        llmq::CPQQuorumConnectionOverlay* overlay;
+        ~RestoreLLMQ()
+        {
+            SyncWithValidationInterfaceQueue();
+            llmq::pqQuorumConnectionOverlay = overlay;
+            llmq::chainLocksHandler = handler;
+        }
+    } restore_llmq{std::exchange(llmq::chainLocksHandler, handler.get()),
+                   llmq::pqQuorumConnectionOverlay};
     const auto* config{Access::Config(*handler)};
     BOOST_REQUIRE(config);
     FullReceiptCatchupContext store_context;
@@ -11957,9 +11963,10 @@ BOOST_FIXTURE_TEST_CASE(published_rotate_fallback_survives_real_mnauth_and_tip_c
     BOOST_REQUIRE_MESSAGE(durable->PersistBest(parent, parent_context, &persistence_error, std::nullopt, universe),
         "parent persistence error=" << persistence_error_name(persistence_error));
     BOOST_REQUIRE(durable->GetFinalityState().best == store->GetBestRecord()->metadata);
-    llmq::CPQQuorumConnectionOverlay overlay{connman, cache, [&] { return handler->GetBestChainLock()->statement.height; },
-        config->btcc_schedule, [&](const llmq::PQShareRelayFallbackKey& key) { return handler->IsCurrentChainLockRelaySource(key); }};
-    llmq::pqQuorumConnectionOverlay = &overlay;
+    overlay = std::make_unique<llmq::CPQQuorumConnectionOverlay>(connman, cache,
+        [&] { return handler->GetBestChainLock()->statement.height; }, config->btcc_schedule,
+        [&](const llmq::PQShareRelayFallbackKey& key) { return handler->IsCurrentChainLockRelaySource(key); });
+    llmq::pqQuorumConnectionOverlay = overlay.get();
     sporkManager = std::make_unique<CSporkManager>();
     const std::string spork_secret{"cVpF924EspNh8KjYsfhgY96mmxvT6DgdWiTYMtMjuM74hJaU5psW"};
     const auto spork_key{DecodeSecret(spork_secret)};
