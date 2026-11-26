@@ -76,11 +76,11 @@ jobs:
             run_functional_tests: 'false'
             unit_tests_shard: 'registry-population'
             pq_crypto_workers: '4'
-          # Keep the stateful integration test intact, with no concurrent native
-          # sources competing for its workers. Runtime remains runner-dependent.
+          # Observed key-generation rates project over four hours including
+          # the build on slower runners.
           - name: ASan + LSan + UBSan (native chainlock integration)
             file_env: ./ci/test/00_setup_env_native_asan.sh
-            timeout: 240
+            timeout: 300
             run_unit_tests: 'true'
             run_functional_tests: 'false'
             unit_tests_shard: 'chainlock-integration'
